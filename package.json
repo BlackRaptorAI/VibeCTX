@@ -1,0 +1,46 @@
+{
+  "name": "@blackraptorai/docs-cache-mcp",
+  "version": "0.1.0",
+  "description": "Local docs-cache MCP server — fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Tom Hanks (BlackRaptor AI)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/BlackRaptorAI/docs-cache-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "documentation",
+    "llms.txt",
+    "claude",
+    "coding-agents",
+    "offline"
+  ],
+  "bin": {
+    "docs-cache-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
