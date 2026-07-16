@@ -39,10 +39,12 @@ export function readCache(
   if (!existsSync(contentPath) || !existsSync(metaPath)) return undefined;
   const meta = JSON.parse(readFileSync(metaPath, "utf8")) as CacheMeta;
   const ageMs = Date.now() - new Date(meta.fetchedAt).getTime();
+  // >= so a TTL of 0 means "expire immediately" even when written and read
+  // within the same millisecond.
   return {
     content: readFileSync(contentPath, "utf8"),
     meta,
-    stale: ageMs > ttlHours * 3600_000,
+    stale: ageMs >= ttlHours * 3600_000,
   };
 }
 
