@@ -20,7 +20,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          registry-url: https://registry.npmjs.org
+          # NOTE: no registry-url here — it writes a token-based .npmrc whose
+          # placeholder NODE_AUTH_TOKEN preempts the OIDC trusted-publishing
+          # exchange (observed: provenance signed, then PUT 404'd on bad auth).
+      - run: npm install -g npm@latest # bundled npm predates trusted publishing
       - run: npm ci
       - run: npm run lint
       - run: npm test
