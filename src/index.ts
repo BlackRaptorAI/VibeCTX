@@ -86,7 +86,7 @@ server.registerTool(
     const followed: string[] = [];
     if (looksLikeIndex(doc.content)) {
       for (const link of rankLinks(doc.content, topic, 3)) {
-        const page = await getLinkedPage(entry.name, link.url, entry.ttlHours);
+        const page = await getLinkedPage(entry.name, link.url, doc.url, entry.ttlHours);
         if (page) {
           corpus += `\n\n# ${link.title}\n\n${page.content}`;
           followed.push(link.url);

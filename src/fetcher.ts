@@ -1,5 +1,5 @@
 import type { LibraryEntry } from "./registry.js";
-import { readCache, writeCache } from "./cache.js";
+import { readCache, writeCache, touchCache } from "./cache.js";
 
 export interface DocResult {
   content: string;
@@ -10,31 +10,46 @@ export interface DocResult {
 
 const DEFAULT_TTL_HOURS = 168; // 7 days
 
-async function fetchUrl(url: string): Promise<string | undefined> {
+interface FetchOutcome {
+  status: "ok" | "not-modified" | "miss";
+  body?: string;
+  etag?: string;
+}
+
+async function fetchUrl(url: string, etag?: string): Promise<FetchOutcome> {
   try {
+    const headers: Record<string, string> = {
+      "user-agent":
+        "docs-cache-mcp/0.1 (+https://github.com/BlackRaptorAI/docs-cache-mcp)",
+    };
+    if (etag) headers["if-none-match"] = etag;
     const res = await fetch(url, {
-      headers: { "user-agent": "docs-cache-mcp/0.1 (+https://github.com/BlackRaptorAI/docs-cache-mcp)" },
+      headers,
       redirect: "follow",
       signal: AbortSignal.timeout(20_000),
     });
-    if (!res.ok) return undefined;
+    if (res.status === 304) return { status: "not-modified" };
+    if (!res.ok) return { status: "miss" };
     const type = res.headers.get("content-type") ?? "";
-    // llms.txt and raw markdown are text; reject binary/HTML-only responses of trivial size.
     const body = await res.text();
     if (type.includes("text/html") && !url.endsWith(".md")) {
       // Some sites serve their 404 page with 200; a real llms.txt is plain text.
-      if (body.slice(0, 500).toLowerCase().includes("<!doctype html")) return undefined;
+      if (body.slice(0, 500).toLowerCase().includes("<!doctype html")) {
+        return { status: "miss" };
+      }
     }
-    return body.trim().length > 0 ? body : undefined;
+    if (body.trim().length === 0) return { status: "miss" };
+    return { status: "ok", body, etag: res.headers.get("etag") ?? undefined };
   } catch {
-    return undefined;
+    return { status: "miss" };
   }
 }
 
 /**
  * Resolve a library's primary document: probe candidate URLs in order,
- * serving from cache within TTL, refreshing when stale, and serving stale
- * content (flagged) when the network is unavailable.
+ * serving from cache within TTL, revalidating with If-None-Match when stale
+ * (a 304 refreshes the TTL without re-downloading), and serving stale content
+ * (flagged) when the network is unavailable.
  */
 export async function getLibraryDoc(
   entry: LibraryEntry,
@@ -49,12 +64,18 @@ export async function getLibraryDoc(
     }
   }
 
-  // Cache miss, stale, or forced: try the network in candidate order.
+  // Cache miss, stale, or forced: try the network in candidate order,
+  // revalidating against any cached etag first.
   for (const url of entry.urls) {
-    const body = await fetchUrl(url);
-    if (body !== undefined) {
-      writeCache(entry.name, url, body);
-      return { content: body, url };
+    const cached = readCache(entry.name, url, ttl);
+    const out = await fetchUrl(url, cached?.meta.etag);
+    if (out.status === "not-modified" && cached) {
+      touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
+      return { content: cached.content, url };
+    }
+    if (out.status === "ok" && out.body !== undefined) {
+      writeCache(entry.name, url, out.body, out.etag);
+      return { content: out.body, url };
     }
   }
 
@@ -72,18 +93,40 @@ export async function getLibraryDoc(
   return undefined;
 }
 
-/** Fetch a single linked page (for llms.txt index files), cache-backed with the same policy. */
+/**
+ * Guard for followed index links: https-only, and confined to the origin of
+ * the source document. Content-derived URLs are untrusted input — without
+ * this, a compromised docs page could steer fetches at internal endpoints.
+ */
+export function isAllowedLink(linkUrl: string, sourceUrl: string): boolean {
+  try {
+    const link = new URL(linkUrl);
+    const source = new URL(sourceUrl);
+    return link.protocol === "https:" && link.origin === source.origin;
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch a single linked page (for llms.txt index files), cache-backed with the
+ *  same revalidation policy. Rejects links outside the source document's origin. */
 export async function getLinkedPage(
   library: string,
   url: string,
+  sourceUrl: string,
   ttlHours = DEFAULT_TTL_HOURS,
 ): Promise<DocResult | undefined> {
+  if (!isAllowedLink(url, sourceUrl)) return undefined;
   const hit = readCache(library, url, ttlHours);
   if (hit && !hit.stale) return { content: hit.content, url };
-  const body = await fetchUrl(url);
-  if (body !== undefined) {
-    writeCache(library, url, body);
-    return { content: body, url };
+  const out = await fetchUrl(url, hit?.meta.etag);
+  if (out.status === "not-modified" && hit) {
+    touchCache(library, url);
+    return { content: hit.content, url };
+  }
+  if (out.status === "ok" && out.body !== undefined) {
+    writeCache(library, url, out.body, out.etag);
+    return { content: out.body, url };
   }
   if (hit) {
     return {
