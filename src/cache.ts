@@ -48,6 +48,17 @@ export function readCache(
   };
 }
 
+/** Refresh a cache entry's TTL clock without rewriting content — used after a
+ *  304 Not Modified revalidation confirms the upstream is unchanged. */
+export function touchCache(library: string, url: string): void {
+  const dir = libDir(library);
+  const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
+  if (!existsSync(metaPath)) return;
+  const meta = JSON.parse(readFileSync(metaPath, "utf8")) as CacheMeta;
+  meta.fetchedAt = new Date().toISOString();
+  writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+}
+
 export function writeCache(
   library: string,
   url: string,

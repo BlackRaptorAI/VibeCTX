@@ -1,7 +1,7 @@
 {
   "name": "@blackraptorai/docs-cache-mcp",
-  "version": "0.1.0",
-  "description": "Local docs-cache MCP server — fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
+  "version": "0.1.1",
+  "description": "Local docs-cache MCP server \u2014 fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
   "type": "module",
   "license": "MIT",
   "author": "Tom Hanks (BlackRaptor AI)",
@@ -35,12 +35,16 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "zod": "^3.24.0"
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"
-  }
+  },
+  "bundleDependencies": [
+    "@modelcontextprotocol/sdk",
+    "zod"
+  ]
 }
