@@ -1,6 +1,8 @@
-# docs-cache-mcp
+# VibeCTX
 
 **A local MCP server that fetches official library documentation (llms.txt-first), caches it to disk, and serves the relevant sections to your coding agents — offline, deterministic, zero recurring cost.**
+
+> Published on npm as [`@blackraptorai/docs-cache-mcp`](https://www.npmjs.com/package/@blackraptorai/docs-cache-mcp).
 
 By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
 [development-team-agents](https://github.com/BlackRaptorAI/development-team-agents) and
@@ -74,7 +76,7 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 
 This tool is free and MIT-licensed, and will stay that way. If you have a **private
 documentation, air-gapped, or enterprise deployment need it doesn't cover — 
-[open an issue](https://github.com/BlackRaptorAI/docs-cache-mcp/issues)** and describe
+[open an issue](https://github.com/BlackRaptorAI/VibeCTX/issues)** and describe
 your setup. Real-world reports directly shape what gets built.
 
 ## Development
