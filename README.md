@@ -6,8 +6,8 @@
 > (Formerly `@blackraptorai/docs-cache-mcp` ≤ 0.1.1 — deprecated in favor of this package.)
 
 By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
-[development-team-agents](https://github.com/BlackRaptorAI/development-team-agents) and
-[business-council-agents](https://github.com/BlackRaptorAI/business-council-agents).
+[BlackRaptor Agents — development](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/development) and
+[BlackRaptor Agents — council](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/council).
 
 ## Why
 
