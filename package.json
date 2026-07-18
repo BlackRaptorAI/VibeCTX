@@ -1,6 +1,6 @@
 {
-  "name": "@blackraptorai/docs-cache-mcp",
-  "version": "0.1.1",
+  "name": "@blackraptorai/vibectx",
+  "version": "0.1.2",
   "description": "Local docs-cache MCP server \u2014 fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
   "type": "module",
   "license": "MIT",
@@ -19,6 +19,7 @@
     "offline"
   ],
   "bin": {
+    "vibectx": "dist/index.js",
     "docs-cache-mcp": "dist/index.js"
   },
   "files": [

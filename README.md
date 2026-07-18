@@ -2,7 +2,8 @@
 
 **A local MCP server that fetches official library documentation (llms.txt-first), caches it to disk, and serves the relevant sections to your coding agents — offline, deterministic, zero recurring cost.**
 
-> Published on npm as [`@blackraptorai/docs-cache-mcp`](https://www.npmjs.com/package/@blackraptorai/docs-cache-mcp).
+> Published on npm as [`@blackraptorai/vibectx`](https://www.npmjs.com/package/@blackraptorai/vibectx).
+> (Formerly `@blackraptorai/docs-cache-mcp` ≤ 0.1.1 — deprecated in favor of this package.)
 
 By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
 [development-team-agents](https://github.com/BlackRaptorAI/development-team-agents) and
@@ -21,10 +22,10 @@ copy, clearly flagged as stale, instead of a failure.
 
 ```bash
 # Claude Code
-claude mcp add docs-cache -- npx -y @blackraptorai/docs-cache-mcp
+claude mcp add vibectx -- npx -y @blackraptorai/vibectx
 
 # or any MCP client (stdio):
-npx -y @blackraptorai/docs-cache-mcp
+npx -y @blackraptorai/vibectx
 ```
 
 ## Tools
@@ -42,7 +43,7 @@ AWS CDK, Playwright, React, fastify-type-provider-zod). Add or override librarie
 a JSON config:
 
 ```bash
-npx -y @blackraptorai/docs-cache-mcp --config ./docs-cache.config.json
+npx -y @blackraptorai/vibectx --config ./docs-cache.config.json
 ```
 
 ```json

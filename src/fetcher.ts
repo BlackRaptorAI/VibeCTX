@@ -20,7 +20,7 @@ async function fetchUrl(url: string, etag?: string): Promise<FetchOutcome> {
   try {
     const headers: Record<string, string> = {
       "user-agent":
-        "docs-cache-mcp/0.1 (+https://github.com/BlackRaptorAI/docs-cache-mcp)",
+        "vibectx/0.1 (+https://github.com/BlackRaptorAI/VibeCTX)",
     };
     if (etag) headers["if-none-match"] = etag;
     const res = await fetch(url, {
