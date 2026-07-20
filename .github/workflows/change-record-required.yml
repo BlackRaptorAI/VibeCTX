@@ -1,0 +1,102 @@
+# change-record-required — file-presence gate (no LLM, no secrets beyond GITHUB_TOKEN)
+#
+# Install to: .github/workflows/change-record-required.yml
+# Then mark the "change-record-required" check as REQUIRED in branch protection.
+#
+# WHAT IT DOES
+#   If a PR touches any GATED path (Tier 2/3 surfaces below), it fails unless
+#   the same PR adds or modifies a Change Record at docs/change-records/CR-*.md.
+#   This makes "forgot the Change Record" fail CLOSED, with zero AI involved.
+#
+# WHAT IT CANNOT DO
+#   Judge whether the CR is honest or complete. That stays on you (Layer 2).
+#
+# PHASE 2 HOOK
+#   When agent reviews later run in CI, add a second job here that invokes the
+#   relevant agent per matched gate and appends its verdict to the CR file.
+#   This check's contract (CR file must exist) does not change.
+
+name: change-record-required
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: read
+  contents: read
+
+jobs:
+  change-record-required:
+    name: change-record-required
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check gated paths vs Change Record
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // Tier 2/3 gated surfaces. Keep in sync with .github/CODEOWNERS
+            // and gate-enforcement-map.md. Prefixes unless noted.
+            const GATED = [
+              // VibeCTX Tier 2/3 gated surfaces. Keep in sync with
+              // .claude/hooks/protect-tier3.py (and CODEOWNERS if a second-key
+              // team exists). The first two protect the enforcement mechanism.
+              '.github/',
+              '.claude/',
+              'package.json',            // supply chain: dependency & publish changes
+              // Note: src/fetcher.ts (SSRF) and src/cache.ts (path handling) are
+              // security-review-sensitive by convention, not hard-gated here —
+              // route non-trivial changes past security-architect.
+            ];
+
+            const CR_PATTERN = /^docs\/change-records\/CR-.+\.md$/;
+
+            // Paginated: handles PRs with >100 changed files.
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                per_page: 100,
+              }
+            );
+
+            const paths = files.map(f => f.filename);
+            const gatedHits = paths.filter(p =>
+              GATED.some(g => g.endsWith('/') ? p.startsWith(g) : p === g)
+            );
+            const crFiles = files.filter(f =>
+              CR_PATTERN.test(f.filename) && f.status !== 'removed'
+            );
+
+            if (gatedHits.length === 0) {
+              core.info('No gated paths touched — Change Record not required.');
+              return;
+            }
+
+            core.info(`Gated paths touched (${gatedHits.length}):`);
+            gatedHits.forEach(p => core.info(`  - ${p}`));
+
+            if (crFiles.length === 0) {
+              core.setFailed(
+                'This PR touches gated (Tier 2/3) paths but contains no Change ' +
+                'Record. Add docs/change-records/CR-YYYYMMDD-<slug>.md (see ' +
+                'docs/change-record-template.md) in this PR. Gated paths: ' +
+                gatedHits.slice(0, 10).join(', ') +
+                (gatedHits.length > 10 ? ` (+${gatedHits.length - 10} more)` : '')
+              );
+              return;
+            }
+
+            // Cheap anti-rubber-stamp: reject an unmodified template copy.
+            for (const f of crFiles) {
+              if (f.additions < 10) {
+                core.warning(
+                  `${f.filename} has only ${f.additions} added lines — ` +
+                  'verify it is a filled-in record, not a placeholder.'
+                );
+              }
+            }
+            core.info(`Change Record present: ${crFiles.map(f => f.filename).join(', ')}`);
