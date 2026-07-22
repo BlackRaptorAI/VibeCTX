@@ -65,4 +65,4 @@ None. Both additions are generic methodology and apply to VibeCTX as-is.
 
 > I reviewed the addition and take responsibility for the decisions recorded above.
 
-**Signed:** _PENDING — TH review_  **Date:** _______
+**Signed:** TH (Tom Hanks, BlackRaptor AI) — signature authorized in-session 2026-07-22  **Date:** 2026-07-22
