@@ -73,37 +73,102 @@ export function assemble(sections: Section[], maxTokens: number): string {
   return parts.join("\n\n---\n\n");
 }
 
-/**
- * Heuristic: an llms.txt INDEX file is mostly a link list rather than prose.
- * Detect by markdown-link density so the caller can follow the best links.
- */
-export function looksLikeIndex(markdown: string): boolean {
-  const lines = markdown.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return false;
-  const linkLines = lines.filter((l) => /\[[^\]]+\]\(https?:\/\/[^)]+\)/.test(l)).length;
-  return linkLines / lines.length > 0.4 && markdown.length < 100_000;
+/** Non-image markdown link `[title](href)`; href may be absolute or relative. */
+const LINK_RE = /(?<!!)\[([^\]]+)\]\(([^)\s]+)\)/g;
+
+/** A followable href: anything except a same-document anchor. */
+function isFollowableHref(href: string): boolean {
+  return !href.startsWith("#");
 }
 
-/** Extract (title, url) markdown links, best-matched to the query first. */
+/** How many non-empty lines looksLikeIndex samples. Size-independent on purpose:
+ *  fastify's llms.txt is >100 KB and was rejected by a byte cap (PAR-706). */
+const INDEX_SAMPLE_LINES = 200;
+const INDEX_LINK_DENSITY = 0.4;
+
+/**
+ * Heuristic: an llms.txt INDEX file is mostly a link list rather than prose.
+ * Detect by markdown-link density over the first INDEX_SAMPLE_LINES non-empty
+ * lines so the caller can follow the best links. Relative links count; anchor-only
+ * links (`#section`, as in a README table of contents) do not.
+ */
+export function looksLikeIndex(markdown: string): boolean {
+  const lines = markdown
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .slice(0, INDEX_SAMPLE_LINES);
+  if (lines.length === 0) return false;
+  let linkLines = 0;
+  for (const line of lines) {
+    for (const m of line.matchAll(LINK_RE)) {
+      if (isFollowableHref(m[2])) {
+        linkLines += 1;
+        break;
+      }
+    }
+  }
+  return linkLines / lines.length > INDEX_LINK_DENSITY;
+}
+
+/**
+ * Extract every followable (title, url) link in document order, resolving
+ * relative hrefs against `sourceUrl`. Keeps http(s) targets only and the first
+ * occurrence of each resolved URL.
+ */
+export function extractLinks(
+  markdown: string,
+  sourceUrl: string,
+): { title: string; url: string }[] {
+  const seen = new Set<string>();
+  const links: { title: string; url: string }[] = [];
+  for (const m of markdown.matchAll(LINK_RE)) {
+    const title = m[1];
+    const href = m[2];
+    if (!isFollowableHref(href)) continue;
+    let url: string;
+    try {
+      const resolved = new URL(href, sourceUrl);
+      if (resolved.protocol !== "https:" && resolved.protocol !== "http:") continue;
+      url = resolved.href;
+    } catch {
+      continue;
+    }
+    if (seen.has(url)) continue;
+    seen.add(url);
+    links.push({ title, url });
+  }
+  return links;
+}
+
+/** Links best-matched to the query first (ties keep document order), up to `limit`.
+ *  Only links sharing at least one token with the query are returned. */
 export function rankLinks(
   markdown: string,
   query: string,
+  sourceUrl: string,
   limit: number,
 ): { title: string; url: string }[] {
   const terms = new Set(tokenize(query));
-  const links: { title: string; url: string; score: number }[] = [];
-  const re = /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(markdown)) !== null) {
-    const title = m[1];
-    const url = m[2];
-    let score = 0;
-    for (const t of tokenize(title + " " + url)) if (terms.has(t)) score += 1;
-    links.push({ title, url, score });
-  }
-  return links
+  return extractLinks(markdown, sourceUrl)
+    .map((link, order) => {
+      let score = 0;
+      for (const t of tokenize(link.title + " " + link.url)) if (terms.has(t)) score += 1;
+      return { ...link, score, order };
+    })
     .filter((l) => l.score > 0)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => b.score - a.score || a.order - b.order)
     .slice(0, limit)
     .map(({ title, url }) => ({ title, url }));
 }
+
+/** An index with more links than this gets the larger follow budget. */
+const LARGE_INDEX_LINKS = 200;
+
+/** How many index links get_docs follows for a topic: 3 by default, 5 when the
+ *  index is large (a big index spreads a topic across more pages). */
+export function followLimit(linkCount: number): number {
+  return linkCount > LARGE_INDEX_LINKS ? 5 : 3;
+}
+
+/** Stop following index links once this much linked content has been pulled in. */
+export const MAX_FOLLOWED_BYTES = 2_000_000;
