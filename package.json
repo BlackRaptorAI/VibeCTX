@@ -1,7 +1,7 @@
 {
   "name": "@blackraptorai/vibectx",
-  "version": "0.1.2",
-  "description": "Local docs-cache MCP server \u2014 fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
+  "version": "0.1.3",
+  "description": "Local docs-cache MCP server — fetch official library docs (llms.txt-first), cache to disk, serve to coding agents offline and deterministically.",
   "type": "module",
   "license": "MIT",
   "author": "Tom Hanks (BlackRaptor AI)",
