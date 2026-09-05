@@ -106,6 +106,28 @@ describe("looksLikeIndex", () => {
     expect(looksLikeIndex(prose)).toBe(false);
   });
 
+  it("samples only the first 200 non-empty lines: a long prose preamble hides later links", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 250; i++) lines.push(`Prose line ${i} explaining something at length.`);
+    for (let i = 0; i < 1000; i++) lines.push(`- [Page ${i}](/docs/p${i}.md)`);
+    expect(looksLikeIndex(lines.join("\n"))).toBe(false);
+  });
+
+  it("samples only the first 200 non-empty lines: a link-dense head classifies despite a long prose tail", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 200; i++) lines.push(`- [Page ${i}](/docs/p${i}.md)`);
+    for (let i = 0; i < 1000; i++) lines.push(`Prose line ${i} explaining something at length.`);
+    expect(looksLikeIndex(lines.join("\n"))).toBe(true);
+  });
+
+  it("ignores blank lines when sampling", () => {
+    // 150 links interleaved with 300 blank lines: the 200-line window must still see mostly links.
+    const lines: string[] = ["# Docs"];
+    for (let i = 0; i < 150; i++) lines.push("", "", `- [Page ${i}](/docs/p${i}.md)`);
+    for (let i = 0; i < 300; i++) lines.push(`Prose ${i}`);
+    expect(looksLikeIndex(lines.join("\n"))).toBe(true);
+  });
+
   it("does not treat a README with an anchor-only table of contents as an index", () => {
     const readme = [
       "# pgvector",
@@ -135,6 +157,27 @@ describe("extractLinks", () => {
       "https://fastify.dev/docs/Hooks.md",
       "https://fastify.dev/docs/Abs.md",
     ]);
+  });
+
+  it("resolves protocol-relative hrefs to https on the source scheme", () => {
+    const links = extractLinks("- [Mirror](//github.com/fastify/fastify/Request.md)", source);
+    expect(links.map((l) => l.url)).toEqual(["https://github.com/fastify/fastify/Request.md"]);
+  });
+
+  it("does not backtrack quadratically on pathological bracket input (security)", () => {
+    const hostile = "[".repeat(200_000);
+    const t0 = performance.now();
+    const links = extractLinks(hostile, source);
+    const isIndex = looksLikeIndex(hostile);
+    const elapsed = performance.now() - t0;
+    expect(links).toEqual([]);
+    expect(isIndex).toBe(false);
+    expect(elapsed).toBeLessThan(100);
+  });
+
+  it("recovers the right title after a stray unmatched '[' earlier on the line", () => {
+    const links = extractLinks("[ oops [Request](/docs/Request.md)", source);
+    expect(links).toEqual([{ title: "Request", url: "https://fastify.dev/docs/Request.md" }]);
   });
 
   it("skips images, anchor-only links, non-http schemes, and duplicate targets", () => {
