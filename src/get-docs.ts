@@ -1,5 +1,10 @@
 import type { LibraryEntry } from "./registry.js";
-import { getLibraryDoc, getLinkedPage, isAllowedLink } from "./fetcher.js";
+import {
+  getLibraryDoc,
+  fetchLinkedPage,
+  isAllowedLink,
+  LINKED_PAGE_MAX_BYTES,
+} from "./fetcher.js";
 import {
   rankSections,
   assemble,
@@ -45,25 +50,38 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<s
   let corpus = doc.content;
   const followed: string[] = [];
   const failed: string[] = [];
+  const tooLarge: string[] = [];
   let skippedOutsideOrigin = 0;
   if (looksLikeIndex(doc.content)) {
     const limit = followLimit(extractLinks(doc.content, doc.url).length);
+    // Rank every matching link, drop guard-refused ones (counted for the note),
+    // THEN take the budget — so cross-origin links never crowd out followable ones.
+    // fetchLinkedPage re-checks the guard; this is the visible layer, that one is the safety layer.
+    const candidates = rankLinks(doc.content, topic, doc.url, Number.POSITIVE_INFINITY);
+    const allowed = candidates.filter((link) => {
+      const ok = isAllowedLink(link.url, doc.url);
+      if (!ok) skippedOutsideOrigin += 1;
+      return ok;
+    });
     let followedBytes = 0;
-    for (const link of rankLinks(doc.content, topic, doc.url, limit)) {
+    for (const link of allowed.slice(0, limit)) {
       if (followedBytes >= MAX_FOLLOWED_BYTES) break;
-      // Pre-check so a guard refusal is reported, not confused with a network failure.
-      // getLinkedPage re-checks; this is the visible layer, that one is the safety layer.
-      if (!isAllowedLink(link.url, doc.url)) {
-        skippedOutsideOrigin += 1;
-        continue;
-      }
-      const page = await getLinkedPage(entry.name, link.url, doc.url, entry.ttlHours);
-      if (page) {
-        corpus += `\n\n# ${link.title}\n\n${page.content}`;
-        followed.push(link.url);
-        followedBytes += page.content.length;
-      } else {
-        failed.push(link.url);
+      const result = await fetchLinkedPage(entry.name, link.url, doc.url, entry.ttlHours);
+      switch (result.status) {
+        case "ok":
+          corpus += `\n\n# ${link.title}\n\n${result.page.content}`;
+          followed.push(link.url);
+          followedBytes += result.page.content.length;
+          break;
+        case "refused": // redirect escaped the origin
+          skippedOutsideOrigin += 1;
+          break;
+        case "too-large":
+          tooLarge.push(link.url);
+          break;
+        case "unavailable":
+          failed.push(link.url);
+          break;
       }
     }
   }
@@ -73,6 +91,11 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<s
   if (skippedOutsideOrigin > 0) {
     notes.push(
       `Skipped ${skippedOutsideOrigin} index links outside ${new URL(doc.url).origin} (same-origin https only)`,
+    );
+  }
+  if (tooLarge.length) {
+    notes.push(
+      `Skipped ${tooLarge.length} index links larger than ${LINKED_PAGE_MAX_BYTES / (1024 * 1024)} MB: ${tooLarge.join(", ")}`,
     );
   }
   if (failed.length) notes.push(`Could not fetch ${failed.length} index links: ${failed.join(", ")}`);
