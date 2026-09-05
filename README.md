@@ -68,8 +68,11 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 - **Offline-first:** past-TTL cache is served (flagged `STALE:`) when the network fails —
   an old answer beats no answer, but the agent is told which it got.
 - **Index-aware:** many projects publish `llms.txt` as a link index rather than full
-  content. When the source looks like an index, the topic's best-matching links are
-  fetched (and cached) one level deep.
+  content. When the source looks like an index (link-dense, any size), the topic's
+  best-matching links — absolute or relative — are fetched (and cached) one level deep:
+  up to 3 links, or 5 when the index has more than 200, stopping at ~2 MB of followed
+  content. Only same-origin `https` links are followed; skipped or unreachable links are
+  reported in the response rather than dropped silently.
 - **Deterministic retrieval:** markdown heading-split + keyword scoring. No embeddings,
   no external calls at query time, same answer every run.
 
