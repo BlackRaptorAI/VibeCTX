@@ -70,9 +70,11 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 - **Index-aware:** many projects publish `llms.txt` as a link index rather than full
   content. When the source looks like an index (link-dense, any size), the topic's
   best-matching links — absolute or relative — are fetched (and cached) one level deep:
-  up to 3 links, or 5 when the index has more than 200, stopping at ~2 MB of followed
-  content. Only same-origin `https` links are followed; skipped or unreachable links are
-  reported in the response rather than dropped silently.
+  up to 3 links, or 5 when the index has more than 200. Each followed page is capped at
+  2 MiB (larger responses are dropped unread), and no new fetch starts once ~2 MB of
+  followed content has accumulated. Primary documents are capped at 25 MiB. Only
+  same-origin `https` links are followed, checked again after redirects; skipped,
+  oversize or unreachable links are reported in the response rather than dropped silently.
 - **Deterministic retrieval:** markdown heading-split + keyword scoring. No embeddings,
   no external calls at query time, same answer every run.
 
