@@ -3,8 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { loadRegistry } from "./registry.js";
-import { getLibraryDoc, getLinkedPage } from "./fetcher.js";
-import { rankSections, assemble, looksLikeIndex, rankLinks } from "./retrieval.js";
+import { getLibraryDoc } from "./fetcher.js";
+import { getDocs } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
 
 const configFlag = process.argv.indexOf("--config");
@@ -60,50 +60,7 @@ server.registerTool(
       const known = [...registry.entries.keys()].join(", ");
       return text(`Unknown library "${library}". Known: ${known}`);
     }
-    const doc = await getLibraryDoc(entry);
-    if (!doc) {
-      return text(
-        `Could not fetch docs for "${library}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.join("\n")}`,
-      );
-    }
-    const budget = maxTokens ?? 4000;
-    const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
-
-    if (!topic) {
-      const toc = doc.content
-        .split("\n")
-        .filter((l) => /^#{1,3}\s/.test(l))
-        .slice(0, 60)
-        .join("\n");
-      const head = doc.content.slice(0, budget * 4);
-      return text(
-        `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}${head}`,
-      );
-    }
-
-    // Topic given: if the doc is an index of links, pull the best-matching pages too.
-    let corpus = doc.content;
-    const followed: string[] = [];
-    if (looksLikeIndex(doc.content)) {
-      for (const link of rankLinks(doc.content, topic, doc.url, 3)) {
-        const page = await getLinkedPage(entry.name, link.url, doc.url, entry.ttlHours);
-        if (page) {
-          corpus += `\n\n# ${link.title}\n\n${page.content}`;
-          followed.push(link.url);
-        }
-      }
-    }
-    const ranked = rankSections(corpus, topic);
-    if (ranked.length === 0) {
-      return text(
-        `${prefix}No sections matched "${topic}" in ${library} docs (source: ${doc.url}). Try broader terms or call get_docs without a topic for the table of contents.`,
-      );
-    }
-    const body = assemble(ranked, budget);
-    const followedNote = followed.length
-      ? `\nFollowed index links: ${followed.join(", ")}`
-      : "";
-    return text(`${prefix}Source: ${doc.url}${followedNote}\n\n${body}`);
+    return text(await getDocs(entry, { topic, maxTokens }));
   },
 );
 
