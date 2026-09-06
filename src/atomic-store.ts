@@ -19,9 +19,17 @@ import { join } from "node:path";
 /** Suffix every temp file here carries: `<target>.<pid>.<ms>.tmp`. */
 export const tempPathFor = (path: string): string => `${path}.${process.pid}.${Date.now()}.tmp`;
 
-/** Matches exactly the names `tempPathFor` produces — `.<digits>.<digits>.tmp` — so a file a
- *  person happens to have called `notes.tmp` is never swept. */
-export const TEMP_FILE_PATTERN = /\.\d+\.\d+\.tmp$/;
+/** Matches exactly the names `tempPathFor` produces — `.<pid>.<ms>.tmp` — so a file a person
+ *  happens to have called `notes.tmp` is never swept. The second group is the `<ms>` stamp. */
+export const TEMP_FILE_PATTERN = /\.\d+\.(\d+)\.tmp$/;
+
+/** A temp file is only an ORPHAN once it is old enough that no writer could still be inside
+ *  `writeAtomic`. Below this age it is assumed to be a concurrent writer's in-flight file —
+ *  another vibectx process on the same cache, the startup autowarm beside a tool call — and
+ *  sweeping it would delete the data that process is about to rename into place. One minute
+ *  is far beyond any write here (ASSUMED: the largest document is a few MB) and far below
+ *  the interval at which orphans matter, since nothing reads them. */
+export const SWEEP_MIN_AGE_MS = 60_000;
 
 /** Write `path` via a temp file in the same directory and an atomic rename. The temp file is
  *  removed if the write fails. */
@@ -56,6 +64,11 @@ function isRegularFile(path: string): boolean {
  * `lstat` says it is a REGULAR FILE. A symlink shaped like a temp file is left alone entirely
  * — the sweep must never be the thing that deletes a path outside the cache, and leaving one
  * dangling link is a smaller harm than the alternative being wrong once.
+ *
+ * Age rule: a name whose embedded `<ms>` is within the last SWEEP_MIN_AGE_MS — or ahead of
+ * our clock — is skipped. Two vibectx processes share one cache, so the file a sweep sees may
+ * be a write still in flight, and deleting it would make the other process's rename fail on
+ * work it had already done. Waiting a minute costs nothing: nothing reads a temp file.
  */
 export function sweepTempFiles(dir: string): void {
   let names: string[];
@@ -64,8 +77,11 @@ export function sweepTempFiles(dir: string): void {
   } catch {
     return;
   }
+  const now = Date.now();
   for (const name of names) {
-    if (!TEMP_FILE_PATTERN.test(name)) continue;
+    const stamped = TEMP_FILE_PATTERN.exec(name);
+    if (!stamped) continue;
+    if (now - Number(stamped[1]) < SWEEP_MIN_AGE_MS) continue; // a writer may still be inside writeAtomic
     const path = join(dir, name);
     if (!isRegularFile(path)) continue; // a symlink or a directory is never ours to remove
     try {

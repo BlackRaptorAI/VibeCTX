@@ -392,7 +392,8 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
-killed process left behind before they write anything.
+killed process left behind before they write anything — but only once it is at least a
+minute old, so a second vibectx sharing the cache never has its in-flight write deleted.
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see

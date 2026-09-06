@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { readCache, writeCache, touchCache, cacheRoot } from "../src/cache.js";
-import { sweepTempFiles, sweepCacheTempFiles } from "../src/atomic-store.js";
+import { sweepTempFiles, sweepCacheTempFiles, tempPathFor, SWEEP_MIN_AGE_MS } from "../src/atomic-store.js";
 
 let dir: string;
 
@@ -130,6 +130,20 @@ describe("S-C — orphan temp files are swept from the cache directories", () =>
     expect(() => sweepTempFiles(join(dir, "does-not-exist"))).not.toThrow();
     expect(readdirSync(dir).sort()).toEqual(["notes.tmp", "projects", "resolved.json"]);
     expect(readdirSync(join(dir, "projects"))).toEqual([]);
+  });
+
+  it("leaves a temp file younger than SWEEP_MIN_AGE_MS alone — it is another process's write in flight, not an orphan", () => {
+    expect(SWEEP_MIN_AGE_MS).toBe(60_000);
+    const inFlight = tempPathFor(join(dir, "resolved.json")); // stamped with Date.now()
+    const justInside = join(dir, `resolved.json.4242.${Date.now() - (SWEEP_MIN_AGE_MS - 5_000)}.tmp`);
+    const justOutside = join(dir, `resolved.json.4242.${Date.now() - (SWEEP_MIN_AGE_MS + 5_000)}.tmp`);
+    const skewed = join(dir, `resolved.json.4242.${Date.now() + 5_000}.tmp`); // a clock that ran ahead
+    for (const p of [inFlight, justInside, justOutside, skewed]) writeFileSync(p, "half a file", "utf8");
+    sweepTempFiles(dir);
+    expect(existsSync(inFlight)).toBe(true);
+    expect(existsSync(justInside)).toBe(true);
+    expect(existsSync(skewed)).toBe(true);
+    expect(existsSync(justOutside)).toBe(false);
   });
 
   it("sweepCacheTempFiles reaches the per-library document directories too, and leaves real files alone", () => {
