@@ -258,6 +258,20 @@ function renderField(text: string, max: number): string {
   return clipText(text, max).replace(/`{3,}/g, "``").replace(/~{3,}/g, "~~");
 }
 
+/**
+ * The language, made safe to sit ON a fence opener. `renderField` is not enough here:
+ * every other derived field is rendered on a line of its own, but the language is
+ * CONCATENATED onto the opener, so a backtick it kept would lengthen the opener's own
+ * fence run past the closer's — a tilde-fenced block whose info string is ```` ```js ````
+ * rendered a 5-backtick opener against a 3-backtick closer, and the rest of the response
+ * was swallowed. Fence characters are therefore removed outright rather than collapsed:
+ * a language identifier never contains a backtick or a tilde, so nothing real is lost.
+ * Stripped BEFORE clipping, so the clip cannot re-expose one at the cut.
+ */
+function renderLang(lang: string): string {
+  return renderField(lang.replace(/[`~]/g, ""), MAX_LANG_CHARS);
+}
+
 /** The heading line D-25 renders: ancestors joined with " > ", the section's own
  *  heading last. Top-level sections and "(intro)" render as they always did. */
 export function headingPath(s: { heading: string; path: string[] }): string {
@@ -457,19 +471,24 @@ function longestBacktickRun(code: string): number {
 }
 
 /**
- * D-28: the fence for this code — a backtick run one longer than the longest run the
- * code contains, never fewer than three. Backticks rather than tildes so a `~~~` inside
- * the code is inert too. This is what makes the rendered block well-formed markdown for
- * ANY code content, which is a test (`snippet rendering is inescapable and bounded`),
- * not a claim in a comment.
+ * D-28: the fence for this block — a backtick run one longer than the longest run in
+ * EITHER of the two things the block renders, the code and the language that rides on
+ * the opener, never fewer than three. Backticks rather than tildes so a `~~~` inside the
+ * code is inert too. Taking the language into account is belt-and-braces: `renderLang`
+ * already strips fence characters, so its run is 0 today — but the width is computed
+ * over everything the block renders, so neither route can widen the opener alone.
+ *
+ * This is what makes the rendered block well-formed markdown for ANY code content, which
+ * is a test (`snippet rendering is inescapable and bounded`), not a claim in a comment.
  */
-function fenceFor(code: string): string {
-  return "`".repeat(Math.max(MIN_FENCE_CHARS, longestBacktickRun(code) + 1));
+function fenceFor(code: string, lang: string): string {
+  const run = Math.max(longestBacktickRun(code), longestBacktickRun(lang));
+  return "`".repeat(Math.max(MIN_FENCE_CHARS, run + 1));
 }
 
 function renderSnippet(s: Snippet): string {
-  const fence = fenceFor(s.code);
-  const lang = renderField(s.lang, MAX_LANG_CHARS);
+  const lang = renderLang(s.lang);
+  const fence = fenceFor(s.code, lang);
   const context = renderField(s.context, MAX_CONTEXT_CHARS);
   return `### ${renderedPath(s)}\n${context}\n\n${fence}${lang}\n${s.code}\n${fence}`;
 }

@@ -657,6 +657,80 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
     }
   });
 
+  /** The opener's and closer's leading fence runs, and what the opener carried after it.
+   *  The renderer's block is the first fence line and the last one in the chunk. */
+  function fenceRuns(out: string): { opener: number; closer: number; openerLine: string } {
+    const fenceLines = out.split("\n").filter((l) => /^(`{3,}|~{3,})/.test(l));
+    const runOf = (s: string) => (/^(`+|~+)/.exec(s)?.[1].length ?? 0);
+    return {
+      opener: runOf(fenceLines[0] ?? ""),
+      closer: runOf(fenceLines[fenceLines.length - 1] ?? ""),
+      openerLine: fenceLines[0] ?? "",
+    };
+  }
+
+  /** A one-section document whose TILDE fence carries `info` — so the info string may
+   *  hold backticks, which a backtick fence could never carry (CommonMark). */
+  const tildeDocWith = (info: string, payload: string[] = []): string =>
+    ["# Client", "Call it:", `~~~${info}`, "client.connect();", "client.close();", ...payload, "~~~", ESCAPE].join(
+      "\n",
+    );
+
+  it("(D-28) a backtick-bearing info string cannot widen the opener past the closer", () => {
+    // The residual: `lang` is concatenated onto the opener, so a run of backticks in the
+    // INFO STRING widened the opener while the closer stayed at the width computed from
+    // the code alone — and everything after the block was swallowed by the open fence.
+    const out = assembleSnippets(rankSnippets(tildeDocWith("```js"), "client connect"), 4000);
+    const { opener, closer, openerLine } = fenceRuns(out);
+    expect({ opener, closer, balanced: topLevel(out).balanced }).toEqual({
+      opener: 3,
+      closer: 3,
+      balanced: true,
+    });
+    // The language survives as a language; only the fence characters are gone.
+    expect(openerLine).toBe("```js");
+    expect(topLevel(out).lines.join("\n")).not.toContain("client.connect();");
+  });
+
+  it("(D-28) an info string that is nothing but backticks leaves a bare, balanced fence", () => {
+    const out = assembleSnippets(rankSnippets(tildeDocWith("`".repeat(30)), "client connect"), 4000);
+    const { opener, closer, openerLine } = fenceRuns(out);
+    expect({ opener, closer, balanced: topLevel(out).balanced }).toEqual({
+      opener: 3,
+      closer: 3,
+      balanced: true,
+    });
+    expect(openerLine).toBe("```");
+  });
+
+  it("(D-28) tildes in an info string cannot open a block of their own either", () => {
+    const out = assembleSnippets(rankSnippets(tildeDocWith("~~~~~~ts"), "client connect"), 4000);
+    const { opener, closer, openerLine } = fenceRuns(out);
+    expect({ opener, closer, balanced: topLevel(out).balanced }).toEqual({
+      opener: 3,
+      closer: 3,
+      balanced: true,
+    });
+    expect(openerLine).toBe("```ts");
+  });
+
+  it("(D-28) widens BOTH fences when the code holds a longer run than three", () => {
+    // The other half of the invariant: the width still tracks the code, and the closer
+    // tracks the opener, so a 6-backtick run inside the block is inert.
+    const out = assembleSnippets(
+      rankSnippets(tildeDocWith("```js", ["``````", ESCAPE]), "client connect"),
+      4000,
+    );
+    const { opener, closer, openerLine } = fenceRuns(out);
+    expect({ opener, closer, balanced: topLevel(out).balanced }).toEqual({
+      opener: 7,
+      closer: 7,
+      balanced: true,
+    });
+    expect(openerLine).toBe("```````js");
+    expect(topLevel(out).lines.join("\n")).not.toContain(ESCAPE);
+  });
+
   it("(D-28) uses the same fence width on the truncated path", () => {
     const doc = docWith(["````", ESCAPE, "x".repeat(4000)]);
     const out = assembleSnippets(rankSnippets(doc, "client connect"), 40); // 160 chars
