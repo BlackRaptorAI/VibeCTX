@@ -29,8 +29,18 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const { writeCache } = await import("../src/cache.js");
-const { openIndexSession, readIndex, resetSearchIndexMemo, searchIndexPath, writeIndex, indexDocument, documentHash } =
-  await import("../src/search-index.js");
+const {
+  openIndexSession,
+  readIndex,
+  resetSearchIndexMemo,
+  searchIndexPath,
+  writeIndex,
+  indexDocument,
+  documentHash,
+  MAX_INDEX_FILE_BYTES,
+  SEARCH_INDEX_SCHEMA_VERSION,
+} = await import("../src/search-index.js");
+const { RETRIEVAL_VERSION } = await import("../src/tokenize.js");
 const { runWarm } = await import("../src/warm.js");
 type Registry = import("../src/registry.js").Registry;
 
@@ -126,4 +136,92 @@ describe("R2 · one index read per run, not one per library (PAR-659)", () => {
     expect([...readIndex().libraries.keys()]).toEqual(["solo"]);
     expect(searchIndexPath().endsWith("index.json")).toBe(true);
   });
+});
+
+/**
+ * PAR-659 · D-42 — THE MEMO RECORDS WHAT WAS WRITTEN, NOT WHAT WAS OFFERED.
+ *
+ * `flush()` set the in-process memo for every pending entry whenever `writeIndex` returned
+ * true — and `writeIndex` returns true when it SHED entries to stay inside the read limit, so a
+ * library that never reached the file was recorded as though it had. The next session in that
+ * process then short-circuited on the memo, put nothing in `pending`, and `flush()` returned
+ * false: a warm or a get_docs reporting "nothing to do" about a library the index does not
+ * hold. Whether a payload sheds depends on what else is in the file, so the honest behaviour is
+ * to offer it again — the per-process shed memo (D-42, search-index.ts) is what stops the
+ * SEARCH path paying for it on every call.
+ */
+describe("D-42 · the session memo records only entries that were written (PAR-659)", () => {
+  const AT = "2026-09-06T00:00:00.000Z";
+  const URL_ = "https://shed.example.com/llms-full.txt";
+
+  /** A document with globally unique vocabulary: its posting list is the file's largest entry. */
+  function uniqueDoc(sections: number): string {
+    const lines = ["# shed", ""];
+    for (let s = 0; s < sections; s++) {
+      lines.push(`## shedding heading ${s}`, "");
+      for (let p = 0; p < 4; p++) {
+        const words: string[] = [];
+        for (let k = 0; k < 30; k++) words.push(`shedword${s}x${p}y${k}`);
+        lines.push(words.join(" "), "");
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /** An index file just under the read limit, in entries each far smaller than `entryBytes`, so
+   *  the entry the session offers is the largest and therefore the one D-40 sheds. */
+  function plantNearlyFull(entryBytes: number): void {
+    const SECTIONS = 1000;
+    const lengths = new Array(SECTIONS).fill(1).join(",");
+    const chunk = Array.from({ length: SECTIONS }, (_, i) => `${i},1`).join(",");
+    const head = `{"url":"https://planted.example.com/llms.txt","fetchedAt":"${AT}","hash":"0123456789abcdef","lengths":[${lengths}],"postings":{"t":[`;
+    const parts: string[] = [];
+    let bytes = head.length + 3;
+    while (bytes < Math.floor(entryBytes / 10)) {
+      parts.push(chunk);
+      bytes += chunk.length + 1;
+    }
+    const entry = `${head}${parts.join(",")}]}}`;
+    const count = Math.floor((MAX_INDEX_FILE_BYTES - Math.floor(entryBytes / 2)) / (entry.length + 8));
+    const libraries = Array.from({ length: count }, (_, i) => `"p${i}":${entry}`).join(",");
+    writeFileSync(
+      searchIndexPath(),
+      `{"schemaVersion":${SEARCH_INDEX_SCHEMA_VERSION},"retrievalVersion":${RETRIEVAL_VERSION},"libraries":{${libraries}}}`,
+      "utf8",
+    );
+  }
+
+  it("a SHED library is offered again by the next session, not reported as already written", () => {
+    const doc = uniqueDoc(400);
+    const built = indexDocument(URL_, doc, AT)!;
+    const postings: Record<string, number[]> = {};
+    for (const [term, list] of built.postings) postings[term] = list;
+    plantNearlyFull(
+      Buffer.byteLength(
+        JSON.stringify({ url: built.url, fetchedAt: built.fetchedAt, hash: built.hash, lengths: built.lengths, postings }),
+        "utf8",
+      ) + 8,
+    );
+    expect(readIndex().problem).toBeUndefined(); // the fixture is a file this build reads
+
+    const notes: string[] = [];
+    const first = openIndexSession((m) => notes.push(m));
+    first.add("shed", URL_, doc, AT);
+    expect(first.flush()).toBe(true); // the file WAS written — without this entry
+    expect(notes.join("")).toMatch(/would exceed the \d+-byte limit/);
+    expect(readIndex().libraries.has("shed")).toBe(false);
+
+    // The claim: the memo did not record it, so this session has work to do. Before the fix
+    // `flush()` returned false here — "nothing to do" about a library the file does not hold.
+    const second = openIndexSession(() => {});
+    second.add("shed", URL_, doc, AT);
+    expect(second.flush()).toBe(true);
+    // …and a library that WAS written is still short-circuited: the memo keeps its purpose.
+    const third = openIndexSession(() => {});
+    third.add("mine", "https://mine.example.com/llms.txt", "# Mine\n\n## Streaming\n\nStream events.");
+    expect(third.flush()).toBe(true);
+    const fourth = openIndexSession(() => {});
+    fourth.add("mine", "https://mine.example.com/llms.txt", "# Mine\n\n## Streaming\n\nStream events.");
+    expect(fourth.flush()).toBe(false);
+  }, 300_000);
 });

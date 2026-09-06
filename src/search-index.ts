@@ -552,8 +552,19 @@ export function openIndexSession(
         // shared cache, not this run's private state.
         const { libraries } = readIndex();
         for (const [key, { doc }] of pending) libraries.set(key, doc);
-        const written = writeIndex(libraries, warn, onShed);
-        if (written) for (const [key, { hash }] of pending) memo.set(key, hash);
+        // D-42: `writeIndex` returns true when it SHED entries to stay inside the read limit,
+        // so "the file was written" is not "this entry was written". The memo exists to let a
+        // later session skip work that is already ON DISK; recording a shed entry made the next
+        // session short-circuit and report "nothing to do" about a library the file does not
+        // hold. Whether an entry sheds depends on what else is in the file, so it is offered
+        // again — the per-process shed memo above is what keeps the SEARCH path from paying
+        // for that on every call.
+        const shed = new Set<string>();
+        const written = writeIndex(libraries, warn, (names) => {
+          for (const name of names) shed.add(name);
+          onShed?.(names);
+        });
+        if (written) for (const [key, { hash }] of pending) if (!shed.has(key)) memo.set(key, hash);
         pending.clear();
         return written;
       } catch (e) {
