@@ -495,7 +495,8 @@ one is ignored (also noted).
 **Failures are one line, in one grammar:** the file, then
 `libraries[i].<field> ("<name>")`, then what is wrong — never a stack trace, a validator
 dump, or anything from inside the file (a config path can name any file on disk, so a
-syntax error reports the position and nothing else):
+syntax error reports the position and nothing else — `invalid JSON at line L column C`
+when the parser supplies a position, and a bare `invalid JSON` when it does not):
 
 ```
 ./vibectx.config.json: libraries[2].urls ("acme-platform"): must be a non-empty array of https URLs
