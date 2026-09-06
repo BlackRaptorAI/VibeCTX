@@ -37,7 +37,7 @@ npx -y @blackraptorai/vibectx
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved) |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
-| `warm_project(dir?)` | Read the project's dependency manifests and cache every dependency's docs — same table as `vibectx warm` below |
+| `warm_project(dir?, force?)` | Read the project's dependency manifests and cache every dependency's docs — same table as `vibectx warm` below; reads only the server's working directory or one beneath it |
 
 `library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
 or **any npm / PyPI package name** — an unknown name is resolved on the spot.
@@ -80,16 +80,22 @@ verification")` answers from the cache with the network unplugged.
   `portal:` specs are local packages and skipped.
 - `pyproject.toml` — `[project].dependencies`, every `[project.optional-dependencies]`
   group, every `[dependency-groups]` group, `[tool.poetry.dependencies]`,
-  `[tool.poetry.dev-dependencies]`, `[tool.poetry.group.<g>.dependencies]`. Read by a small
-  built-in TOML reader (table headers, `key = value`, string arrays, one-line inline
-  tables); dotted keys inside a table and multi-line strings are not supported.
+  `[tool.poetry.dev-dependencies]`, `[tool.poetry.group.<g>.dependencies]`; a poetry inline
+  table with `path`, `git` or `url` is a local or VCS source and is skipped (like `file:` in
+  package.json). Read by a small built-in TOML reader (table headers, `key = value`, string
+  arrays, one-line inline tables); dotted keys inside a table and multi-line strings are not
+  supported.
 - `requirements*.txt` — `requirements.txt` first, then the rest; versions, extras, markers,
   comments and `\` continuations stripped; `-r` / `--requirement` includes followed one
   level, relative to the including file and only inside the project directory; `-c`, `-e`,
   options, URLs and paths skipped. PyPI names are normalised (PEP 503), so
   `Typing_Extensions` and `typing-extensions` are one dependency. Only names that pass the
   npm / PEP 508 name rules are kept (the rest are counted in a note, never printed); a
-  manifest over 32 MiB is not read.
+  manifest over 32 MiB is not read. **Symlinks are refused:** every manifest and every `-r`
+  target is checked component by component, and a symlink anywhere in the path — or a real
+  path that resolves outside the project directory — is `skipped (symlink)` / skipped as
+  outside; the project directory itself may live behind a symlink. File names and include
+  paths are stripped of control, bidi and zero-width characters before they are printed.
 - Lockfiles, **only when the ecosystem's manifest is absent**, for names: `package-lock.json`
   v2/v3 (the root package's lists; v1 has none and is reported), `pnpm-lock.yaml`
   (`importers['.']`, or the v5 top-level blocks). `yarn.lock`, `uv.lock` and `poetry.lock`
@@ -97,31 +103,50 @@ verification")` answers from the cache with the network unplugged.
 
 **What it does per dependency.** A registry name or alias (the npm package names of the
 scoped entries are aliases: `@supabase/supabase-js`, `@trpc/server`, `@clerk/nextjs`,
-`@anthropic-ai/sdk`, `@playwright/test`, `@sveltejs/kit`, `@tanstack/react-query`; `react-dom`
-reaches `react`) is warmed through the same fetch `get_docs` uses: a fresh cached copy is
-left alone (`already fresh`), a stale one is revalidated with `If-None-Match`, a missing one
-is fetched (`cached`). Anything else is resolved from the ecosystem the manifest implies
-(`package.json` → npm only, Python files → PyPI only), exactly as
-[`resolve_library`](#any-library-no-config) would, and reported `resolved+cached`. Names on
-the noise list are `denied (noise list)` and never fetched. Up to four names are warmed at
-once; names that map to one entry share one fetch.
+`@anthropic-ai/sdk`, `@playwright/test`, `@sveltejs/kit`, `@tanstack/react-query`,
+`@tailwindcss/postcss`; `react-dom` reaches `react`) is warmed through the same fetch
+`get_docs` uses: a fresh cached copy is left alone (`already fresh`), a stale one is
+revalidated with `If-None-Match`, a missing one is fetched (`cached`). Registry entries match
+**by name regardless of ecosystem**: the shipped defaults are the npm packages, so a Python
+project that depends on `stripe` or `openai` gets the npm entry's docs, and the row says so
+— `curated entry is the npm package` (for an auto-resolved record, `resolved entry is the
+<npm|pypi> package`, with the `--npm` / `--pypi` switch to re-resolve). An `ecosystem` field
+on entries is a queued follow-up. Anything else is resolved from the ecosystem the manifest
+implies (`package.json` → npm only, Python files → PyPI only), exactly as
+[`resolve_library`](#any-library-no-config) would, and reported `resolved+cached`; these
+resolutions **share the process's 100-resolutions-per-hour cap** with `get_docs` and
+`resolve_library` — a large project can spend the hour's budget in one run. Names on the
+noise list are `denied (noise list)` and never fetched. Up to four names are warmed at once;
+names that map to one entry share one fetch.
+
+**Recent failures are not retried every run.** A name the previous run left `unresolved` is
+reported `unresolved (recent)` for 24 hours from that failure — no resolution slot spent,
+no network — with the original reason and time in the detail line. `--force` (CLI) or
+`force: true` (tool) retries now; after 24 hours it retries by itself. The memo never applies
+to a name the registry has since learned (pinned in config, or resolved another way).
 
 **Statuses:** `cached` · `already fresh` · `resolved+cached` · `unresolved` (the resolver's
-attempt summary is printed below the table) · `denied (noise list)` · `skipped (rate cap)`
-(the 100-resolutions-per-hour cap was reached mid-run; the run continues; run `warm` again
-later) · `unreachable` (nothing fetched — a stale copy, if any, is kept and said so).
+attempt summary is printed below the table) · `unresolved (recent)` (see above) ·
+`denied (noise list)` · `skipped (rate cap)` (the 100-resolutions-per-hour cap was reached
+mid-run; the run continues; run `warm` again later) · `unreachable` (nothing fetched — a
+stale copy, if any, is kept and said so).
 
 **Exit code** `0` when every attempted dependency is `cached`, `already fresh` or
-`resolved+cached` (denied names do not count); `1` when any is `unresolved`, `unreachable`
-or `skipped (rate cap)` — the promise is "your stack's docs are on disk", and they are not
-yet; `2` for a usage error, an unreadable config, a directory that is not a directory, or a
-directory with no manifest to read. `vibectx warm [dir]` takes the directory (default: the
-current one); `--offline` prints a cache-only report (fresh / stale / missing per name, unknown
-names `unresolved`) without touching the network or writing anything; `--json` emits
-`{ schemaVersion: 1, generatedAt, dir, offline, manifests, notes, dependencies: [{ name,
-ecosystem, source, library?, status, url?, note? }], cached, attempted, denied, total }` —
-keys in that order; new keys may be appended; read keys by name. `--config <path>` loads
-your config first, so pinned entries win.
+`resolved+cached` (denied names do not count); `1` when any is `unresolved`,
+`unresolved (recent)`, `unreachable` or `skipped (rate cap)` — the promise is "your stack's
+docs are on disk", and they are not yet; `2` for a usage error, an unreadable config, a
+directory that is not a directory, or a directory with no manifest to read. `vibectx warm
+[dir]` takes any directory (default: the current one); the `warm_project` tool accepts only
+the server's working directory or a directory beneath it and answers "outside the project
+directory" for anything else. `--offline` prints a cache-only report (fresh / stale / missing
+per name, unknown names `unresolved`) without touching the network or writing anything;
+`--force` retries recent failures; `--json` emits `{ schemaVersion: 1, generatedAt, dir,
+offline, manifests, notes, dependencies: [{ name, ecosystem, source, library?, status, url?,
+note?, failedAt? }], cached, attempted, denied, total }` — keys in that order (each row's
+keys in that order too); new keys may be appended; read keys by name. `schemaVersion` is
+bumped when a key is renamed, removed or changes meaning **and when a status value is added
+or removed** — readers drop rows whose status they do not know. `--config <path>` loads your
+config first, so pinned entries win.
 
 **Noise list.** `DEPENDENCY_DENYLIST` in `src/project-deps.ts` (a trailing `*` is a prefix
 rule): npm `@types/*`, `eslint*`, `@eslint/*`, `prettier*`, `@typescript-eslint/*`,
@@ -138,21 +163,24 @@ manifest exists.
 
 **Project record.** Each run (not `--offline`) writes `projects/<hash of the absolute
 directory>.json` in the cache directory — `{ schemaVersion: 1, dir, manifests,
-dependencies, warmedAt }`, atomically, validated on read, a file with another
-`schemaVersion` left alone. It is informational: `list_libraries` ends with one line,
-`Project deps (<dir>): N cached, M unresolved, K denied — warmed <time>`, when a record
-exists for the server's working directory. Nothing reads it to decide what to fetch.
+dependencies, warmedAt }`, atomically and validated on read. A file with an **older**
+`schemaVersion` is replaced; one with a **newer** `schemaVersion` (written by a newer
+vibectx) is left alone with a note on stderr — the same rule `resolved.json` follows. It
+feeds one decision, the 24-hour `unresolved (recent)` memo above; otherwise it is
+informational: `list_libraries` ends with one line, `Project deps (<dir>): N cached, M
+unresolved, K denied — warmed <time>`, when a record exists for the server's working directory.
 
 **Background revalidation on startup.** When the MCP server starts (never under `doctor`,
-`resolve`, `warm` or with `--offline`), any *configured* library — default or config, not
-auto-resolved records — that is uncached or past its TTL is fetched in the background
-after the transport is connected: two at a time, `If-None-Match` first, so a warm cache
-costs one conditional request per stale entry and nothing for fresh ones, while a first
-start with an empty cache fetches the 30 defaults the way `refresh` would. It never delays
-the handshake or a tool call; `list_libraries` shows `warming…` on entries in flight; the
-outcome is one line on stderr (`vibectx: autowarm cached N/M configured libraries`), and
-every error stays there — the server does not depend on it. Opt out with
-`VIBECTX_NO_AUTOWARM=1` in the server's environment.
+`resolve` or `warm`), any *configured* library — default or config, not auto-resolved
+records — that is uncached or past its TTL is fetched in the background after the transport
+is connected: two at a time, `If-None-Match` first, so a warm cache costs one conditional
+request per stale entry and nothing for fresh ones, while a first start with an empty cache
+fetches the 30 defaults the way `refresh` would. It never delays the handshake or a tool
+call; `list_libraries` shows `warming…` on entries in flight; the outcome is one line on
+stderr (`vibectx: autowarm cached N/M configured libraries`), and every error stays there —
+the server does not depend on it. When the client closes the connection, nothing further is
+scheduled and the process ends (a fetch already in flight is given 100 ms). Opt out with
+`VIBECTX_NO_AUTOWARM=1` in the server's environment (see [Configuration](#configuration)).
 
 ## Any library, no config
 
@@ -214,8 +242,8 @@ wins, and a persisted resolution never overrides one — not even a record whose
 different-case spelling of a curated one (record names must already be lowercase; PyPI
 names are stored in their PEP 503 form, so `typing_extensions` and `Typing-Extensions`
 are one record). Records are re-validated on every load (bad ones are skipped; a corrupt
-file is ignored; a file written by a newer vibectx with another `schemaVersion` is left
-alone and new resolutions stay in memory, with a note on stderr). `list_libraries` marks
+file is ignored; a file written by a **newer** vibectx — a higher `schemaVersion` — is left
+alone and new resolutions stay in memory, with a note on stderr; a lower one is replaced). `list_libraries` marks
 them `[resolved]` and prefixes their descriptions `(package-supplied)`; `doctor` checks
 them like any entry; `refresh` re-resolves them through the same ecosystem, so a project
 that later publishes `llms.txt` is picked up.
@@ -325,6 +353,8 @@ npx -y @blackraptorai/vibectx --config ./vibectx.config.json
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
+`VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
+[background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
 [`allowedHosts` and followed links](#any-library-no-config).
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
