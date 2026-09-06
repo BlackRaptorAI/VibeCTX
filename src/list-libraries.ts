@@ -1,4 +1,6 @@
+import { homedir } from "node:os";
 import type { Registry } from "./registry.js";
+import { describeConfig } from "./config.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { classifySourceKind } from "./doctor.js";
 import { autowarmStatus } from "./autowarm.js";
@@ -9,6 +11,10 @@ export interface ListLibrariesOptions {
   projectDir?: string;
   /** Entries the startup autowarm has in flight (default: the live set). */
   warming?: ReadonlySet<string>;
+  /** Directory the config paths in the header are shown relative to (default: process.cwd()). */
+  cwd?: string;
+  /** Home directory the header `~`-abbreviates against (default: os.homedir()). */
+  home?: string;
 }
 
 /** The list_libraries tool body. One line per library: name (plus `(aka …)` when it has
@@ -40,5 +46,11 @@ export function listLibrariesText(registry: Registry, opts: ListLibrariesOptions
   });
   const record = readProjectRecord(opts.projectDir ?? process.cwd());
   const footer = record ? `\n\n${summariseProjectRecord(record)}` : "";
-  return `Cache dir: ${cacheRoot()}\n\n${rows.join("\n")}${footer}`;
+  // D-18 (PAR-657): which config files this server actually loaded, in precedence order,
+  // then any deprecation / ignored-file note. A hand-built registry has no resolution to
+  // report, so it keeps the 0.1.x header.
+  const header = registry.config
+    ? describeConfig(registry.config, { cwd: opts.cwd ?? process.cwd(), home: opts.home ?? homedir() })
+    : [];
+  return `${[...header, `Cache dir: ${cacheRoot()}`].join("\n")}\n\n${rows.join("\n")}${footer}`;
 }

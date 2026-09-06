@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
-import { loadRegistry, type Registry } from "../src/registry.js";
+import { loadRegistry, loadRegistryFrom, type Registry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 
 let dir: string;
@@ -131,5 +131,51 @@ describe("listLibrariesText (PAR-656: warming… marker and project line)", () =
     } finally {
       cwd.mockRestore();
     }
+  });
+});
+
+describe("listLibrariesText: the config header (D-18, PAR-657)", () => {
+  const oneLibrary = (name: string): string => {
+    const path = join(dir, `${name}.json`);
+    writeFileSync(path, JSON.stringify({ libraries: [{ name, urls: [`https://${name}.example.com/llms.txt`] }] }), "utf8");
+    return path;
+  };
+
+  it("says `none (shipped defaults)` when no config was loaded, before the cache dir", () => {
+    const text = listLibrariesText(loadRegistry(), { cwd: dir, home: dir });
+    expect(text.split("\n").slice(0, 2)).toEqual(["config: none (shipped defaults)", `Cache dir: ${dir}`]);
+  });
+
+  it("names an explicit --config source", () => {
+    const path = oneLibrary("acme");
+    const text = listLibrariesText(loadRegistry(path), { cwd: dir, home: dir });
+    expect(text.split("\n")[0]).toBe("config: --config ./acme.json");
+    expect(text).toMatch(/- \*\*acme\*\*/);
+  });
+
+  it("names the project and user files, highest precedence first, with the notes on the next lines", () => {
+    const project = oneLibrary("team");
+    const user = oneLibrary("personal");
+    const registry = loadRegistryFrom({
+      files: [
+        { path: user, scope: "user", legacy: false },
+        { path: project, scope: "project", legacy: false },
+      ],
+      notes: ["./docs-cache.config.json is deprecated: rename it to vibectx.config.json"],
+    });
+    const lines = listLibrariesText(registry, { cwd: dir, home: dir }).split("\n");
+    expect(lines[0]).toBe("config: ./team.json (project) · ./personal.json (user)");
+    expect(lines[1]).toBe("./docs-cache.config.json is deprecated: rename it to vibectx.config.json");
+    expect(lines[2]).toBe(`Cache dir: ${dir}`);
+  });
+
+  it("names an env source", () => {
+    const path = oneLibrary("env-team");
+    const registry = loadRegistryFrom({ files: [{ path, scope: "env", legacy: false }], notes: [] });
+    expect(listLibrariesText(registry, { cwd: dir, home: dir }).split("\n")[0]).toBe("config: VIBECTX_CONFIG=./env-team.json");
+  });
+
+  it("omits the header for a hand-built registry (no config resolution to report)", () => {
+    expect(listLibrariesText(registry).startsWith(`Cache dir: ${dir}\n\n`)).toBe(true);
   });
 });
