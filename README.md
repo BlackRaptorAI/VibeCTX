@@ -90,11 +90,21 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
 uses to prove the entry answers; without them a query is derived from the description.
 An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.
-`aliases` (optional, array of non-empty strings; `[]` = none) must be unique across the
-registry and must not equal any library's `name` — a collision is a config error that
-names both sides. A config entry with the same `name` as a default replaces the whole
-default entry, aliases included (so `"aliases": []` on an override also frees that
-default's aliases for your own use).
+`aliases` (optional, array of non-empty strings; `[]` = none) are other names that resolve
+to the entry. Unknown top-level keys in the config (for example `$comment`) are ignored.
+
+Names and aliases are trimmed and lower-cased before anything else, so `"name": "Next.js"`
+overrides `next.js`. Precedence:
+
+- **Config beats default alias.** A config entry whose `name` or alias equals a *default's
+  alias* wins; that alias is silently dropped from the default (`{"name": "next"}` loads and
+  `next` is yours, while `next.js` and `nextjs` still reach the default).
+- **Alias vs. canonical name is an error.** A config alias equal to any library's `name`
+  (default or config), the same alias on two config entries, or an alias equal to its own
+  entry's name fails to load, with a message naming both sides.
+- **An override keeps the default's aliases unless you say otherwise.** Overriding a default
+  (same `name`) and omitting `aliases` inherits them; `"aliases": []` clears them; an
+  explicit list replaces them.
 
 **Keep a private stack via committed config.** The default registry is what most teams
 share; what only *your* team uses belongs in a `vibectx.config.json` committed to your
