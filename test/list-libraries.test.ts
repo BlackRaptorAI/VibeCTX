@@ -40,6 +40,21 @@ describe("listLibrariesText (PAR-707: kind bracket)", () => {
     expect(text).toMatch(/- \*\*pgvector\*\* —  \[not cached\] \[unknown\]/);
   });
 
+  it("shows aliases briefly after the name, and nothing extra for entries without them (PAR-654)", () => {
+    const withAliases: Registry = {
+      entries: new Map([
+        ["next.js", { name: "next.js", urls: ["https://nextjs.org/llms.txt"], description: "Next.js", aliases: ["next", "nextjs"] }],
+        ["hono", { name: "hono", urls: ["https://hono.dev/llms.txt"], description: "Hono", aliases: [] }],
+        ["zod", { name: "zod", urls: ["https://zod.dev/llms.txt"], description: "Zod" }],
+      ]),
+    };
+    const text = listLibrariesText(withAliases);
+    expect(text).toMatch(/- \*\*next\.js\*\* \(aka next, nextjs\) — Next\.js \[not cached\] \[unknown\]/);
+    expect(text).toMatch(/- \*\*hono\*\* — Hono \[not cached\]/);
+    expect(text).toMatch(/- \*\*zod\*\* — Zod \[not cached\]/);
+    expect(text).not.toMatch(/hono\*\* \(aka/);
+  });
+
   it("uses the first cached candidate URL for the classification", () => {
     writeCache("fastify", "https://fastify.dev/llms-full.txt", "# Fastify\n\nFull prose reference.\n\n## Server\n\nOptions.");
     writeCache("fastify", "https://fastify.dev/llms.txt", "# Fastify\n- [A](/docs/A.md)\n- [B](/docs/B.md)\n- [C](/docs/C.md)");

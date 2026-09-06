@@ -106,6 +106,7 @@ describe("dispatchCli", () => {
     expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total"]);
     expect(report.schemaVersion).toBe(1);
     expect(report.total).toBe(DEFAULT_REGISTRY.length);
+    expect(report.total).toBe(30); // PAR-654: the vibe-coder top-30
     expect(report.healthy).toBe(0);
     expect(report.libraries.every((l: { kind: string }) => l.kind === "unreachable")).toBe(true);
     expect(report.libraries.map((l: { library: string }) => l.library)).toEqual(DEFAULT_REGISTRY.map((e) => e.name));
@@ -132,6 +133,26 @@ describe("dispatchCli", () => {
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--bogus"], a)).toBe(2);
     expect(a.err.join("")).toMatch(/Unknown option "--bogus"/);
     expect(a.err.join("")).toMatch(/usage: vibectx doctor \[--json\] \[--library <name>\] \[--config <path>\] \[--offline\]/);
+  });
+
+  it("--library accepts an alias and reports the canonical row (PAR-654)", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    const config = writeConfig([{ name: "react", urls: [REACT_URL], aliases: ["reactjs"], probeQueries: ["useEffect cleanup"] }]);
+    const a = io();
+    const code = await dispatchCli(
+      ["node", "dist/index.js", "doctor", "--config", config, "--library", "reactjs", "--offline"],
+      a,
+    );
+    expect(code).toBe(0);
+    expect(a.out.join("")).toMatch(/\nreact\s+full-text/);
+    expect(a.out.join("")).toContain("1/1 libraries healthy");
+  });
+
+  it("exits 2 when the config declares an alias that collides with a canonical name", async () => {
+    const a = io();
+    const bad = writeConfig([{ name: "x", urls: ["https://x.example/llms.txt"], aliases: ["react"] }]);
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", bad, "--offline"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/Could not load config .*alias "react"/);
   });
 
   it("exits 2 on an unknown library", async () => {

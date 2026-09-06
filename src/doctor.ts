@@ -1,4 +1,4 @@
-import type { LibraryEntry, Registry } from "./registry.js";
+import { resolveLibrary, type LibraryEntry, type Registry } from "./registry.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { looksLikeIndex } from "./retrieval.js";
@@ -255,7 +255,7 @@ function unknownLibraryMessage(registry: Registry, library: string): string {
 export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): Promise<DoctorReport> {
   let entries = [...registry.entries.values()];
   if (opts.library !== undefined) {
-    const one = registry.entries.get(opts.library);
+    const one = resolveLibrary(registry, opts.library); // canonical name or alias
     if (!one) throw new Error(unknownLibraryMessage(registry, opts.library));
     entries = [one];
   }
@@ -272,7 +272,7 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
 /** The MCP `doctor` tool body: the table for the registry or one library, or the
  *  unknown-library message (no probe is run in that case). */
 export async function doctorToolText(registry: Registry, library?: string): Promise<string> {
-  if (library !== undefined && !registry.entries.has(library)) return unknownLibraryMessage(registry, library);
+  if (library !== undefined && !resolveLibrary(registry, library)) return unknownLibraryMessage(registry, library);
   return formatDoctorTable(await runDoctor(registry, { library }));
 }
 

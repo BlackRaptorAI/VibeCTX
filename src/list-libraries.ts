@@ -2,9 +2,9 @@ import type { Registry } from "./registry.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { classifySourceKind } from "./doctor.js";
 
-/** The list_libraries tool body. One line per library: description, cache status,
- *  and the source kind classified from the cached document (`unknown` until cached;
- *  `vibectx doctor` fetches and probes). Never touches the network. */
+/** The list_libraries tool body. One line per library: name (plus `(aka …)` when it has
+ *  aliases), description, cache status, and the source kind classified from the cached
+ *  document (`unknown` until cached; `vibectx doctor` fetches and probes). Never touches the network. */
 export function listLibrariesText(registry: Registry): string {
   const rows = [...registry.entries.values()].map((e) => {
     const ttl = e.ttlHours ?? 168;
@@ -21,7 +21,8 @@ export function listLibrariesText(registry: Registry): string {
       ? `cached ${cached.meta.fetchedAt}${cached.stale ? " (stale)" : ""}`
       : "not cached";
     const kind = cached && cachedUrl ? classifySourceKind(cachedUrl, cached.content) : "unknown";
-    return `- **${e.name}** — ${e.description ?? ""} [${status}] [${kind}]`;
+    const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.join(", ")})` : "";
+    return `- **${e.name}**${aka} — ${e.description ?? ""} [${status}] [${kind}]`;
   });
   return `Cache dir: ${cacheRoot()}\n\n${rows.join("\n")}`;
 }

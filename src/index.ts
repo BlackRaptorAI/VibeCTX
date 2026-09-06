@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadRegistry } from "./registry.js";
+import { loadRegistry, resolveLibrary } from "./registry.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { getDocs } from "./get-docs.js";
 import { listLibrariesText } from "./list-libraries.js";
@@ -37,7 +37,7 @@ async function startServer(): Promise<void> {
       description:
         "Get official documentation for a library. With a topic, returns the best-matching sections (following index links when the source is an llms.txt index); without one, returns the document head and section list.",
       inputSchema: {
-        library: z.string().describe("Library name from list_libraries"),
+        library: z.string().describe("Library name (or alias) from list_libraries"),
         topic: z.string().optional().describe("What you need docs about"),
         maxTokens: z
           .number()
@@ -46,7 +46,7 @@ async function startServer(): Promise<void> {
       },
     },
     async ({ library, topic, maxTokens }) => {
-      const entry = registry.entries.get(library);
+      const entry = resolveLibrary(registry, library);
       if (!entry) {
         const known = [...registry.entries.keys()].join(", ");
         return text(`Unknown library "${library}". Known: ${known}`);
@@ -66,7 +66,7 @@ async function startServer(): Promise<void> {
     },
     async ({ library }) => {
       const targets = library
-        ? [registry.entries.get(library)].filter((e) => e !== undefined)
+        ? [resolveLibrary(registry, library)].filter((e) => e !== undefined)
         : [...registry.entries.values()];
       if (targets.length === 0) return text(`Unknown library "${library}".`);
       const results: string[] = [];
@@ -88,7 +88,7 @@ async function startServer(): Promise<void> {
       description:
         "Check that retrieval actually works per library: source kind (full-text / index-only / readme / unreachable), cache age and staleness, and whether each library's probe queries return sections through get_docs. Same report as `vibectx doctor`. Measures retrieval, not correctness.",
       inputSchema: {
-        library: z.string().optional().describe("Check one library only (default: all)"),
+        library: z.string().optional().describe("Check one library only, by name or alias (default: all)"),
       },
     },
     async ({ library }) => text(await doctorToolText(registry, library)),

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache, urlSlug } from "../src/cache.js";
-import type { LibraryEntry, Registry } from "../src/registry.js";
+import { loadRegistry, type LibraryEntry, type Registry } from "../src/registry.js";
 import {
   runDoctor,
   classifySourceKind,
@@ -401,6 +401,34 @@ describe("runDoctor library filter", () => {
       /Unknown library "nope"/,
     );
   });
+
+  it("resolves an alias to its canonical entry and reports it under the canonical name (PAR-654)", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    const report = await runDoctor(
+      reg(
+        { name: "react", urls: [REACT_URL], aliases: ["reactjs"], probeQueries: ["useEffect cleanup"] },
+        { name: "ghost", urls: ["https://ghost.example.com/llms.txt"] },
+      ),
+      { library: "reactjs" },
+    );
+    expect(report.libraries.map((l) => l.library)).toEqual(["react"]);
+    expect(report.libraries[0].healthy).toBe(true);
+  });
+});
+
+describe("runDoctor on the shipped default registry (PAR-654)", () => {
+  it("--offline with an empty cache reports 30 rows, all unreachable, without touching the network", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const report = await runDoctor(loadRegistry(), { offline: true });
+    expect(spy).not.toHaveBeenCalled();
+    expect(report.total).toBe(30);
+    expect(report.libraries).toHaveLength(30);
+    expect(report.healthy).toBe(0);
+    expect(report.libraries.every((l) => l.kind === "unreachable")).toBe(true);
+    expect(formatDoctorTable(report)).toContain("0/30 libraries healthy");
+  });
 });
 
 describe("report shape, table and exit code", () => {
@@ -548,5 +576,16 @@ describe("doctorToolText (MCP doctor tool body)", () => {
     const out = await doctorToolText(reg({ name: "react", urls: [REACT_URL] }), "nope");
     expect(out).toBe('Unknown library "nope". Known: react');
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("accepts an alias for the library argument (PAR-654)", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    const out = await doctorToolText(
+      reg({ name: "react", urls: [REACT_URL], aliases: ["reactjs"], probeQueries: ["useEffect cleanup"] }),
+      "reactjs",
+    );
+    expect(out).toContain("1/1 libraries healthy");
+    expect(out).toMatch(/\nreact\s+full-text/);
   });
 });
