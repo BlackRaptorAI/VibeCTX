@@ -102,7 +102,21 @@ export interface IndexedDocument {
   /** The cached URL this posting list describes. Used to REFUSE the entry when `search` is
    *  serving another URL for the library; never rendered. */
   url: string;
-  /** The cache meta's `fetchedAt` at index time. Provenance; never rendered. */
+  /**
+   * When this entry was written — provenance only. Never rendered, and it gates nothing: the
+   * HASH is what decides whether an entry may be used.
+   *
+   * K2, the divergence stated rather than left to be discovered: this field carries TWO
+   * meanings depending on which writer produced the entry. `warm` and the startup autowarm
+   * hold the cache meta, so they pass the document's own `fetchedAt` — when the document was
+   * fetched. `get_docs` and `resolvePackage` hold the text but not its meta, so they let it
+   * default to the INDEXING instant, which is at most milliseconds after the fetch that
+   * produced it. Reading a second multi-megabyte file to align them would cost real time for a
+   * field nothing reads; giving it one meaning would mean either that read or dropping the
+   * cache's own timestamp where we have it. Neither is worth it — so it is documented, and no
+   * code may start treating it as the document's age. (`search` reports staleness from the
+   * CACHE meta, not from here.)
+   */
   fetchedAt: string;
   /** `documentHash` of the text that was indexed. The gate on every use. */
   hash: string;
@@ -449,9 +463,82 @@ export function resetSearchIndexMemo(): void {
 }
 
 /**
- * D-34 (a) — the incremental hook every writer of a PRIMARY cached document calls: `warm`,
- * the startup autowarm, `get_docs`. Cheap and silent when there is nothing to do (the memo
- * says this process already indexed this exact text), best effort when there is.
+ * R2 — ONE RUN, ONE READ. `warm` and the startup autowarm write thirty primary documents in a
+ * row; calling `indexCachedDocument` per library parsed the whole index file thirty times to
+ * discover, thirty times, that there was nothing to do. MEASURED: 7,529 ms added to an
+ * already-fresh 30-library / 150 MB warm for zero index change.
+ *
+ * A session reads the file ONCE (lazily, on the first library that the in-process memo cannot
+ * answer for), builds posting lists as documents arrive, and writes ONCE at the end. The final
+ * write re-reads first, so a concurrent writer — another `vibectx` process, a `get_docs` in the
+ * same run — is merged rather than clobbered; that is one extra read per run, not per library.
+ *
+ * `flush()` is safe to call more than once and does nothing when nothing changed. Nothing here
+ * throws: the index is derived, so a failure leaves the caller's own result untouched (D-13).
+ */
+export interface IndexSession {
+  /** Offer one primary cached document to the index. Cheap when it is already indexed. */
+  add(library: string, url: string, text: string, fetchedAt?: string): void;
+  /** Write what was collected. True when the file was rewritten. */
+  flush(): boolean;
+}
+
+export function openIndexSession(
+  warn: (message: string) => void = (m) => process.stderr.write(m),
+  onShed?: (shed: string[]) => void,
+): IndexSession {
+  let snapshot: Map<string, IndexedDocument> | undefined;
+  const pending = new Map<string, { doc: IndexedDocument; hash: string }>();
+  return {
+    add(library, url, text, fetchedAt) {
+      const key = library.trim().toLowerCase();
+      if (!validLibraryKey(key)) return;
+      try {
+        const hash = documentHash(text);
+        if (memo.get(key) === hash) return;
+        snapshot ??= readIndex().libraries; // the ONE read
+        const existing = snapshot.get(key);
+        if (existing && existing.hash === hash && existing.url === url) {
+          memo.set(key, hash);
+          return;
+        }
+        // `fetchedAt` is provenance only — it is never rendered and never gates anything (the
+        // HASH does). A caller that has the cache meta to hand passes it; one that does not
+        // (get_docs, which holds the document but not its meta) lets it default to the indexing
+        // instant rather than paying a second full read of a multi-megabyte file for a field
+        // nobody reads. K2: the two meanings are documented on `IndexedDocument.fetchedAt`.
+        const doc = indexDocument(url, text, fetchedAt ?? new Date().toISOString());
+        if (doc === undefined) return; // too large to index; search tokenizes it at query time (D-36)
+        pending.set(key, { doc, hash });
+      } catch (e) {
+        warn(`vibectx: search index not updated for "${key}": ${e instanceof Error ? e.message : String(e)}\n`);
+      }
+    },
+    flush() {
+      if (pending.size === 0) return false;
+      try {
+        // Re-read rather than reusing the snapshot: between the first `add` and here, another
+        // process may have written entries this run knows nothing about, and the index is a
+        // shared cache, not this run's private state.
+        const { libraries } = readIndex();
+        for (const [key, { doc }] of pending) libraries.set(key, doc);
+        const written = writeIndex(libraries, warn, onShed);
+        if (written) for (const [key, { hash }] of pending) memo.set(key, hash);
+        pending.clear();
+        return written;
+      } catch (e) {
+        warn(`vibectx: search index not updated: ${e instanceof Error ? e.message : String(e)}\n`);
+        pending.clear();
+        return false;
+      }
+    },
+  };
+}
+
+/**
+ * D-34 (a) — the incremental hook a writer of ONE primary cached document calls (`get_docs`,
+ * `resolvePackage`). A one-document session: read, build, write. Callers writing MANY documents
+ * in a row open a session instead (R2) — `warm` and the autowarm do.
  *
  * Never throws and never blocks the caller's own result: a document too large to index, an
  * unwritable cache, a newer schema on disk — each leaves the caller's fetch exactly as
@@ -464,26 +551,7 @@ export function indexCachedDocument(
   fetchedAt?: string,
   warn: (message: string) => void = (m) => process.stderr.write(m),
 ): void {
-  const key = library.trim().toLowerCase();
-  if (!validLibraryKey(key)) return;
-  try {
-    const hash = documentHash(text);
-    if (memo.get(key) === hash) return;
-    const { libraries } = readIndex();
-    const existing = libraries.get(key);
-    if (existing && existing.hash === hash && existing.url === url) {
-      memo.set(key, hash);
-      return;
-    }
-    // `fetchedAt` is provenance only — it is never rendered and never gates anything (the HASH
-    // does). A caller that has the cache meta to hand passes it; one that does not (get_docs,
-    // which holds the document but not its meta) lets it default to the indexing instant rather
-    // than paying a second full read of a multi-megabyte file for a field nobody reads.
-    const doc = indexDocument(url, text, fetchedAt ?? new Date().toISOString());
-    if (doc === undefined) return; // too large to index; search tokenizes it at query time (D-36)
-    libraries.set(key, doc);
-    if (writeIndex(libraries, warn)) memo.set(key, hash);
-  } catch (e) {
-    warn(`vibectx: search index not updated for "${key}": ${e instanceof Error ? e.message : String(e)}\n`);
-  }
+  const session = openIndexSession(warn);
+  session.add(library, url, text, fetchedAt);
+  session.flush();
 }

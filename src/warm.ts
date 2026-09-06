@@ -5,7 +5,7 @@ import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resol
 import { getLibraryDoc } from "./fetcher.js";
 import { readCache, cacheRoot, type CacheHit } from "./cache.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
-import { indexCachedDocument } from "./search-index.js";
+import { openIndexSession, type IndexSession } from "./search-index.js";
 import { mapLimit } from "./doctor.js";
 import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
 import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, PROJECT_RECORD_SCHEMA_VERSION, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
@@ -145,16 +145,20 @@ function cachedState(entry: LibraryEntry): { fresh?: { url: string; hit: CacheHi
  *
  * Only the PRIMARY document, never a followed index page. Best effort throughout: the index is
  * a derived cache, so a failure here changes the warm row not at all (D-13).
+ *
+ * R2: the whole run shares ONE session, so the index file is read once and written once
+ * instead of once per library. MEASURED before that: 7,529 ms added to an already-fresh
+ * 30-library / 150 MB warm for zero index change.
  */
-function indexWarmed(entry: LibraryEntry, url: string, content: string, fetchedAt?: string, warn?: (m: string) => void): void {
-  indexCachedDocument(entry.name, url, content, fetchedAt, warn ?? ((m) => process.stderr.write(m)));
+function indexWarmed(session: IndexSession, entry: LibraryEntry, url: string, content: string, fetchedAt?: string): void {
+  session.add(entry.name, url, content, fetchedAt);
 }
 
 type Outcome = Pick<WarmRow, "status" | "url" | "note">;
 
 /** One run's state: the per-entry memo (names sharing an entry share one fetch) and the
  *  recent-failure memo read from the previous project record. */
-type RunState = { entryJobs: Map<string, Promise<Outcome>>; recent: Map<string, WarmRow>; nowMs: number };
+type RunState = { entryJobs: Map<string, Promise<Outcome>>; recent: Map<string, WarmRow>; nowMs: number; index: IndexSession };
 
 const memoKey = (ecosystem: DependencyEcosystem, name: string) => `${ecosystem}:${name}`;
 
@@ -176,24 +180,24 @@ function ecosystemNote(entry: LibraryEntry, dep: ProjectDependency): string | un
 }
 
 /** Warm one registry entry: fresh cache → no network; else getLibraryDoc (etag-first). */
-async function warmEntry(entry: LibraryEntry, opts: WarmOptions): Promise<Outcome> {
+async function warmEntry(entry: LibraryEntry, opts: WarmOptions, session: IndexSession): Promise<Outcome> {
   const { fresh, stale } = cachedState(entry);
   if (fresh) {
-    indexWarmed(entry, fresh.url, fresh.hit.content, fresh.hit.meta.fetchedAt, opts.warn);
+    indexWarmed(session, entry, fresh.url, fresh.hit.content, fresh.hit.meta.fetchedAt);
     return { status: "already fresh", url: fresh.url };
   }
   if (opts.offline) {
     if (!stale) return { status: "unreachable", note: "not cached; offline" };
-    indexWarmed(entry, stale.url, stale.hit.content, stale.hit.meta.fetchedAt, opts.warn);
+    indexWarmed(session, entry, stale.url, stale.hit.content, stale.hit.meta.fetchedAt);
     return { status: "cached", url: stale.url, note: `stale copy from ${stale.hit.meta.fetchedAt}; offline` };
   }
   const doc = await getLibraryDoc(entry);
   if (!doc) return { status: "unreachable", note: "all candidate URLs unreachable" };
   if (doc.staleNote) {
-    indexWarmed(entry, doc.url, doc.content, stale?.hit.meta.fetchedAt, opts.warn);
+    indexWarmed(session, entry, doc.url, doc.content, stale?.hit.meta.fetchedAt);
     return { status: "unreachable", url: doc.url, note: `stale copy from ${stale?.hit.meta.fetchedAt ?? "earlier"} kept; all candidate URLs unreachable just now` };
   }
-  indexWarmed(entry, doc.url, doc.content, undefined, opts.warn);
+  indexWarmed(session, entry, doc.url, doc.content, undefined);
   return { status: "cached", url: doc.url };
 }
 
@@ -205,7 +209,7 @@ async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts
   if (entry) {
     let job = run.entryJobs.get(entry.name);
     if (!job) {
-      job = warmEntry(entry, opts);
+      job = warmEntry(entry, opts, run.index);
       run.entryJobs.set(entry.name, job);
     }
     const outcome = await job;
@@ -296,8 +300,21 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     throw new Error(`no dependency manifest in ${dir}${why}; looked for ${MANIFEST_FILES.join(", ")}`);
   }
   const nowMs = (opts.now ?? (() => new Date()))().getTime();
-  const run: RunState = { entryJobs: new Map(), recent: opts.offline ? new Map() : recentFailures(dir, nowMs), nowMs };
-  const rows = await mapLimit(discovery.dependencies, opts.concurrency ?? WARM_CONCURRENCY, (dep) => warmOne(registry, dep, opts, run));
+  const warn = opts.warn ?? ((m: string) => process.stderr.write(m));
+  const run: RunState = {
+    entryJobs: new Map(),
+    recent: opts.offline ? new Map() : recentFailures(dir, nowMs),
+    nowMs,
+    index: openIndexSession(warn),
+  };
+  let rows: WarmRow[];
+  try {
+    rows = await mapLimit(discovery.dependencies, opts.concurrency ?? WARM_CONCURRENCY, (dep) => warmOne(registry, dep, opts, run));
+  } finally {
+    // R2: one write for the whole run, and it happens even when the run threw — a half-warmed
+    // cache with an index describing it is strictly better than one with no index at all.
+    run.index.flush();
+  }
   const cached = rows.filter((r) => CACHED_STATUSES.has(r.status)).length;
   const denied = rows.filter((r) => r.status === "denied (noise list)").length;
   const report: WarmReport = {

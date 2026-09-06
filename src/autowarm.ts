@@ -2,7 +2,7 @@ import type { LibraryEntry, Registry } from "./registry.js";
 import { getLibraryDoc, type DocResult } from "./fetcher.js";
 import { readCache } from "./cache.js";
 import { mapLimit } from "./doctor.js";
-import { indexCachedDocument } from "./search-index.js";
+import { openIndexSession } from "./search-index.js";
 
 /**
  * Startup revalidation for the long-lived MCP server (PAR-656, from the PAR-653 comment:
@@ -99,6 +99,8 @@ export async function startAutowarm(
   const fetchDoc = opts.fetchDoc ?? ((entry: LibraryEntry) => getLibraryDoc(entry));
   const summary: AutowarmSummary = { attempted: 0, cached: 0, failed: [], aborted: 0 };
   const errors: string[] = [];
+  // R2: one index read and one index write for the whole autowarm, not one pair per library.
+  const index = openIndexSession(warn);
   try {
     const targets = configuredEntriesNeedingWarm(registry);
     summary.attempted = targets.length;
@@ -114,7 +116,7 @@ export async function startAutowarm(
         // behind, so the first `search` of a session is the fast path. Only the PRIMARY
         // document, and best effort — the index is derived, so a failure here changes nothing
         // about the warm (D-13).
-        if (doc) indexCachedDocument(entry.name, doc.url, doc.content, undefined, warn);
+        if (doc) index.add(entry.name, doc.url, doc.content);
         if (doc && !doc.staleNote) summary.cached += 1;
         else summary.failed.push(entry.name);
       } catch (e) {
@@ -127,6 +129,7 @@ export async function startAutowarm(
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
   } finally {
+    index.flush();
     inFlight.clear();
   }
   if (summary.attempted > 0 || errors.length > 0) {
