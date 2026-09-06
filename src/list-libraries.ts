@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import type { Registry } from "./registry.js";
 import { describeConfig } from "./config.js";
+import { cleanText } from "./project-deps.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { classifySourceKind } from "./doctor.js";
 import { autowarmStatus } from "./autowarm.js";
@@ -39,10 +40,13 @@ export function listLibrariesText(registry: Registry, opts: ListLibrariesOptions
     const base = cached ? `cached ${cached.meta.fetchedAt}${cached.stale ? " (stale)" : ""}` : "not cached";
     const status = warming.has(e.name) ? `${base}, warming…` : base;
     const kind = cached && cachedUrl ? classifySourceKind(cachedUrl, cached.content) : "unknown";
-    const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.join(", ")})` : "";
+    // S2 (PAR-657): name, aliases and description come from a config file or a package
+    // registry — text this process did not write. Clean every one of them at the point of
+    // render, so a terminal escape or a bidi override cannot ride out in a tool answer.
+    const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.map(cleanText).join(", ")})` : "";
     const resolved = e.resolved ? " [resolved]" : ""; // synthesized by resolve_library, not curated (PAR-655)
     const description = e.resolved && e.description ? `(package-supplied) ${e.description}` : (e.description ?? "");
-    return `- **${e.name}**${aka} — ${description} [${status}] [${kind}]${resolved}`;
+    return `- **${cleanText(e.name)}**${aka} — ${cleanText(description)} [${status}] [${kind}]${resolved}`;
   });
   const record = readProjectRecord(opts.projectDir ?? process.cwd());
   const footer = record ? `\n\n${summariseProjectRecord(record)}` : "";

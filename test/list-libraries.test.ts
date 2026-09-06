@@ -175,6 +175,30 @@ describe("listLibrariesText: the config header (D-18, PAR-657)", () => {
     expect(listLibrariesText(registry, { cwd: dir, home: dir }).split("\n")[0]).toBe("config: VIBECTX_CONFIG=./env-team.json");
   });
 
+  it("S2: config-supplied name, aliases and description are cleaned before they are rendered", () => {
+    // A committed config is a file the reader may not have written; a terminal escape or a
+    // bidi override in it must not survive into the tool's answer.
+    const path = join(dir, "nasty.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        libraries: [
+          {
+            name: "acme\u001b[31m",
+            aliases: ["acme\u200bjs"],
+            urls: ["https://docs.acme.example.com/llms.txt"],
+            description: "Acme\u001b[2J\u202e platform\u200b docs",
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const text = listLibrariesText(loadRegistry(path), { cwd: dir, home: dir });
+    // (newlines excepted: the output is a list)
+    expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/);
+    expect(text).toMatch(/- \*\*acme\[31m\*\* \(aka acmejs\) — Acme\[2J platform docs/);
+  });
+
   it("omits the header for a hand-built registry (no config resolution to report)", () => {
     expect(listLibrariesText(registry).startsWith(`Cache dir: ${dir}\n\n`)).toBe(true);
   });
