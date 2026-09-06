@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { cleanText } from "./project-deps.js";
 import type { LibraryEntry } from "./registry.js";
@@ -86,12 +86,24 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   return { files, notes };
 }
 
-/** `$XDG_CONFIG_HOME/vibectx`, else `<home>/.config/vibectx`; undefined when there is no home. */
+/**
+ * `$XDG_CONFIG_HOME/vibectx`, else `<home>/.config/vibectx`; undefined when there is no home.
+ * The XDG base directory spec requires an ABSOLUTE path and says a relative one must be
+ * ignored — and a relative one here would be resolved against the working directory, which
+ * is how an unrelated repo's `./vibectx/config.json` would become "the user's config" (K2).
+ */
 function userConfigDir(env: NodeJS.ProcessEnv, home: string): string | undefined {
   const xdg = (env.XDG_CONFIG_HOME ?? "").trim();
-  if (xdg) return join(xdg, "vibectx");
+  if (xdg && isAbsolute(xdg)) return join(xdg, "vibectx");
   if (!home) return undefined;
   return join(home, ".config", "vibectx");
+}
+
+/** `path.resolve` falls back to `process.cwd()` for a relative input; discovery must depend
+ *  only on the cwd it was given (K2), so an absolute path is merely normalised. */
+function fromCwd(cwd: string, path?: string): string {
+  if (path === undefined) return isAbsolute(cwd) ? normalize(cwd) : resolve(cwd);
+  return isAbsolute(path) ? normalize(path) : join(fromCwd(cwd), path);
 }
 
 /**
@@ -100,7 +112,7 @@ function userConfigDir(env: NodeJS.ProcessEnv, home: string): string | undefined
  * cwd at all, only cwd is checked, so a stray config in `/tmp` or `$HOME` is never picked up.
  */
 function projectDirs(cwd: string): string[] {
-  const start = resolve(cwd);
+  const start = fromCwd(cwd);
   const dirs: string[] = [];
   let cur = start;
   for (;;) {
@@ -151,8 +163,8 @@ function isRegularFile(path: string, show: (p: string) => string): boolean {
 /** D-18 display rule: relative to cwd when beneath it, `~`-abbreviated when under home,
  *  absolute otherwise. Always POSIX separators, so the header reads the same everywhere. */
 export function displayPath(path: string, cwd: string, home?: string): string {
-  const abs = isAbsolute(path) ? path : resolve(cwd, path);
-  const rel = relative(cwd, abs);
+  const abs = fromCwd(cwd, path);
+  const rel = relative(fromCwd(cwd), abs);
   if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) return `./${rel.split(sep).join("/")}`;
   if (home && (abs === home || abs.startsWith(home + sep))) return `~/${relative(home, abs).split(sep).join("/")}`;
   return abs;
@@ -182,6 +194,7 @@ export function describeConfig(resolution: ConfigResolution, opts: { cwd: string
 const URLS_MESSAGE = "must be a non-empty array of https URLs";
 const STRINGS_MESSAGE = "must be an array of non-empty strings";
 const LIBRARIES_MESSAGE = "must be an array of library entries";
+const TTL_MESSAGE = "must be a number of hours, 0 or greater (0 = always revalidate)";
 
 const isNonEmptyString = (v: unknown): boolean => typeof v === "string" && v.trim().length > 0;
 const isStringList = (v: unknown): boolean => Array.isArray(v) && v.every(isNonEmptyString);
@@ -205,16 +218,21 @@ const EntrySchema = z.object({
     .custom<string[]>((v) => Array.isArray(v) && v.every((h) => typeof h === "string"), "must be an array of hostnames")
     .optional(),
   description: z.string({ invalid_type_error: "must be a string" }).optional(),
+  // D-21: 0 is a real setting — "always revalidate", which is what a 0.1.3 config meant by it
+  // and what cache.ts still does with it. Only a negative or non-finite value is a mistake.
   ttlHours: z
-    .number({ invalid_type_error: "must be a positive number", required_error: "must be a positive number" })
-    .positive("must be a positive number")
+    .number({ invalid_type_error: TTL_MESSAGE, required_error: TTL_MESSAGE })
+    .finite(TTL_MESSAGE)
+    .min(0, TTL_MESSAGE)
     .optional(),
 });
 
-/** Unknown TOP-LEVEL keys (`$comment`, `$schema`) are ignored the same way. */
+/** Unknown TOP-LEVEL keys (`$comment`, `$schema`) are ignored the same way. D-21: `libraries`
+ *  itself is OPTIONAL — `{}` (and an explicit `null`) load as "no entries", which is how a
+ *  0.1.3 config with the key commented out behaved. Any other type is still an error. */
 const ConfigSchema = z.object(
   {
-    libraries: z.array(EntrySchema, { required_error: LIBRARIES_MESSAGE, invalid_type_error: LIBRARIES_MESSAGE }),
+    libraries: z.array(EntrySchema, { required_error: LIBRARIES_MESSAGE, invalid_type_error: LIBRARIES_MESSAGE }).nullish(),
   },
   { invalid_type_error: 'must be an object with a "libraries" array', required_error: 'must be an object with a "libraries" array' },
 );
@@ -266,5 +284,5 @@ export function readConfigFile(path: string, display: string = path): { librarie
     const where = issuePath(issue.path);
     throw new Error(`${display}: ${where === "" ? "" : `${where}: `}${cleanText(issue.message)}`);
   }
-  return parsed.data as { libraries: LibraryEntry[] };
+  return { libraries: (parsed.data.libraries ?? []) as LibraryEntry[] };
 }

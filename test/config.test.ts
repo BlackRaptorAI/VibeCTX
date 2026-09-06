@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -89,6 +89,27 @@ describe("discoverConfig: project + user layering order (D-14)", () => {
   it("returns no files at all when neither exists", () => {
     expect(discover().files).toEqual([]);
     expect(discover().notes).toEqual([]);
+  });
+
+  it("ignores a relative or empty XDG_CONFIG_HOME and falls back to ~/.config (K2)", () => {
+    const u = write(join(home, ".config", "vibectx"), "config.json", CONFIG("x", "https://u.example.com/llms.txt"));
+    expect(paths({ env: { XDG_CONFIG_HOME: "relative/xdg" } })).toEqual([`user:${u}`]);
+    expect(paths({ env: { XDG_CONFIG_HOME: "   " } })).toEqual([`user:${u}`]);
+    expect(paths({ env: { XDG_CONFIG_HOME: "" } })).toEqual([`user:${u}`]);
+  });
+
+  it("never consults process.cwd(): every path comes from the injected cwd (K2)", () => {
+    const p = write(repo, CONFIG_FILENAME, CONFIG("x", "https://p.example.com/llms.txt"));
+    const cwd = vi.spyOn(process, "cwd").mockImplementation(() => {
+      throw new Error("process.cwd() must not be consulted by discovery");
+    });
+    try {
+      const res = discoverConfig({ cwd: join(repo, "src", "deep"), env: {}, home });
+      expect(res.files.map((f) => f.path)).toEqual([p]);
+      expect(describeConfig(res, { cwd: repo, home })).toEqual(["config: ./vibectx.config.json (project)"]);
+    } finally {
+      cwd.mockRestore();
+    }
   });
 });
 
@@ -202,10 +223,28 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
     expect((libraries[0] as Record<string, unknown>).futureField).toBeUndefined();
   });
 
-  it("reports libraries missing or not an array", () => {
-    expect(bad({})).toThrow(/vibectx\.config\.json: libraries: must be an array of library entries/);
+  it("D-21: a file without libraries — or with null — loads as empty, exactly as 0.1.3 did", () => {
+    const empty = write(repo, CONFIG_FILENAME, JSON.stringify({ $comment: "no libraries yet" }));
+    expect(readConfigFile(empty).libraries).toEqual([]);
+    const nulled = write(repo, "nulled.json", JSON.stringify({ libraries: null }));
+    expect(readConfigFile(nulled).libraries).toEqual([]);
+  });
+
+  it("reports libraries that is neither an array nor null", () => {
     expect(bad({ libraries: { acme: {} } })).toThrow(/libraries: must be an array of library entries/);
+    expect(bad({ libraries: 3 })).toThrow(/libraries: must be an array of library entries/);
     expect(bad("[]")).toThrow(/vibectx\.config\.json: must be an object with a "libraries" array/);
+  });
+
+  it("D-21: ttlHours 0 means always revalidate and still loads; negative and non-finite are refused", () => {
+    const zero = write(repo, "zero.json", JSON.stringify({ libraries: [{ name: "a", urls: ["https://a.example.com/x"], ttlHours: 0 }] }));
+    expect(readConfigFile(zero).libraries[0].ttlHours).toBe(0);
+    const entry = (ttlHours: unknown) => ({ libraries: [{ name: "a", urls: ["https://a.example.com/x"], ttlHours }] });
+    expect(bad(entry(-1))).toThrow(/libraries\[0\]\.ttlHours.*must be a number of hours, 0 or greater/);
+    expect(bad(entry("24"))).toThrow(/libraries\[0\]\.ttlHours.*must be a number of hours, 0 or greater/);
+    expect(bad('{"libraries":[{"name":"a","urls":["https://a.example.com/x"],"ttlHours":1e999}]}')).toThrow(
+      /libraries\[0\]\.ttlHours.*must be a number of hours, 0 or greater/,
+    );
   });
 
   it("reports the entry index and field for a bad name or urls", () => {
@@ -232,8 +271,6 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
     expect(bad(entry({ probeQueries: [""] }))).toThrow(/libraries\[0\]\.probeQueries: must be an array of non-empty strings/);
     expect(bad(entry({ allowedHosts: "api.acme.com" }))).toThrow(/libraries\[0\]\.allowedHosts: must be an array of hostnames/);
     expect(bad(entry({ description: 3 }))).toThrow(/libraries\[0\]\.description: must be a string/);
-    expect(bad(entry({ ttlHours: 0 }))).toThrow(/libraries\[0\]\.ttlHours: must be a positive number/);
-    expect(bad(entry({ ttlHours: "24" }))).toThrow(/libraries\[0\]\.ttlHours: must be a positive number/);
   });
 
   it("never leaks a zod issue dump or a stack trace", () => {
