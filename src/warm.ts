@@ -34,7 +34,8 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
  * like any entry, never re-resolved (that is `refresh`'s job).
  *
  * Concurrency: WARM_CONCURRENCY names at once through the shared `mapLimit`; no per-host
- * serialisation (a scaffold's names spread over npm, GitHub and a few docs hosts).
+ * serialisation (a scaffold's names spread over npm, GitHub and a few docs hosts). Names
+ * that map to the same registry entry (`react` + `react-dom`) share one fetch per run.
  *
  * `offline`: a cache-only report — fresh → `already fresh`, stale → `cached` (noted),
  * uncached → `unreachable`, unknown → `unresolved`; no network, no project record.
@@ -102,26 +103,40 @@ function cachedState(entry: LibraryEntry): { freshUrl?: string; stale?: { url: s
   return { stale };
 }
 
-async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts: WarmOptions): Promise<WarmRow> {
+type Outcome = Pick<WarmRow, "status" | "url" | "note">;
+
+/** One run's per-entry memo, so names sharing an entry share one fetch. */
+type RunState = { entryJobs: Map<string, Promise<Outcome>> };
+
+/** Warm one registry entry: fresh cache → no network; else getLibraryDoc (etag-first). */
+async function warmEntry(entry: LibraryEntry, opts: WarmOptions): Promise<Outcome> {
+  const { freshUrl, stale } = cachedState(entry);
+  if (freshUrl) return { status: "already fresh", url: freshUrl };
+  if (opts.offline) {
+    return stale
+      ? { status: "cached", url: stale.url, note: `stale copy from ${stale.fetchedAt}; offline` }
+      : { status: "unreachable", note: "not cached; offline" };
+  }
+  const doc = await getLibraryDoc(entry);
+  if (!doc) return { status: "unreachable", note: "all candidate URLs unreachable" };
+  if (doc.staleNote) {
+    return { status: "unreachable", url: doc.url, note: `stale copy from ${stale?.fetchedAt ?? "earlier"} kept; all candidate URLs unreachable just now` };
+  }
+  return { status: "cached", url: doc.url };
+}
+
+async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts: WarmOptions, run: RunState): Promise<WarmRow> {
   const row: WarmRow = { name: dep.name, ecosystem: dep.ecosystem, source: dep.source, status: "unresolved" };
   if (isDeniedDependency(dep.name, dep.ecosystem)) return { ...row, status: "denied (noise list)" };
 
   const entry = lookupLibrary(registry, dep.name);
   if (entry) {
-    row.library = entry.name;
-    const { freshUrl, stale } = cachedState(entry);
-    if (freshUrl) return { ...row, status: "already fresh", url: freshUrl };
-    if (opts.offline) {
-      return stale
-        ? { ...row, status: "cached", url: stale.url, note: `stale copy from ${stale.fetchedAt}; offline` }
-        : { ...row, status: "unreachable", note: "not cached; offline" };
+    let job = run.entryJobs.get(entry.name);
+    if (!job) {
+      job = warmEntry(entry, opts);
+      run.entryJobs.set(entry.name, job);
     }
-    const doc = await getLibraryDoc(entry);
-    if (!doc) return { ...row, status: "unreachable", note: "all candidate URLs unreachable" };
-    if (doc.staleNote) {
-      return { ...row, status: "unreachable", url: doc.url, note: `stale copy from ${stale?.fetchedAt ?? "earlier"} kept; all candidate URLs unreachable just now` };
-    }
-    return { ...row, status: "cached", url: doc.url };
+    return { ...row, library: entry.name, ...(await job) };
   }
 
   if (opts.offline) return { ...row, status: "unresolved", note: "not in the registry; offline, not resolved" };
@@ -140,9 +155,9 @@ async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts
 /** One dependency's row. Never throws: an unexpected error (EACCES on the cache, a corrupt
  *  meta.json) becomes an `unreachable` row carrying the message, so one bad name cannot
  *  take down the run. */
-async function warmOne(registry: Registry, dep: ProjectDependency, opts: WarmOptions): Promise<WarmRow> {
+async function warmOne(registry: Registry, dep: ProjectDependency, opts: WarmOptions, run: RunState): Promise<WarmRow> {
   try {
-    return await warmOneUnguarded(registry, dep, opts);
+    return await warmOneUnguarded(registry, dep, opts, run);
   } catch (e) {
     return { name: dep.name, ecosystem: dep.ecosystem, source: dep.source, status: "unreachable", note: `error: ${errorMessage(e)}` };
   }
@@ -160,7 +175,8 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     const why = discovery.notes.length > 0 ? ` (${discovery.notes.join("; ")})` : "";
     throw new Error(`no dependency manifest in ${dir}${why}; looked for ${MANIFEST_FILES.join(", ")}`);
   }
-  const rows = await mapLimit(discovery.dependencies, opts.concurrency ?? WARM_CONCURRENCY, (dep) => warmOne(registry, dep, opts));
+  const run: RunState = { entryJobs: new Map() };
+  const rows = await mapLimit(discovery.dependencies, opts.concurrency ?? WARM_CONCURRENCY, (dep) => warmOne(registry, dep, opts, run));
   const cached = rows.filter((r) => CACHED_STATUSES.has(r.status)).length;
   const denied = rows.filter((r) => r.status === "denied (noise list)").length;
   const report: WarmReport = {

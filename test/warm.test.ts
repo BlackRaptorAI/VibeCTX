@@ -118,6 +118,16 @@ describe("runWarm (PAR-656)", () => {
     expect(byName(report)["react-dom"]).toMatchObject({ library: "react", status: "cached", url: REACT_URL });
   });
 
+  it("two manifest names that map to one entry (react + react-dom) fetch that entry once; both rows report it", async () => {
+    writePackageJson({ react: "19", "react-dom": "19", hono: "4" });
+    const spy = stubFetch({ [REACT_URL]: "# React", [HONO_URL]: "# Hono" });
+    const report = await runWarm(registry(), { dir: project });
+    expect(byName(report).react).toMatchObject({ library: "react", status: "cached", url: REACT_URL });
+    expect(byName(report)["react-dom"]).toMatchObject({ library: "react", status: "cached", url: REACT_URL });
+    expect(spy.mock.calls.filter((c) => String(c[0]) === REACT_URL)).toHaveLength(1);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
   it("a stale entry is revalidated (etag-first) and reported cached; when the network fails the stale copy is kept and reported unreachable", async () => {
     writeCache("react", REACT_URL, "# React old", '"v1"');
     writePackageJson({ react: "19" });
