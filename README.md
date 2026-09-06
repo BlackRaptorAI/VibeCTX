@@ -372,6 +372,9 @@ Add or override libraries with a JSON config:
 npx -y @blackraptorai/vibectx --config ./vibectx.config.json
 ```
 
+A `vibectx.config.json` committed to your repo is picked up with **no flag at all** — see
+[Team config, no flags](#team-config-no-flags) for the full resolution order.
+
 ```json
 {
   "libraries": [
@@ -432,6 +435,70 @@ as the default registry through 0.1.3:
 ```bash
 npx -y @blackraptorai/vibectx --config ./docs/examples/paragon.vibectx.config.json doctor
 ```
+
+### Team config, no flags
+
+An MCP client launches the server with a **fixed command line**, so a config that needs
+`--config` never reaches it. Commit the file instead and vibectx finds it: put
+
+```json
+{
+  "libraries": [
+    { "name": "acme-platform", "urls": ["https://docs.acme.example.com/llms-full.txt"] }
+  ]
+}
+```
+
+in `vibectx.config.json` at the root of your repo, and every teammate's agent — started
+with plain `npx -y @blackraptorai/vibectx`, no flags — gets `acme-platform` in
+`list_libraries`, in `get_docs`, and in the startup warm.
+
+| # | Source | Where |
+|---|--------|-------|
+| 1 | `--config <path>` | the launch command |
+| 2 | `VIBECTX_CONFIG=<path>` | the server's environment |
+| 3 | project file | `vibectx.config.json`, from the working directory **up to the git root** |
+| 4 | user file | `$XDG_CONFIG_HOME/vibectx/config.json`, default `~/.config/vibectx/config.json` |
+| 5 | shipped defaults | the vibe-coder 30 above |
+
+**An explicit source is authoritative.** Pass `--config` (or set `VIBECTX_CONFIG`) and
+discovery is skipped entirely — the flag alone decides, exactly as in 0.1.x. The flag beats
+the environment variable. Otherwise the user file layers over the defaults and the project
+file layers over that: **project beats user beats default**, by library name, with the same
+alias rules as above applied at each layer.
+
+**The walk-up stops at your repository.** vibectx checks the working directory, then each
+parent, and stops after the directory holding `.git` — a config in an unrelated parent such
+as `/tmp` or your home directory is never picked up, and with no `.git` anywhere above,
+only the working directory is checked. The nearest file wins; a second one further up is
+*not* layered under it. A symlinked config is fine as long as it resolves to a regular file.
+
+`list_libraries` opens with the sources it actually loaded, highest precedence first, so
+there is never a question of which file an agent is answering from:
+
+```
+config: ./vibectx.config.json (project) · ~/.config/vibectx/config.json (user)
+Cache dir: /Users/you/.docs-cache-mcp
+```
+
+or `config: --config ./x.json`, or `config: none (shipped defaults)`.
+
+**Legacy filename.** `docs-cache.config.json` is still read at both locations through
+`0.2.x`, with a deprecation note in `list_libraries` and once on stderr — rename it to
+`vibectx.config.json`. If both names sit in one directory the new name wins and the old
+one is ignored (also noted).
+
+**Failures are one line.** A config that does not load names the file, the path inside it,
+and what is wrong — never a stack trace or a validator dump:
+
+```
+./vibectx.config.json: libraries[2].urls: must be a non-empty array of https URLs
+./vibectx.config.json: invalid JSON at line 7 column 3: Expected ',' or '}' after property value
+```
+
+`urls` must be `https:` (the fetcher refuses anything else, so a non-https entry could only
+ever be dead weight); unknown keys — top-level and inside an entry — are ignored, so a file
+written for a later version still loads; a file over 1 MiB is refused.
 
 ## Checking coverage: `vibectx doctor`
 
