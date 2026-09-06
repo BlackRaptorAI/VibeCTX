@@ -48,7 +48,7 @@ export interface LibraryEntry {
  * from a machine with normal network access is the verification (PAR-653); the fetcher probes
  * candidates in order and falls back, so an entry whose site lacks or later gains llms.txt
  * keeps working either way. Prisma's llms-full.txt (~5 MB) and the Anthropic candidates were
- * reachable in earlier releases (0.1.x registry) and are carried over unchanged.
+ * reachable per the PAR-704 field report (2026-09-05, 0.1.x registry) and are carried over unchanged.
  */
 export const DEFAULT_REGISTRY: LibraryEntry[] = [
   {
@@ -387,40 +387,61 @@ function isStringList(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((s) => typeof s === "string" && s.trim().length > 0);
 }
 
-/** Every alias must be unique across the registry and must not equal any canonical name.
- *  Runs over the merged set, so a config entry can also collide with a default's alias. */
-function validateAliases(entries: Map<string, LibraryEntry>): void {
+/** Registry keys (names and aliases) are compared and stored in this form. */
+const fold = (s: string): string => s.trim().toLowerCase();
+
+/**
+ * Every alias must be unique across the registry and must not equal any canonical name
+ * (compared on folded keys). Runs on every load, config or not, so the shipped defaults
+ * are checked too. By the time this runs, D-06 has already removed the default aliases a
+ * config claimed — so a collision here is always something the config must change.
+ * `configNames` tells the message whether the colliding canonical is a default or config entry.
+ */
+function validateAliases(entries: Map<string, LibraryEntry>, configNames: ReadonlySet<string>): void {
   const owner = new Map<string, string>();
   for (const e of entries.values()) {
-    for (const a of e.aliases ?? []) {
+    for (const raw of e.aliases ?? []) {
+      const a = fold(raw);
       if (entries.has(a)) {
-        const hint =
-          a === e.name
-            ? "an alias may not repeat the entry's own name"
-            : `rename one of them, or override "${e.name}" with aliases: [] in your config`;
-        throw new Error(`alias "${a}" on "${e.name}" collides with the canonical name "${a}": ${hint}`);
+        const what = a === fold(e.name) ? "the entry itself" : configNames.has(a) ? "another config entry" : "a default library";
+        throw new Error(
+          `alias "${a}" on config entry "${e.name}" collides with the canonical name "${a}" (${what}); ` +
+            `rename the alias, or override "${a}" (with its urls) and set aliases: [] on that entry`,
+        );
       }
       const other = owner.get(a);
-      if (other !== undefined) {
-        throw new Error(`alias "${a}" is declared on both "${other}" and "${e.name}"`);
-      }
+      if (other !== undefined) throw new Error(`alias "${a}" is declared on both "${other}" and "${e.name}"`);
       owner.set(a, e.name);
     }
   }
 }
 
-/** Build the registry: defaults, optionally merged/overridden by a JSON config file
- *  of shape { "libraries": LibraryEntry[] }. Config entries win on name collision
- *  (the whole entry, aliases included). */
+/**
+ * Build the registry: defaults, optionally merged/overridden by a JSON config file of
+ * shape { "libraries": LibraryEntry[] }. Unknown top-level keys (e.g. "$comment") are ignored.
+ *
+ * Config names and aliases are normalised with trim().toLowerCase() before validation and
+ * storage, so {name: "Next.js"} overrides "next.js" rather than adding an entry.
+ *
+ * Precedence (oversight decisions D-06 / D-07, 2026-09-06):
+ * - D-06 — config beats default alias. A config entry whose name or alias equals a DEFAULT
+ *   alias is not an error: the config wins and that alias is silently dropped from the default
+ *   (a 0.1.3 config with {name: "next"} keeps loading). Still errors: a config alias equal to
+ *   any CANONICAL name (default or config), the same alias on two config entries, an alias equal
+ *   to its own entry's name.
+ * - D-07 — an override that OMITS `aliases` inherits the replaced entry's aliases;
+ *   `aliases: []` clears them; an explicit list replaces them.
+ */
 export function loadRegistry(configPath?: string): Registry {
   const entries = new Map<string, LibraryEntry>();
   for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
+  const configNames = new Set<string>();
   if (configPath) {
-    const raw = JSON.parse(readFileSync(configPath, "utf8")) as {
-      libraries?: LibraryEntry[];
-    };
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as { libraries?: LibraryEntry[] };
+    // Pass 1: validate shape and normalise keys.
+    const config: LibraryEntry[] = [];
     for (const e of raw.libraries ?? []) {
-      if (!e.name || !Array.isArray(e.urls) || e.urls.length === 0) {
+      if (typeof e.name !== "string" || fold(e.name).length === 0 || !Array.isArray(e.urls) || e.urls.length === 0) {
         throw new Error(`config entry missing name/urls: ${JSON.stringify(e)}`);
       }
       if (e.probeQueries !== undefined && !isStringList(e.probeQueries)) {
@@ -433,11 +454,37 @@ export function loadRegistry(configPath?: string): Registry {
           `config entry "${e.name}": aliases must be an array of non-empty strings, got ${JSON.stringify(e.aliases)}`,
         );
       }
+      const normalised: LibraryEntry = { ...e, name: fold(e.name) };
+      if (e.aliases !== undefined) normalised.aliases = e.aliases.map(fold);
+      config.push(normalised);
+    }
+    // Pass 2 (D-06): every key a config entry claims — as a name or an alias — leaves the defaults' alias lists.
+    const claimed = new Set<string>();
+    for (const e of config) {
+      claimed.add(e.name);
+      configNames.add(e.name);
+      for (const a of e.aliases ?? []) claimed.add(a);
+    }
+    for (const d of DEFAULT_REGISTRY) {
+      if (d.aliases?.some((a) => claimed.has(a))) {
+        entries.set(d.name, { ...d, aliases: d.aliases.filter((a) => !claimed.has(a)) }); // copy: never mutate the shipped defaults
+      }
+    }
+    // Pass 3: merge, config wins on name; D-07 alias inheritance.
+    for (const e of config) {
+      const replaced = entries.get(e.name);
+      if (e.aliases === undefined && replaced?.aliases !== undefined) e.aliases = replaced.aliases;
       entries.set(e.name, e);
     }
-    validateAliases(entries);
   }
+  validateAliases(entries, configNames);
   return { entries };
+}
+
+/** The text every tool returns for a name that resolves to nothing. Lists canonical names
+ *  only (aliases are shown by list_libraries). */
+export function unknownLibraryMessage(registry: Registry, library: string): string {
+  return `Unknown library "${library}". Known: ${[...registry.entries.keys()].join(", ")}`;
 }
 
 /**
@@ -454,6 +501,6 @@ export function resolveLibrary(registry: Registry, name: string): LibraryEntry |
   };
   const exact = lookup(name);
   if (exact) return exact;
-  const folded = name.trim().toLowerCase();
+  const folded = fold(name);
   return folded !== name && folded.length > 0 ? lookup(folded) : undefined;
 }

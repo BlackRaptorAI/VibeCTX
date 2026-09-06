@@ -3,7 +3,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_REGISTRY, loadRegistry, resolveLibrary, type LibraryEntry, type Registry } from "../src/registry.js";
+import {
+  DEFAULT_REGISTRY,
+  loadRegistry,
+  resolveLibrary,
+  unknownLibraryMessage,
+  type LibraryEntry,
+  type Registry,
+} from "../src/registry.js";
 
 let dir: string;
 
@@ -181,29 +188,25 @@ describe("config aliases validation", () => {
     expect(() => loadRegistry(path)).toThrow(/aliases/);
   });
 
-  it("rejects an alias that collides with a canonical name (default or config)", () => {
+  it("rejects an alias that collides with a canonical name (default or config), with an actionable hint", () => {
     expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["react"] }]))).toThrow(
-      /alias "react".*"hono".*canonical name/,
+      /alias "react" on config entry "hono" collides with the canonical name "react" \(a default library\); rename the alias, or override "react" \(with its urls\) and set aliases: \[\]/,
     );
     expect(() =>
       loadRegistry(writeConfig([
         { name: "hono", urls: ["u"] },
         { name: "elysia", urls: ["u"], aliases: ["hono"] },
       ])),
-    ).toThrow(/alias "hono".*"elysia".*canonical name/);
+    ).toThrow(/alias "hono" on config entry "elysia" collides with the canonical name "hono" \(another config entry\)/);
   });
 
   it("rejects an alias equal to the entry's own name", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["hono"] }]))).toThrow(/alias "hono"/);
-  });
-
-  it("rejects a config entry whose name collides with another entry's alias", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "next", urls: ["u"] }]))).toThrow(
-      /alias "next".*"next\.js".*canonical name.*"next"/,
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["hono"] }]))).toThrow(
+      /alias "hono" on config entry "hono" collides with the canonical name "hono" \(the entry itself\)/,
     );
   });
 
-  it("rejects the same alias on two entries", () => {
+  it("rejects the same alias on two config entries", () => {
     expect(() =>
       loadRegistry(writeConfig([
         { name: "a", urls: ["u"], aliases: ["shared"] },
@@ -212,16 +215,109 @@ describe("config aliases validation", () => {
     ).toThrow(/alias "shared".*both "a" and "b"/);
   });
 
-  it("a config entry that overrides a default replaces its aliases too (config wins on name collision)", () => {
-    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["https://example.com/llms.txt"] }]));
-    expect(reg.entries.get("next.js")?.aliases).toBeUndefined();
+  it("validates the defaults even without a config (no alias/canonical collision shipped)", () => {
+    expect(() => loadRegistry()).not.toThrow();
+  });
+});
+
+describe("D-06: config beats default alias (backward compatibility with 0.1.3 configs)", () => {
+  it("a legacy config named after a default alias loads; the alias is dropped from the default", () => {
+    const reg = loadRegistry(writeConfig([{ name: "next", urls: ["https://example.com/next.txt"] }]));
+    expect(resolveLibrary(reg, "next")?.urls).toEqual(["https://example.com/next.txt"]);
+    expect(resolveLibrary(reg, "next.js")?.urls[0]).toBe("https://nextjs.org/llms-full.txt"); // default still there
+    expect(reg.entries.get("next.js")?.aliases).toEqual(["nextjs"]); // "next" silently dropped
+    expect(resolveLibrary(reg, "nextjs")?.name).toBe("next.js");
+    expect(reg.entries.size).toBe(31);
+  });
+
+  it("a config ALIAS equal to a default alias also wins: the default loses it", () => {
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["tailwind"] }]));
+    expect(resolveLibrary(reg, "tailwind")?.name).toBe("mine");
+    expect(reg.entries.get("tailwindcss")?.aliases).toEqual([]);
+  });
+
+  it("never mutates the shared DEFAULT_REGISTRY objects when dropping an alias", () => {
+    loadRegistry(writeConfig([{ name: "next", urls: ["u"] }]));
+    expect(DEFAULT_REGISTRY.find((e) => e.name === "next.js")?.aliases).toEqual(["next", "nextjs"]);
+    expect(resolveLibrary(loadRegistry(), "next")?.name).toBe("next.js");
+  });
+});
+
+describe("D-07: an override that omits aliases inherits the default's; aliases: [] clears them", () => {
+  it("omit → inherit (the common 'point next.js at a mirror' override keeps `next` working)", () => {
+    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["https://mirror.example/llms.txt"] }]));
+    expect(reg.entries.get("next.js")?.aliases).toEqual(["next", "nextjs"]);
+    expect(resolveLibrary(reg, "next")?.urls).toEqual(["https://mirror.example/llms.txt"]);
+  });
+
+  it("[] → cleared", () => {
+    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["u"], aliases: [] }]));
+    expect(reg.entries.get("next.js")?.aliases).toEqual([]);
     expect(resolveLibrary(reg, "next")).toBeUndefined();
-    // …which is also how a user frees an alias for a canonical name of their own:
-    const reg2 = loadRegistry(writeConfig([
-      { name: "next.js", urls: ["https://example.com/llms.txt"], aliases: [] },
+  });
+
+  it("an explicit list replaces the default's", () => {
+    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["u"], aliases: ["nextjs"] }]));
+    expect(reg.entries.get("next.js")?.aliases).toEqual(["nextjs"]);
+    expect(resolveLibrary(reg, "next")).toBeUndefined();
+  });
+
+  it("inherited aliases still yield to a config entry of that name (D-06 applies to inherited aliases)", () => {
+    const reg = loadRegistry(writeConfig([
+      { name: "next.js", urls: ["https://mirror.example/llms.txt"] },
       { name: "next", urls: ["https://example.com/next.txt"] },
     ]));
-    expect(resolveLibrary(reg2, "next")?.urls).toEqual(["https://example.com/next.txt"]);
+    expect(reg.entries.get("next.js")?.aliases).toEqual(["nextjs"]);
+    expect(resolveLibrary(reg, "next")?.urls).toEqual(["https://example.com/next.txt"]);
+  });
+});
+
+describe("config normalization: names and aliases are trimmed and lower-cased before validation and storage", () => {
+  it('{name: "Next.js"} overrides next.js instead of adding a 31st entry', () => {
+    const reg = loadRegistry(writeConfig([{ name: "Next.js", urls: ["https://mirror.example/llms.txt"] }]));
+    expect(reg.entries.size).toBe(30);
+    expect(reg.entries.has("Next.js")).toBe(false);
+    expect(reg.entries.get("next.js")?.urls).toEqual(["https://mirror.example/llms.txt"]);
+    expect(reg.entries.get("next.js")?.name).toBe("next.js");
+    expect(resolveLibrary(reg, "NEXT.JS")?.urls).toEqual(["https://mirror.example/llms.txt"]);
+  });
+
+  it('alias "React" on another entry is rejected as a canonical collision', () => {
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["React"] }]))).toThrow(
+      /alias "react" on config entry "hono" collides with the canonical name "react"/,
+    );
+  });
+
+  it('alias " bar " is stored and resolves as "bar"', () => {
+    const reg = loadRegistry(writeConfig([{ name: "foo", urls: ["u"], aliases: [" bar "] }]));
+    expect(reg.entries.get("foo")?.aliases).toEqual(["bar"]);
+    expect(resolveLibrary(reg, "bar")?.name).toBe("foo");
+    expect(resolveLibrary(reg, " BAR ")?.name).toBe("foo");
+  });
+
+  it("a name that folds to empty is rejected", () => {
+    expect(() => loadRegistry(writeConfig([{ name: "   ", urls: ["u"] }]))).toThrow(/missing name\/urls/);
+  });
+
+  it("two config entries whose names fold to the same key are one override (last wins)", () => {
+    const reg = loadRegistry(writeConfig([
+      { name: "Foo", urls: ["a"] },
+      { name: "foo ", urls: ["b"] },
+    ]));
+    expect(reg.entries.get("foo")?.urls).toEqual(["b"]);
+    expect([...reg.entries.keys()].filter((k) => k === "foo")).toHaveLength(1);
+  });
+});
+
+describe("unknownLibraryMessage", () => {
+  it("lists canonical names only (aliases are shown by list_libraries)", () => {
+    const reg: Registry = {
+      entries: new Map<string, LibraryEntry>([
+        ["next.js", { name: "next.js", urls: ["u"], aliases: ["next"] }],
+        ["hono", { name: "hono", urls: ["u"] }],
+      ]),
+    };
+    expect(unknownLibraryMessage(reg, "nope")).toBe('Unknown library "nope". Known: next.js, hono');
   });
 });
 

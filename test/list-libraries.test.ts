@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
-import type { Registry } from "../src/registry.js";
+import { loadRegistry, type Registry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 
 let dir: string;
@@ -53,6 +53,15 @@ describe("listLibrariesText (PAR-707: kind bracket)", () => {
     expect(text).toMatch(/- \*\*hono\*\* — Hono \[not cached\]/);
     expect(text).toMatch(/- \*\*zod\*\* — Zod \[not cached\]/);
     expect(text).not.toMatch(/hono\*\* \(aka/);
+  });
+
+  it("D-06: after a config claims a default alias as its name, that alias leaves the default's aka list", () => {
+    const config = join(dir, "vibectx.config.json");
+    writeFileSync(config, JSON.stringify({ libraries: [{ name: "next", urls: ["https://example.com/next.txt"] }] }), "utf8");
+    const text = listLibrariesText(loadRegistry(config));
+    expect(text).toMatch(/- \*\*next\.js\*\* \(aka nextjs\) — /);
+    expect(text).not.toMatch(/aka next,/);
+    expect(text).toMatch(/- \*\*next\*\* —  \[not cached\]/);
   });
 
   it("uses the first cached candidate URL for the classification", () => {
