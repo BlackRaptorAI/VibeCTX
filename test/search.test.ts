@@ -601,6 +601,27 @@ describe("runSearch · what the budget reports, and where bodies come from (PAR-
     expect(out.groups[0].sections[0].body).toContain("streamSSE");
   });
 
+  it("S1: a bidi-bearing 1 MB heading is cleaned and clipped in the OUTCOME, not just in the rendered text", () => {
+    // MEASURED before this: `--json` copied `heading` and `path` straight out of the document,
+    // so a 1 MB heading carrying U+202E (right-to-left override) reached the agent intact —
+    // the rendered path obeyed D-30 and the structured one obeyed nothing.
+    const url = "https://hostile.example.com/llms-full.txt";
+    const hostile = `Streaming ‮${"A".repeat(1_000_000)}`;
+    writeCache("hostile", url, `# ${hostile}\n\n## ‮Streaming events\n\nStream events to the client.`);
+    const reg: Registry = { entries: new Map([["hostile", { name: "hostile", urls: [url] }]]) };
+
+    const out = runSearch(reg, { query: "streaming events" });
+    const section = out.groups[0].sections[0];
+    const structured = JSON.stringify(out);
+    expect(structured).not.toContain("‮");
+    expect(section.heading.length).toBeLessThanOrEqual(200);
+    for (const p of section.path) expect(p.length).toBeLessThanOrEqual(200);
+    // …and the rendered text, which already obeyed D-30, still does.
+    expect(formatSearchResults(out)).not.toContain("‮");
+    // The BODY is untouched by cleaning (D-30: the body is the document) — only bounded.
+    expect(section.body).toContain("Stream events to the client.");
+  });
+
   it("D-33: every rendered body is text the cache actually holds, even when the index says otherwise", () => {
     warmAll();
     search({ query: "streaming" }); // build the index against the real documents
