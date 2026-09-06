@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
 import { getLibraryDoc } from "./fetcher.js";
@@ -326,33 +326,51 @@ function beneath(target: string, base: string): boolean {
   return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
 }
 
-/** Best-effort real path: the resolved path itself when it does not exist (or cannot be
- *  resolved), so containment can still be decided lexically. */
-function realOrLexical(path: string): { real: string; existed: boolean } {
-  try {
-    return { real: realpathSync(path), existed: true };
-  } catch {
-    return { real: path, existed: false };
+/**
+ * The real path of `path` when it exists; otherwise the real path of its nearest EXISTING
+ * ancestor with the remaining components appended. A path that does not exist yet still gets
+ * a real answer, because every symlink on the part of it that does exist has been resolved:
+ * `cwd/link/nope` with `link -> /elsewhere` answers `/elsewhere/nope`, not `cwd/link/nope`.
+ *
+ * undefined only when nothing on the chain up to the filesystem root can be resolved — a
+ * broken filesystem, not a path question. Callers must refuse on undefined rather than guess.
+ */
+function realWithNonExistentTail(path: string): string | undefined {
+  const tail: string[] = [];
+  let current = path;
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return tail.length === 0 ? real : join(real, ...tail);
+    } catch {
+      const parent = dirname(current);
+      if (parent === current) return undefined; // reached the root and even it did not resolve
+      tail.unshift(basename(current));
+      current = parent;
+    }
   }
 }
 
 /**
  * D-10 (amended by oversight, 2026-09-06): is `dir` the working directory or beneath it,
- * decided on REAL paths? `realpathSync(target)` must be `realpathSync(cwd)` or beneath it,
- * compared component-wise, so a symlink inside the working directory pointing anywhere else
- * on the filesystem is refused (S-A) and a sibling that merely shares the prefix
+ * decided on REAL paths? The target's real path must be the working directory's real path or
+ * beneath it, compared component-wise, so a symlink inside the working directory pointing
+ * anywhere else on the filesystem is refused (S-A) and a sibling that merely shares the prefix
  * (`/a/proj-evil` against `/a/proj`) is refused too. The working directory may itself be
  * reached through a symlink: both sides are resolved.
  *
- * When the target does not exist, its real path is unknowable, so the check falls back to
- * the lexical path against the real working directory and discovery reports "not a
- * directory" / "no dependency manifest" — an honest error rather than a containment verdict.
+ * A target that does not exist is decided on the SAME real basis, never lexically: the nearest
+ * existing ancestor is resolved and the missing tail appended (S-A). A lexical fallback would
+ * have made `cwd/link/nope` — a path whose every existing component says "outside" — read as
+ * contained, and handed the whole subtree behind the link to discovery. So `cwd/link/nope` is
+ * refused, while `cwd/sub/nope` under a real subdirectory is still allowed through to
+ * discovery's honest "not a directory" / "no dependency manifest".
  */
 export function isWithinCwd(dir: string, cwd = process.cwd()): boolean {
-  const base = realOrLexical(resolve(cwd)).real;
-  const { real, existed } = realOrLexical(resolve(dir));
-  if (existed) return beneath(real, base);
-  return beneath(real, base) || beneath(resolve(dir), resolve(cwd));
+  const base = realWithNonExistentTail(resolve(cwd));
+  const real = realWithNonExistentTail(resolve(dir));
+  if (base === undefined || real === undefined) return false; // undecidable: refuse
+  return beneath(real, base);
 }
 
 /** The MCP `warm_project` tool body: the table for `dir` (default: the server's working

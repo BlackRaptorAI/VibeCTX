@@ -605,6 +605,40 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
       expect(spy).not.toHaveBeenCalled();
     });
 
+    it("S-A: a NON-EXISTENT path under a symlinked subdirectory is refused on the real path, and discovery never runs", async () => {
+      writePackageJson({ react: "19" });
+      symlinkSync(outside, join(project, "link"));
+      // runWarm's very first act is to sweep the cache's orphan temp files. A planted orphan
+      // surviving MEASURES that warmToolText refused at the containment gate — before runWarm,
+      // and so before discovery, ever started.
+      const sentinel = join(cache, "resolved.json.4242.1757000000000.tmp");
+      writeFileSync(sentinel, "{}", "utf8");
+      const spy = stubFetch({});
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+      try {
+        const target = join(project, "link", "nope");
+        expect(existsSync(target)).toBe(false); // the target does not exist, on either side of the link
+        const text = await warmToolText(registry(), target);
+        expect(text).toMatch(/is outside the project directory/);
+        expect(text).not.toMatch(/is not a directory/); // NOT discovery's error: the gate refused first
+        expect(existsSync(sentinel)).toBe(true); // measured: runWarm never started
+        expect(spy).not.toHaveBeenCalled();
+        // The manifest that path WOULD have discovered, planted only now — after the check —
+        // so it can only appear in a later, wrongly-allowed read.
+        mkdirSync(join(outside, "nope"));
+        writeFileSync(join(outside, "nope", "package.json"), JSON.stringify({ dependencies: { [CANARY]: "1" } }), "utf8");
+        expect(text).not.toContain(CANARY);
+        expect(await warmToolText(registry(), target)).not.toContain(CANARY); // still refused now that it exists
+
+        // A non-existent path under a REAL subdirectory of cwd is still allowed through to
+        // discovery's honest "not a directory" — the nearest existing ancestor is inside cwd.
+        mkdirSync(join(project, "sub"));
+        expect(await warmToolText(registry(), join(project, "sub", "nope"))).toMatch(/is not a directory$/);
+      } finally {
+        cwd.mockRestore();
+      }
+    });
+
     it("a sibling directory whose path shares cwd's prefix is refused", async () => {
       const sibling = `${realpathSync(project)}-evil`;
       mkdirSync(sibling);
