@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { rankSections } from "../src/retrieval.js";
+import { RETRIEVAL_VERSION } from "../src/tokenize.js";
 import {
   documentHash,
   indexDocument,
@@ -13,6 +14,7 @@ import {
   resetSearchIndexMemo,
   searchIndexPath,
   writeIndex,
+  MAX_INDEX_FILE_BYTES,
   MAX_LAZY_INDEX_DOCS,
   SEARCH_INDEX_SCHEMA_VERSION,
 } from "../src/search-index.js";
@@ -646,4 +648,112 @@ describe("runSearch · what the budget reports, and where bodies come from (PAR-
     // And the plant was refused outright — the hashes describe the other library's document.
     expect(out.tokenized).toBe(3);
   });
+});
+
+/**
+ * PAR-659 · D-42 — WHAT IS SHED IS NOT REBUILT, AND NOTHING IS REWRITTEN FOR IT.
+ *
+ * D-40 stopped the index writing a file it would then refuse to read. What it did NOT stop is
+ * the loop one level up: `search` rebuilt the shed library's posting list on every call, merged
+ * it, and handed `writeIndex` a payload that shed the very same entry again — so the whole file
+ * was re-serialised and re-written, every search, for ever, for no change at all.
+ *
+ * MEASURED by the security gate on a real corpus: 64,016,652 bytes rewritten in 14.5–14.7 s per
+ * call, indefinitely. The fixture here reproduces the SHAPE cheaply — a nearly-full index file
+ * planted directly, plus one cached document whose posting list is the largest entry, so it is
+ * the one D-40 sheds — and prints its own figures.
+ *
+ * The fix is a per-process "too big to index" memo (the shape `warm`'s recent-failure memo
+ * already has): `writeIndex` records what it shed, and `search` neither rebuilds nor rewrites
+ * that entry again in this process. What must NOT change: the shed library is still SEARCHED,
+ * by direct tokenization, and is still NAMED in the notes — a library that is slower to search
+ * every time is not a detail to go quiet about.
+ */
+describe("D-42 · a shed corpus is rebuilt and rewritten once, not on every search (PAR-659)", () => {
+  const AT = "2026-09-06T00:00:00.000Z";
+  const SHED_URL = "https://shed.example.com/llms-full.txt";
+
+  /** A document whose vocabulary is globally unique, so its posting list is megabytes of terms. */
+  function uniqueDoc(sections: number): string {
+    const lines = ["# shed", ""];
+    for (let s = 0; s < sections; s++) {
+      lines.push(`## shedding heading ${s}`, "");
+      for (let p = 0; p < 4; p++) {
+        const words: string[] = [];
+        for (let k = 0; k < 30; k++) words.push(`shedword${s}x${p}y${k}`);
+        lines.push(words.join(" "), "");
+      }
+    }
+    return lines.join("\n");
+  }
+
+  /** One planted entry of about `targetBytes`: a few objects, a long posting list. Valid under
+   *  `toIndexedDocument` (16-hex hash, in-range section ids, frequencies ≥ 1) so `readIndex`
+   *  accepts the planted file exactly as it would accept one this build wrote. */
+  function plantedEntry(targetBytes: number): string {
+    const SECTIONS = 1000;
+    const lengths = new Array(SECTIONS).fill(1).join(",");
+    const chunk = Array.from({ length: SECTIONS }, (_, i) => `${i},1`).join(",");
+    const head = `{"url":"https://planted.example.com/llms.txt","fetchedAt":"${AT}","hash":"0123456789abcdef","lengths":[${lengths}],"postings":{"t":[`;
+    const parts: string[] = [];
+    let bytes = head.length + 3;
+    while (bytes < targetBytes) {
+      parts.push(chunk);
+      bytes += chunk.length + 1;
+    }
+    return `${head}${parts.join(",")}]}}`;
+  }
+
+  it("the second search over a shed corpus writes nothing — same bytes, same mtime — and still searches and names the library", () => {
+    const doc = uniqueDoc(400);
+    writeCache("shed", SHED_URL, doc);
+
+    // What the shed entry costs on disk, priced exactly as `writeIndex` prices it.
+    const built = indexDocument(SHED_URL, doc, AT)!;
+    const postings: Record<string, number[]> = {};
+    for (const [term, list] of built.postings) postings[term] = list;
+    const entryBytes =
+      Buffer.byteLength(JSON.stringify({ url: built.url, fetchedAt: built.fetchedAt, hash: built.hash, lengths: built.lengths, postings }), "utf8") + 8;
+
+    // A file just under the cap, in entries each far smaller than the one above — so the entry
+    // `search` builds is the LARGEST, and therefore the one D-40 sheds.
+    const planted = plantedEntry(Math.floor(entryBytes / 10));
+    const per = planted.length + 8;
+    const count = Math.floor((MAX_INDEX_FILE_BYTES - Math.floor(entryBytes / 2)) / per);
+    const libraries = Array.from({ length: count }, (_, i) => `"p${i}":${planted}`).join(",");
+    const text = `{"schemaVersion":${SEARCH_INDEX_SCHEMA_VERSION},"retrievalVersion":${RETRIEVAL_VERSION},"libraries":{${libraries}}}`;
+    writeFileSync(searchIndexPath(), text, "utf8");
+    // The fixture's own preconditions: readable as it stands, over the cap once the new entry
+    // joins it. A fixture that failed either of these would prove nothing.
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(MAX_INDEX_FILE_BYTES);
+    expect(Buffer.byteLength(text, "utf8") + entryBytes).toBeGreaterThan(MAX_INDEX_FILE_BYTES);
+    expect(readIndex().problem).toBeUndefined();
+
+    const reg: Registry = { entries: new Map([["shed", { name: "shed", urls: [SHED_URL] }]]) };
+    const first = runSearch(reg, { query: "shedding", warn: () => {} });
+    expect(first.indexWritten).toBe(true); // the price paid ONCE: the file is rewritten without it
+    expect(first.notes.join(" ")).toMatch(/not indexed .*limit.*: shed/);
+    const before = statSync(searchIndexPath());
+
+    const started = performance.now();
+    const second = runSearch(reg, { query: "shedding", warn: () => {} });
+    const elapsed = performance.now() - started;
+    const after = statSync(searchIndexPath());
+    console.log(
+      `[D-42 MEASURED] second search over a shed corpus: ${second.indexWritten ? after.size.toLocaleString() : "0"} bytes rewritten, ` +
+        `${elapsed.toFixed(0)} ms (index file ${before.size.toLocaleString()} bytes)`,
+    );
+
+    // The claim: nothing was rebuilt for the file, so nothing was written to it.
+    expect(second.indexWritten).toBe(false);
+    expect(after.size).toBe(before.size);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+    // …and the library is no less searched and no less accounted for than it was on the first call.
+    expect(second.searched).toBe(1);
+    expect(second.tokenized).toBe(1);
+    expect(second.groups[0].library).toBe("shed");
+    expect(second.groups[0].sections[0].body.length).toBeGreaterThan(0);
+    expect(second.groups[0].note).toMatch(/not indexed/);
+    expect(second.notes.join(" ")).toMatch(/not indexed .*limit.*: shed/);
+  }, 300_000);
 });

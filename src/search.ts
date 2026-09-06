@@ -16,6 +16,7 @@ import {
   documentHash,
   indexDocument,
   readIndex,
+  shedInThisProcess,
   writeIndex,
   MAX_INDEX_FILE_BYTES,
   MAX_LAZY_INDEX_DOCS,
@@ -310,6 +311,21 @@ function groupHeader(group: SearchGroup): string {
   return `${lines.join("\n")}\n\n`;
 }
 
+/** The one line that names the libraries the index has no room for — written when they are
+ *  shed (D-40) and again, unchanged, on every later search that tokenizes them instead (D-42).
+ *  Names are cleaned and clipped, and the list itself is bounded (D-30/D-36). */
+function notIndexedNote(shed: string[]): string {
+  const named = shed
+    .slice(0, MAX_NAMED_UNCACHED)
+    .map((n) => clipText(n, MAX_LIBRARY_CHARS))
+    .join(", ");
+  return (
+    `${shed.length} librar${shed.length === 1 ? "y is" : "ies are"} not indexed (the index file would exceed its ` +
+    `${MAX_INDEX_FILE_BYTES}-byte limit): ${named}${shed.length > MAX_NAMED_UNCACHED ? ` and ${shed.length - MAX_NAMED_UNCACHED} more` : ""}` +
+    " — they are tokenized at query time on every search"
+  );
+}
+
 /**
  * Run one cross-library search. Never throws: a library whose cache entry cannot be read is
  * skipped, an unreadable index is a note, an unwritable one is a note. Never touches the
@@ -374,6 +390,8 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   const candidates: Candidate[] = [];
   const uncached: string[] = [];
   const rebuilt = new Map<string, IndexedDocument>();
+  /** D-42: libraries a previous call in this process already shed — not rebuilt here, but named. */
+  const shedAgain: string[] = [];
   let lazyBudget = MAX_LAZY_INDEX_DOCS;
   let deferred = 0;
 
@@ -385,9 +403,10 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     }
     const { url, hit } = cached;
     const stored = loaded.libraries.get(entry.name);
+    const hash = documentHash(hit.content);
     // D-33: the posting list is used ONLY when it describes exactly this text at exactly this
     // URL. Anything else — refreshed behind the index's back, hand-edited, planted — is ignored.
-    if (stored !== undefined && stored.url === url && stored.hash === documentHash(hit.content)) {
+    if (stored !== undefined && stored.url === url && stored.hash === hash) {
       candidates.push({ entry, url, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(stored, terms) });
       base.fromIndex += 1;
       continue;
@@ -399,20 +418,29 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     lazyBudget -= 1;
     base.tokenized += 1;
     const sections = splitSections(hit.content);
-    const built = indexDocument(url, hit.content, hit.meta.fetchedAt, sections);
+    // D-42: a posting list `writeIndex` already shed for this exact text is one it would shed
+    // again — building it would cost a full tokenization and then rewrite the whole file for no
+    // change. It is not built, so `rebuilt` stays empty and nothing is written; the library is
+    // searched exactly as the too-large case is, and named in the notes below just the same.
+    const shedAlready = shedInThisProcess(entry.name, hash);
+    const built = shedAlready ? undefined : indexDocument(url, hit.content, hit.meta.fetchedAt, sections);
     if (built) {
       rebuilt.set(entry.name, built);
       candidates.push({ entry, url, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(built, terms) });
     } else {
-      // D-36: too large (or too varied) to index. Searched anyway, by direct tokenization, and
-      // the response says so for that library so nobody reads the slower answer as a cheaper one.
+      // D-36: too large (or too varied) to index, or D-42: shed to keep the file readable.
+      // Searched anyway, by direct tokenization, and the response says so for that library so
+      // nobody reads the slower answer as a cheaper one.
+      if (shedAlready) shedAgain.push(entry.name);
       candidates.push({
         entry,
         url,
         fetchedAt: hit.meta.fetchedAt,
         stale: hit.stale,
         weighted: weighSections(sections, termIndex),
-        note: "not indexed (document too large): tokenized at query time, so this library is slower to search",
+        note: shedAlready
+          ? "not indexed (the index file would exceed its limit): tokenized at query time, so this library is slower to search"
+          : "not indexed (document too large): tokenized at query time, so this library is slower to search",
       });
     }
   }
@@ -431,19 +459,16 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   if (rebuilt.size > 0) {
     const merged = new Map(loaded.libraries);
     for (const [name, doc] of rebuilt) merged.set(name, doc);
-    base.indexWritten = writeIndex(merged, opts.warn, (shed) => {
-      // D-40: the file would have been bigger than the one `readIndex` accepts, so the biggest
-      // entries were left out rather than written into a file nothing could ever read again.
-      // The reader is told, because "this library is slower every time" is not a detail.
-      notes.push(
-        `${shed.length} librar${shed.length === 1 ? "y is" : "ies are"} not indexed (the index file would exceed its ${MAX_INDEX_FILE_BYTES}-byte limit): ${shed
-          .slice(0, MAX_NAMED_UNCACHED)
-          .map((n) => clipText(n, MAX_LIBRARY_CHARS))
-          .join(", ")}${shed.length > MAX_NAMED_UNCACHED ? ` and ${shed.length - MAX_NAMED_UNCACHED} more` : ""} — they are tokenized at query time on every search`,
-      );
-    });
+    // D-40: the file would have been bigger than the one `readIndex` accepts, so the biggest
+    // entries were left out rather than written into a file nothing could ever read again.
+    // The reader is told, because "this library is slower every time" is not a detail.
+    base.indexWritten = writeIndex(merged, opts.warn, (shed) => notes.push(notIndexedNote(shed)));
     if (!base.indexWritten) notes.push("search index not updated; this search was answered by tokenizing the documents");
   }
+  // D-42: the ones shed on an EARLIER call are named by exactly the same line. Nothing was
+  // rebuilt or rewritten for them this time, and that is the point — but a library that is
+  // tokenized on every search must say so on every search, not only on the search that shed it.
+  if (shedAgain.length > 0) notes.push(notIndexedNote(shedAgain));
 
   if (candidates.length === 0) return base;
 

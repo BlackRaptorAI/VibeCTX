@@ -420,6 +420,9 @@ export function writeIndex(
     }
     const { text, shed } = serialiseIndex(libraries);
     if (shed.length > 0) {
+      // D-42: remember WHAT was shed and for WHICH text, so the next caller neither rebuilds
+      // that posting list nor hands it back to be shed again (see `shedInThisProcess`).
+      for (const name of shed) shedMemo.set(name, libraries.get(name)!.hash);
       warn(
         `vibectx: search index would exceed the ${MAX_INDEX_FILE_BYTES}-byte limit; not indexing ${shed.length} librar${shed.length === 1 ? "y" : "ies"} (${shed.join(", ")}) — they are tokenized at query time instead\n`,
       );
@@ -447,6 +450,7 @@ export function invalidateIndex(library: string, warn: (message: string) => void
   const { libraries } = readIndex();
   if (!libraries.delete(key)) return false;
   memo.delete(key);
+  shedMemo.delete(key); // D-42: a refreshed library is a new document, not a settled verdict
   return writeIndex(libraries, warn);
 }
 
@@ -457,9 +461,35 @@ export function invalidateIndex(library: string, warn: (message: string) => void
  */
 const memo = new Map<string, string>();
 
+/**
+ * D-42 — THE OTHER HALF OF D-40: library → the hash of the text `writeIndex` SHED for it in
+ * this process. D-40 stopped the index writing a file it would then refuse to read; it did not
+ * stop the caller one level up rebuilding the shed posting list on every call and handing it
+ * back to be shed again — which re-serialised and rewrote the WHOLE file each time for no
+ * change at all. MEASURED by PAR-659's security gate: 64,016,652 bytes rewritten in 14.5–14.7 s
+ * per search, indefinitely.
+ *
+ * Keyed by HASH, not by name alone, so a library whose document is later refreshed (or shrinks)
+ * is tried again rather than written off for the life of the process — the same discipline
+ * `warm`'s recent-failure memo keeps, and the reason this is a memo and not a persisted fact:
+ * shedding depends on what ELSE is in the file, so it is true of this process's view, not of
+ * the library.
+ *
+ * What it must never do is silence the library: the caller still SEARCHES it (by direct
+ * tokenization) and still names it in the response.
+ */
+const shedMemo = new Map<string, string>();
+
+/** True when `writeIndex` already shed exactly this text for this library in this process, so
+ *  building its posting list again would only produce a payload that sheds it again. */
+export function shedInThisProcess(library: string, hash: string): boolean {
+  return shedMemo.get(library.trim().toLowerCase()) === hash;
+}
+
 /** Test hook — and the seam the server would use if it ever reloaded the cache root. */
 export function resetSearchIndexMemo(): void {
   memo.clear();
+  shedMemo.clear();
 }
 
 /**
