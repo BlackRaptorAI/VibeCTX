@@ -1,5 +1,5 @@
-import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
-import { lookupLibrary, resolvePackage } from "./resolve.js";
+import { installResolvedEntry, nearestLibraryName, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import { lookupLibrary, resolvePackage, type ResolveOutcome } from "./resolve.js";
 import {
   getLibraryDoc,
   fetchLinkedPage,
@@ -72,6 +72,7 @@ export async function getDocsToolText(
 ): Promise<string> {
   const { library, ...rest } = args;
   let entry = lookupLibrary(registry, library);
+  let provenance = "";
   if (!entry) {
     if (rest.offline) return unknownLibraryMessage(registry, library);
     const out = await resolvePackage(library);
@@ -79,8 +80,24 @@ export async function getDocsToolText(
     // S2: a resolved entry never replaces a curated one; if a curated entry owns the name
     // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
     entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
+    provenance = `${provenanceLine(registry, library, out)}\n`;
   }
-  return getDocs(entry, rest);
+  return provenance + (await getDocs(entry, rest));
+}
+
+/** R3: one line the agent sees before docs that were resolved on this very call — where
+ *  the package came from, its own (untrusted) description, and a nearby curated name
+ *  when the request looks like a typo of one. */
+function provenanceLine(registry: Registry, requested: string, out: ResolveOutcome): string {
+  const label = out.source === "pypi" ? "PyPI" : "npm";
+  const facts: string[] = [];
+  if (out.entry?.description) facts.push(`(package-supplied) description: ${out.entry.description}`);
+  if (out.homepage) facts.push(`homepage ${out.homepage}`);
+  if (out.docsUrl) facts.push(`docs ${out.docsUrl}`);
+  if (out.repository) facts.push(`repository github.com/${out.repository.owner}/${out.repository.repo}`);
+  const near = nearestLibraryName(registry, requested);
+  if (near) facts.push(`nearest curated name: "${near}"`);
+  return `> Resolved "${requested}" via ${label} on this call — not a curated entry; verify this is the package you meant. ${facts.join(" · ")}`.trimEnd();
 }
 
 /** getDocs with its structured outcome (see GetDocsOutcome). */

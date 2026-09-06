@@ -561,3 +561,34 @@ export function resolveLibrary(registry: Registry, name: string): LibraryEntry |
   const folded = fold(name);
   return folded !== name && folded.length > 0 ? lookup(folded) : undefined;
 }
+
+function editDistance(a: string, b: string): number {
+  const prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let diag = prev[0];
+    prev[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, diag + (a[i - 1] === b[j - 1] ? 0 : 1));
+      diag = tmp;
+    }
+  }
+  return prev[b.length];
+}
+
+/** The curated name or alias within edit distance 2 of `name` (folded), closest first,
+ *  registry order on ties; undefined when nothing is close or the name is an exact key.
+ *  Used by get_docs to flag a likely typo next to an implicit resolution (R3). */
+export function nearestLibraryName(registry: Registry, name: string): string | undefined {
+  const needle = fold(name);
+  let best: { key: string; d: number } | undefined;
+  for (const e of registry.entries.values()) {
+    if (e.resolved) continue;
+    for (const key of [e.name, ...(e.aliases ?? [])]) {
+      const d = editDistance(needle, key);
+      if (d === 0) return undefined;
+      if (d <= 2 && (best === undefined || d < best.d)) best = { key, d };
+    }
+  }
+  return best?.key;
+}

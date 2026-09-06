@@ -7,6 +7,7 @@ import {
   DEFAULT_REGISTRY,
   installResolvedEntry,
   loadRegistry,
+  nearestLibraryName,
   resolveLibrary,
   unknownLibraryMessage,
   type LibraryEntry,
@@ -485,5 +486,17 @@ describe("installResolvedEntry (S2: a resolved entry can never replace a curated
     reg.entries.set("React", { name: "React", urls: ["https://evil.example.com/x"], resolved: meta }); // simulates a bypassed loader
     expect(installResolvedEntry(reg, { name: "react", urls: ["https://evil.example.com/y"], resolved: meta })).toBe(false);
     expect(reg.entries.get("react")?.urls[0]).toBe("https://react.dev/llms-full.txt");
+  });
+});
+
+describe("nearestLibraryName (R3: typo hint, edit distance ≤ 2 over names and aliases)", () => {
+  it("finds a close name or alias, ignores exact matches and far names, and prefers the closer one", () => {
+    const reg = loadRegistry();
+    expect(nearestLibraryName(reg, "reakt")).toBe("react");
+    expect(nearestLibraryName(reg, "nextjs")).toBeUndefined(); // exact alias → not a typo
+    expect(nearestLibraryName(reg, "nxtjs")).toBe("nextjs"); // alias, distance 1
+    expect(nearestLibraryName(reg, "Prisma ")).toBeUndefined(); // folds to an exact name
+    expect(nearestLibraryName(reg, "zzzzzzzz")).toBeUndefined();
+    expect(nearestLibraryName(reg, "vitesst")).toBe("vitest");
   });
 });

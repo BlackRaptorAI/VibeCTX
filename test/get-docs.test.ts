@@ -7,6 +7,7 @@ import { writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
+import { derivedAllowedHosts } from "../src/link-policy.js";
 
 let dir: string;
 
@@ -341,6 +342,34 @@ describe("getDocs index following", () => {
     expect(await getDocs(withHosts, { topic: "request hostname" })).toContain("redirected body");
   });
 
+  it("Q1: a RESOLVED entry with derived allowedHosts: the derived-host link is fetched, off-policy links are skipped, never fetched and never consume the budget", async () => {
+    const primary = "https://raw.githubusercontent.com/acme/acme/HEAD/README.md";
+    const resolvedEntry = {
+      name: "acme",
+      urls: [primary],
+      allowedHosts: derivedAllowedHosts({ homepage: "https://acme.dev/" }), // → acme.dev, docs.acme.dev
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/acme/latest", homepage: "https://acme.dev/" },
+    };
+    expect(resolvedEntry.allowedHosts).toEqual(["acme.dev", "docs.acme.dev"]);
+    // Three off-policy links outrank the one on the derived host (two topic tokens vs one);
+    // with a budget of 3 they would crowd it out if refused links consumed the budget.
+    writeCache("acme", primary, [
+      "# acme",
+      "- [Request routing guide](https://github.com/acme/acme/blob/main/docs/routing.md)",
+      "- [Request routing mirror](https://mirror.example.net/routing.md)",
+      "- [Request routing api](https://api.acme.dev/routing.md)", // api.acme.dev is NOT derived (no *. wildcard)
+      "- [Routing](https://docs.acme.dev/routing.md)",
+    ].join("\n"));
+    const spy = stubFetch({ "https://docs.acme.dev/routing.md": "# Routing\n\n## Request routing\n\nMatched from the derived docs host." });
+    const out = await getDocsDetailed(resolvedEntry, { topic: "request routing" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith("https://docs.acme.dev/routing.md", expect.anything());
+    expect(out.followed).toEqual(["https://docs.acme.dev/routing.md"]);
+    expect(out.dropped).toEqual({ outsideOrigin: 3, tooLarge: 0, unavailable: 0 });
+    expect(out.text).toContain("Matched from the derived docs host");
+    expect(out.text).toContain("Skipped 3 index links outside allowed hosts (raw.githubusercontent.com, acme.dev, docs.acme.dev)");
+  });
+
   it("does not follow links when the document is prose", async () => {
     seedIndex(
       [
@@ -385,14 +414,32 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     });
     const reg: Registry = { entries: new Map(registry.entries) };
     const out = await getDocsToolText(reg, { library: "Elysia", topic: "middleware" });
+    // R3: provenance first, then the normal response.
+    expect(out.split("\n")[0]).toBe(
+      '> Resolved "Elysia" via npm on this call — not a curated entry; verify this is the package you meant. homepage https://elysiajs.com/ · repository github.com/elysiajs/elysia',
+    );
     expect(out).toContain("Source: https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md");
     expect(out).toContain("onBeforeHandle");
     expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
     expect(spy).toHaveBeenCalledTimes(1 + 3); // metadata, two llms probes, README.md at HEAD
-    // Second call: served from the adopted entry and the cache — no new fetch.
+    // Second call: served from the adopted entry and the cache — no new fetch, and no provenance line.
     spy.mockClear();
-    expect(await getDocsToolText(reg, { library: "elysia", topic: "middleware" })).toContain("onBeforeHandle");
+    const again = await getDocsToolText(reg, { library: "elysia", topic: "middleware" });
+    expect(again).toContain("onBeforeHandle");
+    expect(again).not.toContain("Resolved ");
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("R3: the provenance line carries the package-supplied description and the nearest curated name for a likely typo", async () => {
+    stubFetch({
+      "https://registry.npmjs.org/reakt/latest": JSON.stringify({ description: "Something\u202E else entirely", homepage: "https://github.com/someone/reakt" }),
+      "https://raw.githubusercontent.com/someone/reakt/HEAD/README.md": "# reakt\n\n## Hooks\n\nNot the React you meant.",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    const out = await getDocsToolText(reg, { library: "reakt", topic: "hooks" });
+    expect(out.split("\n")[0]).toBe(
+      '> Resolved "reakt" via npm on this call — not a curated entry; verify this is the package you meant. (package-supplied) description: Something else entirely · repository github.com/someone/reakt · nearest curated name: "react"',
+    );
   });
 
   it("an unknown library nothing can resolve returns the could-not-resolve line (never the stack), after at most the metadata fetches", async () => {
