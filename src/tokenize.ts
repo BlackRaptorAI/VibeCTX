@@ -112,6 +112,37 @@ function dedouble(t: string): string | undefined {
   return out.length >= MIN_STEM_RESULT ? out : undefined;
 }
 
+/** Consonants that never stood before a silent `e` in English spelling, so a stem ending
+ *  in one never lost one: `fix` (not `fixe`), `saw`, `pay`. Porter's own exclusion. */
+const NO_SILENT_E_AFTER = new Set(["w", "x", "y"]);
+
+/** Porter's vowel test: `y` counts as a vowel only when a consonant precedes it, which is
+ *  what makes `typ` (t-y-p) consonant-vowel-consonant and `str` three consonants. */
+function isVowelAt(t: string, i: number): boolean {
+  const c = t[i];
+  if (c === "a" || c === "e" || c === "i" || c === "o" || c === "u") return true;
+  return c === "y" && i > 0 && !isVowelAt(t, i - 1);
+}
+
+/**
+ * Repair (d) — the silent `e` put BACK. Porter step 1b's `*o` rule, narrowed to the case
+ * that bit us (R1): `ing`/`ed` came off a silent-e verb and left a bare three-letter
+ * consonant-vowel-consonant stem — `noted` → `not`, `typed`/`typing` → `typ`, `based` →
+ * `bas` — while the base form kept its `e` (repair (b) only fires from five characters up).
+ * So the pair never met, and the stem collided with a high-frequency word (`not`, `see`).
+ * Restoring the `e` converges them on the base form instead.
+ *
+ * Narrow on purpose. Only a three-letter stem, only CVC, only when the last consonant is
+ * one that can precede a silent `e`: `str` (three consonants) stays `str`, so `string` is
+ * not rewritten to `stre`, and `fix`/`fixed` meet at `fix`.
+ */
+function restoreSilentE(t: string): string | undefined {
+  if (t.length !== MIN_STEM_RESULT) return undefined;
+  const cvc = !isVowelAt(t, 0) && isVowelAt(t, 1) && !isVowelAt(t, 2);
+  if (!cvc || NO_SILENT_E_AFTER.has(t[2])) return undefined;
+  return `${t}e`;
+}
+
 /**
  * Repair (b) — the silent-e cut. English drops the `e` before `ing`/`ed`, so `parse`
  * and `parsing` can only meet at `pars`, `create` and `created` at `creat`. Applied to
@@ -131,27 +162,39 @@ function stripSilentE(t: string): string | undefined {
  * characters or containing a digit (`utf8s`, version numbers):
  *
  *   1. plural — `ies→y`, `sses→ss`, trailing `s` but never `ss`
- *   2. verb   — `ing`, `ed`, then repair (a), the de-doubling: `running` → `run`.
- *               When `ed` alone would go under the floor the `e` belongs to the stem
- *               (`use` + `ed` is spelled `used`), so the `d` is cut instead.
- *   3. repair (b) — the silent `e`, unless (a) already fired. (A de-doubled stem ends
- *      in a consonant, so this exclusion is belt-and-braces, not a live branch.)
+ *   2. verb   — `ing`, `ed`, then ONE of the two step-1b repairs, in Porter's order:
+ *               (a) de-doubling, `running` → `runn` → `run`; else (d) the silent `e` put
+ *               back on a three-letter CVC stem, `noted` → `not` → `note`. When `ed`
+ *               alone would go under the floor the `e` belongs to the stem (`use` + `ed`
+ *               is spelled `used`), so the `d` is cut instead.
+ *   3. repair (b) — the silent `e` cut, unless (a) or (d) already fired.
  *
  * Two passes for suffixes rather than one so `settings` → `setting` → `set` converges
  * with `set`. What this buys, MEASURED by test/tokenize.test.ts "stems inflections of
- * the same word to one token": parse/parsing/parsed/parses, create/creating/created,
- * use/uses/used, run/running, handle/handling, cache/caching/cached,
- * route/routes/routing, policy/policies, query/queries/querying all converge.
+ * the same word to one token" and "(d) converges the review gate's silent-e probe list":
+ * parse/parsing/parsed/parses, create/creating/created, use/uses/used, run/running,
+ * handle/handling, cache/caching/cached, route/routes/routing, policy/policies,
+ * query/queries/querying, and — since repair (d) — note/noted/noting, type/typed/typing,
+ * base/based, name/named, code/coded/coding, size/sized/sizing, page/paged/paging all
+ * converge.
  *
- * Two deliberate non-convergences, and the reason for each:
+ * Non-convergences that remain, and the reason for each (pinned by
+ * "pins the remaining documented non-convergences and over-stems"):
  *   - `using` ≠ `use`. It is a stopword, so no real query reaches the stemmer with it;
  *     standing alone, `ing` → `us` is under the floor and it keeps its own form.
  *   - `handler` ≠ `handle`. There is no agent-noun rule: an `er` rule would also merge
  *     `router` into `route` and `parser` into `parse`, which loses more than it gains.
+ *   - `embed` (→ `emb`) ≠ `embedded` (→ `embed`). `ed` is not a suffix in `embed`, and
+ *     `emb` is not CVC, so repair (d) cannot put it right; no rule can tell the two apart
+ *     without a lexicon.
  *
- * The silent-e cut over-stems a few nouns that merely end in `e` — `stripe` → `strip`,
- * `middleware` → `middlewar`. Queries and documents go through the same function, so a
- * collision costs precision, never a match.
+ * Over-stems — two words folded onto one token — and why each is tolerated:
+ *   - `seed` → `see`. `seed` and `use`+`d` are both consonant-vowel-vowel-`d`; the `d`-cut
+ *     that carries `used` → `use` cannot avoid carrying `seed` → `see`.
+ *   - `stripe` → `strip`, `middleware` → `middlewar`. The silent-e cut over-stems nouns
+ *     that merely end in `e`.
+ * Queries and documents go through the same function, so a collision costs precision,
+ * never a match.
  */
 export function stem(token: string): string {
   if (hasDigit(token)) return token;
@@ -163,7 +206,7 @@ export function stem(token: string): string {
       (t.endsWith("ss") ? undefined : chop(t, "s", ""));
     if (plural !== undefined) t = plural;
   }
-  let dedoubled = false;
+  let repaired = false;
   if (t.length >= MIN_STEM_INPUT) {
     const verb =
       chop(t, "ing", "") ??
@@ -171,14 +214,20 @@ export function stem(token: string): string {
       (t.endsWith("ed") ? chop(t, "d", "") : undefined);
     if (verb !== undefined) {
       t = verb;
+      // (a) and (d) are alternatives, in Porter's order: a doubled consonant is the
+      // suffix's doing, and a CVC stem is a silent-e verb's. Both end the stemming.
       const single = dedouble(t);
+      const restored = single === undefined ? restoreSilentE(t) : undefined;
       if (single !== undefined) {
         t = single;
-        dedoubled = true;
+        repaired = true;
+      } else if (restored !== undefined) {
+        t = restored;
+        repaired = true;
       }
     }
   }
-  if (!dedoubled) {
+  if (!repaired) {
     const bare = stripSilentE(t);
     if (bare !== undefined) t = bare;
   }

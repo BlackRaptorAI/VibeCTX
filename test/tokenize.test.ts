@@ -224,6 +224,67 @@ describe("tokenize — step-1b repairs, so inflections converge (D-23 amended)",
     expect(one("ring")).toBe("ring");
   });
 
+  /**
+   * R1 — the review gate's probe list. Cutting `ing`/`ed` off a silent-e verb used to
+   * leave a bare three-letter stem (`noted` → `not`, `typed`/`typing` → `typ`) while the
+   * base form kept its `e` (`note`, `type`), so the pair never met AND the stem collided
+   * with a high-frequency word. Repair (d) puts the `e` back. Every pair below is a
+   * convergence the tokenizer must produce; the ones it cannot are pinned separately.
+   */
+  it("(d) converges the review gate's silent-e probe list", () => {
+    const pairs: ReadonlyArray<readonly [string, ...string[]]> = [
+      ["note", "note", "noted", "noting", "notes"],
+      ["type", "type", "typed", "typing", "types"],
+      ["base", "base", "based", "basing", "bases"],
+      ["name", "name", "named", "naming", "names"],
+      ["code", "code", "coded", "coding", "codes"],
+      ["size", "size", "sized", "sizing", "sizes"],
+      ["move", "move", "moved", "moving", "moves"],
+      ["page", "page", "paged", "paging", "pages"],
+      ["store", "store", "stored", "storing", "stores"], // four-letter stem: unaffected
+    ];
+    for (const [stem, ...forms] of pairs) {
+      for (const form of forms) {
+        expect({ form, stem: one(form) }).toEqual({ form, stem: one(stem) });
+      }
+    }
+    expect(one("noted")).toBe("note");
+    expect(one("typing")).toBe("type");
+    expect(one("noted")).not.toBe("not");
+    expect(one("typed")).not.toBe("typ");
+  });
+
+  it("(d) restores the e only for a consonant-vowel-consonant stem, so `string` is left alone", () => {
+    // "str" is three consonants: not a silent-e verb, so no `e` is invented for it.
+    expect(one("string")).toBe("str");
+    expect(one("string")).toBe(one("strings"));
+    expect(one("spring")).toBe("spr");
+    // A final w / x / y never took a silent e either (Porter's own exclusion).
+    expect(one("fixed")).toBe("fix");
+    expect(one("fixed")).toBe(one("fix"));
+    expect(one("sawed")).toBe("saw");
+    // A doubled consonant is repair (a)'s business, not (d)'s.
+    expect(one("added")).toBe("add");
+    expect(one("running")).toBe("run");
+  });
+
+  /**
+   * R1 — pairs the stemmer cannot converge, and one it converges when it should not.
+   * Listed because a reader of the ranker has to know they exist; each has a reason.
+   */
+  it("pins the remaining documented non-convergences and over-stems", () => {
+    // Non-convergences.
+    expect(one("using")).not.toBe(one("use")); // stopword; ing → "us" is under the floor
+    expect(one("handler")).not.toBe(one("handle")); // no agent-noun rule
+    expect(one("embed")).toBe("emb"); // "ed" is not a suffix here, and "emb" is not CVC
+    expect(one("embedded")).toBe("embed"); // ... so these two do not meet
+    expect(one("embed")).not.toBe(one("embedded"));
+
+    // Over-stems: two distinct words folded onto one token.
+    expect(one("seed")).toBe(one("see")); // "seed" and "use"+"d" are both C-V-V-d
+    expect(one("stripe")).toBe(one("strip"));
+  });
+
   it("still never stems a token containing a digit, whatever the suffix", () => {
     expect(tokenize("base64ed")).toEqual(["base64ed"]);
     expect(tokenize("utf8e")).toEqual(["utf8e"]);
