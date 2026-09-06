@@ -35,6 +35,7 @@ npx -y @blackraptorai/vibectx
 | `list_libraries()` | Registry + per-library cache status |
 | `get_docs(library, topic?, maxTokens?)` | Fetch-or-cache, then return the sections best matching `topic` (follows llms.txt index links when needed). No topic → table of contents + document head |
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted) |
+| `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
 
 ## Configuration
 
@@ -53,7 +54,8 @@ npx -y @blackraptorai/vibectx --config ./docs-cache.config.json
       "name": "hono",
       "urls": ["https://hono.dev/llms-full.txt", "https://hono.dev/llms.txt"],
       "ttlHours": 168,
-      "description": "Hono web framework"
+      "description": "Hono web framework",
+      "probeQueries": ["middleware"]
     }
   ]
 }
@@ -62,6 +64,64 @@ npx -y @blackraptorai/vibectx --config ./docs-cache.config.json
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
+`probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
+uses to prove the entry answers; without them a query is derived from the description.
+
+## Checking coverage: `vibectx doctor`
+
+A library can look healthy — bytes cached, refresh succeeded — and still answer
+nothing (an `llms.txt` that is only a link index, a README fallback that never
+mentions your topic). `doctor` makes coverage a measured property: for every
+library it runs the entry's `probeQueries` through the **same `get_docs` path**
+your agent uses and reports what came back.
+
+```bash
+npx -y @blackraptorai/vibectx doctor                      # human table
+npx -y @blackraptorai/vibectx doctor --json               # machine shape (below)
+npx -y @blackraptorai/vibectx doctor --library fastify    # one library
+npx -y @blackraptorai/vibectx doctor --offline            # cache only; never touches the network
+npx -y @blackraptorai/vibectx doctor --config ./vibectx.config.json
+```
+
+```
+library   kind         cache  probe                               links  mark
+fastify   index-only   0.0h   "lifecycle hooks" → index-followed  2/0    ✓
+pgvector  readme       3.2h   "hnsw index" → answered             0/0    ✓
+react     unreachable  —      —                                   0/0    ✗
+
+2/3 libraries healthy
+✗ react: unreachable: nothing fetched and nothing cached
+```
+
+Per library it reports:
+
+- **kind** — `index-only` when the document is link-dense (structure, whatever the
+  URL; answers depend on following links); `readme` when it is not an index and the
+  resolved URL is README-style (host `raw.githubusercontent.com`, or last path segment
+  `README`/`README.ext`) **or** has no llms.txt provenance (last path segment is not
+  `llms.txt` / `llms-*.txt`); `full-text` for prose at an llms.txt URL;
+  `unreachable` when nothing could be fetched and nothing is cached.
+- **cache** — age of the cached document in hours, plus `stale` when past its TTL.
+- **probe** — `answered` (≥ 1 section returned), `index-followed` (answered, and a
+  returned section came from a followed index page — the index alone would have
+  returned only its link list), or `no match`. `(derived)` marks a query derived
+  from the description because the entry has no `probeQueries`.
+- **links** — index links followed / dropped (outside origin, over 2 MiB, or unreachable).
+
+**Exit code** `0` when every checked library is healthy; `1` when any is
+`unreachable`, `index-only` with zero links followed, has a probe with `no match`,
+or has a cache older than 2× its TTL; `2` for a usage, config or unknown-library
+error. `--offline` reports anything not cached as `unreachable`.
+
+`--json` emits `{ generatedAt, libraries: [{ library, kind, url, cacheAgeHours, stale,
+ttlHours, probes: [{ query, derived, status, followed, dropped }], followed, dropped,
+healthy, reasons }], healthy, total }` — keys in that order, `null` for a missing
+URL or age.
+
+Honest limit: doctor measures **retrieval, not correctness**. A ✓ means an agent
+asking that question today gets sections back; it does not check that they are the
+right ones. `list_libraries` shows the same kind per library, classified from the
+cache without touching the network (`unknown` until something is cached).
 
 ## Design notes
 
