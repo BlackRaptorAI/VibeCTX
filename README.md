@@ -37,24 +37,47 @@ npx -y @blackraptorai/vibectx
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
 
+`library` is a name from `list_libraries` or one of its aliases (`next`, `tailwind`, `remix`, …).
+
 ## Configuration
 
-Ships with a default registry (Fastify, Prisma, TimescaleDB, pgvector, Anthropic SDK,
-AWS CDK, Playwright, React, fastify-type-provider-zod). Add or override libraries with
-a JSON config:
+Ships with a default registry of the 30 libraries vibe coders and small startup teams
+reach for most:
+
+- **Web frameworks:** `next.js`, `react`, `react-router` (Remix), `astro`, `sveltekit`, `nuxt`, `vue`, `expo`
+- **Backend / data:** `supabase`, `firebase`, `convex`, `prisma`, `drizzle-orm`, `trpc`, `hono`, `zod`
+- **UI:** `tailwindcss`, `shadcn`, `motion` (Framer Motion), `tanstack-query`
+- **AI:** `ai-sdk` (Vercel AI SDK), `openai`, `anthropic-sdk`
+- **Auth / payments / email:** `clerk`, `stripe`, `resend`
+- **Tooling:** `bun`, `vite`, `vitest`, `playwright`
+
+**Naming rule.** A library's `name` is lowercase and is its npm package name — unless that
+package is scoped (`@supabase/supabase-js`), too generic on its own (`ai`), or not what
+people call the product (`next`); then it is the product's widely used short name
+(`supabase`, `ai-sdk`, `next.js`). Where agents commonly send another name, the entry
+carries **aliases** that resolve to the same docs: `next` / `nextjs` → `next.js`,
+`tailwind` → `tailwindcss`, `remix` / `react-router-dom` → `react-router`,
+`svelte` → `sveltekit`, `framer-motion` → `motion`, `react-query` → `tanstack-query`,
+`anthropic` → `anthropic-sdk`, `firebase-js` → `firebase`, `drizzle` → `drizzle-orm`,
+`ai` / `vercel-ai` → `ai-sdk`, `supabase-js` → `supabase`, `shadcn-ui` / `shadcn/ui` →
+`shadcn`. Lookups are case-insensitive (`Next.js` works). `list_libraries` shows each
+entry's aliases as `(aka …)`; every tool that takes a `library` accepts an alias.
+
+Add or override libraries with a JSON config:
 
 ```bash
-npx -y @blackraptorai/vibectx --config ./docs-cache.config.json
+npx -y @blackraptorai/vibectx --config ./vibectx.config.json
 ```
 
 ```json
 {
   "libraries": [
     {
-      "name": "hono",
-      "urls": ["https://hono.dev/llms-full.txt", "https://hono.dev/llms.txt"],
+      "name": "elysia",
+      "aliases": ["elysiajs"],
+      "urls": ["https://elysiajs.com/llms-full.txt", "https://elysiajs.com/llms.txt"],
       "ttlHours": 168,
-      "description": "Hono web framework",
+      "description": "Elysia web framework",
       "probeQueries": ["middleware"]
     }
   ]
@@ -67,6 +90,22 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
 uses to prove the entry answers; without them a query is derived from the description.
 An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.
+`aliases` (optional, array of non-empty strings; `[]` = none) must be unique across the
+registry and must not equal any library's `name` — a collision is a config error that
+names both sides. A config entry with the same `name` as a default replaces the whole
+default entry, aliases included (so `"aliases": []` on an override also frees that
+default's aliases for your own use).
+
+**Keep a private stack via committed config.** The default registry is what most teams
+share; what only *your* team uses belongs in a `vibectx.config.json` committed to your
+repo, so every teammate's agent gets byte-identical context. Config entries merge over
+the defaults. [`docs/examples/paragon.vibectx.config.json`](docs/examples/paragon.vibectx.config.json)
+is a complete example — the Fastify / TimescaleDB / pgvector / AWS CDK stack that shipped
+as the default registry through 0.1.3:
+
+```bash
+npx -y @blackraptorai/vibectx --config ./docs/examples/paragon.vibectx.config.json doctor
+```
 
 ## Checking coverage: `vibectx doctor`
 
@@ -79,20 +118,24 @@ your agent uses and reports what came back.
 ```bash
 npx -y @blackraptorai/vibectx doctor                      # human table
 npx -y @blackraptorai/vibectx doctor --json               # machine shape (below)
-npx -y @blackraptorai/vibectx doctor --library fastify    # one library
+npx -y @blackraptorai/vibectx doctor --library next.js    # one library (aliases work: --library next)
 npx -y @blackraptorai/vibectx doctor --offline            # cache only; never touches the network
 npx -y @blackraptorai/vibectx doctor --config ./vibectx.config.json
 ```
 
 ```
-library   kind         cache  probe                               links  mark
-fastify   index-only   0.0h   "lifecycle hooks" → index-followed  2/0    ✓
-pgvector  readme       3.2h   "hnsw index" → answered             0/0    ✓
-react     unreachable  —      —                                   0/0    ✗
+library   kind         cache  probe                 links  mark
+supabase  readme       0.0h   2 probes: 2 answered  0/0    ✓
+stripe    readme       0.0h   2 probes: 2 answered  0/0    ✓
+react     unreachable  —      —                     0/0    ✗
 
 2/3 libraries healthy
 ✗ react: unreachable: nothing fetched and nothing cached
 ```
+
+(Three rows of a run from a network where only GitHub was reachable, so the entries fell
+back to their README candidates; with the docs sites reachable you would expect `full-text`
+or `index-only` in the kind column.)
 
 Per library it reports:
 
