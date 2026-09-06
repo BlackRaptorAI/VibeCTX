@@ -160,7 +160,13 @@ function projectDirs(cwd: string, ownerUid: (dir: string) => number | undefined)
   const dirs: string[] = [];
   let cur = start;
   for (;;) {
-    if (!trusted(cur)) return { dirs, foreign: cur };
+    // Reaching an untrusted directory ends the walk WITHOUT a repository, so D-15's
+    // no-repository rule applies just as it does at the filesystem root: cwd only. The
+    // directories walked so far are not a project root — they are merely the ones below a
+    // directory someone else owns, and returning them would let `/shared/vibectx.config.json`
+    // be outranked while `/shared/proj/vibectx.config.json` silently became the team config.
+    // (`dirs` is empty only when cwd ITSELF is foreign, and then nothing may be searched.)
+    if (!trusted(cur)) return { dirs: dirs.slice(0, 1), foreign: cur };
     dirs.push(cur);
     if (existsSync(join(cur, ".git"))) return { dirs };
     const parent = dirname(cur);

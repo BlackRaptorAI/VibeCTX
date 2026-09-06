@@ -197,6 +197,35 @@ describe("discoverConfig: the walk-up is confined to the repository (D-15)", () 
     ]);
   });
 
+  it("D-15/D-20: a foreign-owned ancestor without a .git leaves only cwd searched", () => {
+    // /shared belongs to someone else; /shared/proj and /shared/proj/work are ours, and no
+    // .git exists anywhere. The walk stops at /shared having found no repository, so D-15's
+    // "no repository above cwd" rule applies exactly as it does when the walk reaches the
+    // filesystem root: cwd is the only directory searched. Returning the directories walked
+    // so far instead would make /shared/proj a project root purely because an untrusted
+    // directory happened to sit above it.
+    const shared = join(root, "shared");
+    const proj = join(shared, "proj");
+    const work = join(proj, "work");
+    mkdirSync(work, { recursive: true });
+    write(proj, CONFIG_FILENAME, CONFIG("intermediate", "https://intermediate.example.com/llms.txt"));
+    const mine = process.getuid?.() ?? 0;
+    const ownerUid = (dir: string) => (dir === shared ? mine + 1 : mine);
+    const res = discover({ cwd: work, ownerUid });
+    expect(res.files).toEqual([]);
+    // The note fires only for a config in the FOREIGN directory itself; /shared holds none.
+    expect(res.notes).toEqual([]);
+    // cwd is still searched: its own config is read.
+    const own = write(work, CONFIG_FILENAME, CONFIG("own", "https://own.example.com/llms.txt"));
+    expect(discover({ cwd: work, ownerUid }).files.map((f) => f.path)).toEqual([own]);
+    // And a .git reached in a TRUSTED directory before the foreign one still ends the walk
+    // there, so the repository's own config keeps winning over cwd's.
+    const p = write(repo, CONFIG_FILENAME, CONFIG("repo", "https://repo.example.com/llms.txt"));
+    expect(paths({ cwd: join(repo, "src", "deep"), ownerUid: (dir) => (dir === root ? mine + 1 : mine) })).toEqual([
+      `project:${p}`,
+    ]);
+  });
+
   it("D-20: a foreign-owned working directory yields no project config at all", () => {
     write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
     const uid = vi.spyOn(process, "getuid").mockReturnValue((process.getuid?.() ?? 0) + 1);
