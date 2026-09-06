@@ -99,10 +99,11 @@ export function buildServer(registry: Registry): McpServer {
         "Read the project's dependency manifests (package.json, pyproject.toml, requirements*.txt; lockfiles when the manifest is absent) and cache every dependency's primary docs so get_docs answers for the whole stack offline. Unknown names are resolved from npm / PyPI (sharing the server's 100-per-hour resolution cap with get_docs); build/lint tooling is skipped as noise. Reads only the server's working directory or a directory beneath it. Same table as `vibectx warm`.",
       inputSchema: {
         dir: z.string().optional().describe("Project directory: the server's working directory (default) or one beneath it"),
-        force: z.boolean().optional().describe("Retry names reported unresolved within the last 24 h"),
       },
     },
-    async ({ dir, force }) => text(await warmToolText(registry, dir, { force })),
+    // D-12: `force` is a CLI flag (`vibectx warm --force`), never a tool input — retrying a
+    // name the last run could not resolve is a person's decision, not a model's.
+    async ({ dir }) => text(await warmToolText(registry, dir)),
   );
 
   return server;

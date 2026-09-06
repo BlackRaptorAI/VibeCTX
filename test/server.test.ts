@@ -75,6 +75,18 @@ describe("buildServer", () => {
     expect(autowarmStatus().started).toBe(false); // buildServer alone never warms
     await client.close();
   });
+
+  it("S-B / D-12: warm_project's input schema is `dir` only — `force` is a CLI flag, not a model-callable one", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = buildServer(registry());
+    await server.connect(serverTransport);
+    const client = new Client({ name: "probe", version: "0" });
+    await client.connect(clientTransport);
+    const warm = (await client.listTools()).tools.find((t) => t.name === "warm_project")!;
+    expect(Object.keys(warm.inputSchema.properties ?? {})).toEqual(["dir"]);
+    expect(JSON.stringify(warm)).not.toContain("force");
+    await client.close();
+  });
 });
 
 describe("startServer + autowarm over an in-memory transport", () => {

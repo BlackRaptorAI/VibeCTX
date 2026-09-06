@@ -343,15 +343,17 @@ export function isWithinCwd(dir: string, cwd = process.cwd()): boolean {
 
 /** The MCP `warm_project` tool body: the table for `dir` (default: the server's working
  *  directory, and only that directory or one beneath it — D-10), or the one-line reason it
- *  could not run. Never throws. */
-export async function warmToolText(registry: Registry, dir?: string, opts: { force?: boolean } = {}): Promise<string> {
+ *  could not run. Never throws. No `force`: D-12 makes retrying a recent resolution failure
+ *  a CLI flag (`vibectx warm --force`), so a model cannot spend the resolution budget on
+ *  names the last run already proved unresolvable. */
+export async function warmToolText(registry: Registry, dir?: string): Promise<string> {
   const cwd = process.cwd();
   const target = dir ?? cwd;
   if (!isWithinCwd(target, cwd)) {
     return cleanText(`${resolve(target)} is outside the project directory (${cwd}); warm_project only reads the server's working directory or a directory beneath it`);
   }
   try {
-    return formatWarmTable(await runWarm(registry, { dir: target, force: opts.force }));
+    return formatWarmTable(await runWarm(registry, { dir: target }));
   } catch (e) {
     return cleanText(errorMessage(e));
   }

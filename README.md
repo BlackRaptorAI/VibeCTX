@@ -37,7 +37,7 @@ npx -y @blackraptorai/vibectx
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved) |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
-| `warm_project(dir?, force?)` | Read the project's dependency manifests and cache every dependency's docs — same table as `vibectx warm` below; reads only the server's working directory or one beneath it |
+| `warm_project(dir?)` | Read the project's dependency manifests and cache every dependency's docs — same table as `vibectx warm` below; reads only the server's working directory or one beneath it (real paths, so a symlink out of it is refused) |
 
 `library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
 or **any npm / PyPI package name** — an unknown name is resolved on the spot.
@@ -121,8 +121,10 @@ names that map to one entry share one fetch.
 
 **Recent failures are not retried every run.** A name the previous run left `unresolved` is
 reported `unresolved (recent)` for 24 hours from that failure — no resolution slot spent,
-no network — with the original reason and time in the detail line. `--force` (CLI) or
-`force: true` (tool) retries now; after 24 hours it retries by itself. The memo never applies
+no network — with the original reason and time in the detail line. `vibectx warm --force`
+retries now; after 24 hours it retries by itself. `--force` is a **CLI flag only** — the
+`warm_project` tool takes `dir` and nothing else, so spending the resolution budget on names
+the last run already proved unresolvable stays a person's decision. The memo never applies
 to a name the registry has since learned (pinned in config, or resolved another way).
 
 **Statuses:** `cached` · `already fresh` · `resolved+cached` · `unresolved` (the resolver's
@@ -137,7 +139,9 @@ stale copy, if any, is kept and said so).
 docs are on disk", and they are not yet; `2` for a usage error, an unreadable config, a
 directory that is not a directory, or a directory with no manifest to read. `vibectx warm
 [dir]` takes any directory (default: the current one); the `warm_project` tool accepts only
-the server's working directory or a directory beneath it and answers "outside the project
+the server's working directory or a directory beneath it — compared on **real** paths, so a
+symlink inside the working directory that points elsewhere, or a sibling that merely shares
+the prefix (`/a/proj-evil` against `/a/proj`), is refused — and answers "outside the project
 directory" for anything else. `--offline` prints a cache-only report (fresh / stale / missing
 per name, unknown names `unresolved`) without touching the network or writing anything;
 `--force` retries recent failures; `--json` emits `{ schemaVersion: 1, generatedAt, dir,
