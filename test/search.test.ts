@@ -276,8 +276,14 @@ describe("runSearch · the per-call bounds (PAR-659, D-36)", () => {
     return { entries };
   }
 
+  /** Fixture sizes are LITERALS, not `CONSTANT + n`: a bound raised to infinity must fail this
+   *  file in a second, not build an infinite fixture while the suite hangs. */
+  const LAZY_FIXTURE = 45;
+  const RENDER_FIXTURE = 12;
+
   it("MAX_LAZY_INDEX_DOCS bounds the tokenizing ONE cold call does, and says which libraries were left", () => {
-    const reg = manyLibraries(MAX_LAZY_INDEX_DOCS + 5);
+    expect(MAX_LAZY_INDEX_DOCS).toBeLessThan(LAZY_FIXTURE);
+    const reg = manyLibraries(LAZY_FIXTURE);
     const cold = runSearch(reg, { query: "streaming events" });
     expect(cold.tokenized).toBe(MAX_LAZY_INDEX_DOCS); // not all 45 — the bound is what stops it
     expect(cold.searched).toBe(MAX_LAZY_INDEX_DOCS);
@@ -285,14 +291,15 @@ describe("runSearch · the per-call bounds (PAR-659, D-36)", () => {
     // Run it again and the rest are taken in, as the note promises.
     const second = runSearch(reg, { query: "streaming events" });
     expect(second.fromIndex).toBe(MAX_LAZY_INDEX_DOCS);
-    expect(second.tokenized).toBe(5);
-    expect(runSearch(reg, { query: "streaming events" }).fromIndex).toBe(MAX_LAZY_INDEX_DOCS + 5);
+    expect(second.tokenized).toBe(LAZY_FIXTURE - MAX_LAZY_INDEX_DOCS);
+    expect(runSearch(reg, { query: "streaming events" }).fromIndex).toBe(LAZY_FIXTURE);
   });
 
   it("MAX_RENDERED_LIBRARIES caps how many libraries one response can name, however large the budget", () => {
-    const reg = manyLibraries(MAX_RENDERED_LIBRARIES + 4);
+    expect(MAX_RENDERED_LIBRARIES).toBeLessThan(RENDER_FIXTURE);
+    const reg = manyLibraries(RENDER_FIXTURE);
     const out = runSearch(reg, { query: "streaming events", maxTokens: 1_000_000 });
-    expect(out.matchedLibraries).toBe(MAX_RENDERED_LIBRARIES + 4);
+    expect(out.matchedLibraries).toBe(RENDER_FIXTURE);
     expect(out.groups).toHaveLength(MAX_RENDERED_LIBRARIES); // not all twelve
     expect(out.notes.join(" ")).toContain(`libraries matched; the ${MAX_RENDERED_LIBRARIES} best are shown`);
   });
