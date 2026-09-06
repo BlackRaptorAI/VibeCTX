@@ -9,6 +9,10 @@ export interface LibraryEntry {
   ttlHours?: number;
   /** One-line description shown by list_libraries. */
   description?: string;
+  /** Topics `vibectx doctor` runs through get_docs to prove retrieval works for this
+   *  entry. Pick something the docs certainly cover; one is enough. When absent, doctor
+   *  derives a query from the description and marks it "(derived)". */
+  probeQueries?: string[];
 }
 
 /**
@@ -25,6 +29,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/fastify/fastify/main/docs/Reference/Index.md",
     ],
     description: "Fastify web framework reference",
+    probeQueries: ["querystring parsing"],
   },
   {
     name: "prisma",
@@ -33,6 +38,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://www.prisma.io/docs/llms.txt",
     ],
     description: "Prisma ORM documentation",
+    probeQueries: ["upsert"],
   },
   {
     name: "timescaledb",
@@ -42,11 +48,13 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/timescale/timescaledb/main/README.md",
     ],
     description: "TimescaleDB time-series Postgres extension",
+    probeQueries: ["hypertable"],
   },
   {
     name: "pgvector",
     urls: ["https://raw.githubusercontent.com/pgvector/pgvector/master/README.md"],
     description: "pgvector Postgres vector-similarity extension",
+    probeQueries: ["hnsw index"],
   },
   {
     name: "anthropic-sdk",
@@ -56,6 +64,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://docs.anthropic.com/llms.txt",
     ],
     description: "Anthropic API / Claude SDK documentation",
+    probeQueries: ["streaming messages"],
   },
   {
     name: "aws-cdk",
@@ -64,6 +73,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/aws/aws-cdk/main/README.md",
     ],
     description: "AWS CDK v2 (incl. Kinesis/Firehose constructs)",
+    probeQueries: ["kinesis firehose delivery stream"],
   },
   {
     name: "playwright",
@@ -73,11 +83,13 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/microsoft/playwright/main/README.md",
     ],
     description: "Playwright browser automation",
+    probeQueries: ["locator click"],
   },
   {
     name: "react",
     urls: ["https://react.dev/llms-full.txt", "https://react.dev/llms.txt"],
     description: "React 19 documentation",
+    probeQueries: ["useEffect cleanup"],
   },
   {
     name: "fastify-type-provider-zod",
@@ -85,6 +97,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/turkerdev/fastify-type-provider-zod/main/README.md",
     ],
     description: "Zod type provider for Fastify",
+    probeQueries: ["type provider setup"],
   },
 ];
 
@@ -104,6 +117,15 @@ export function loadRegistry(configPath?: string): Registry {
     for (const e of raw.libraries ?? []) {
       if (!e.name || !Array.isArray(e.urls) || e.urls.length === 0) {
         throw new Error(`config entry missing name/urls: ${JSON.stringify(e)}`);
+      }
+      if (
+        e.probeQueries !== undefined &&
+        (!Array.isArray(e.probeQueries) ||
+          e.probeQueries.some((q) => typeof q !== "string" || q.trim().length === 0))
+      ) {
+        throw new Error(
+          `config entry "${e.name}": probeQueries must be an array of non-empty strings, got ${JSON.stringify(e.probeQueries)}`,
+        );
       }
       entries.set(e.name, e);
     }
