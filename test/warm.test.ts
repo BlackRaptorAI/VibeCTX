@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
@@ -464,5 +464,69 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     } finally {
       cwd.mockRestore();
     }
+  });
+
+  describe("S-A / D-10 amended: containment is decided on REAL paths", () => {
+    const CANARY = "zz-canary-outside-cwd";
+    let outside: string;
+    beforeEach(() => {
+      outside = mkdtempSync(join(tmpdir(), "vibectx-outside-cwd-"));
+      writeFileSync(join(outside, "package.json"), JSON.stringify({ dependencies: { [CANARY]: "1" } }), "utf8");
+    });
+    afterEach(() => {
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("a symlinked subdirectory of cwd whose target is outside is refused, and nothing in it is read", async () => {
+      writePackageJson({ react: "19" });
+      symlinkSync(outside, join(project, "link"));
+      const spy = stubFetch({});
+      const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+      try {
+        const text = await warmToolText(registry(), join(project, "link"));
+        expect(text).toMatch(/is outside the project directory/);
+        expect(text).not.toContain(CANARY);
+      } finally {
+        cwd.mockRestore();
+      }
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("a sibling directory whose path shares cwd's prefix is refused", async () => {
+      const sibling = `${realpathSync(project)}-evil`;
+      mkdirSync(sibling);
+      try {
+        const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+        try {
+          expect(await warmToolText(registry(), sibling)).toMatch(/is outside the project directory/);
+        } finally {
+          cwd.mockRestore();
+        }
+      } finally {
+        rmSync(sibling, { recursive: true, force: true });
+      }
+    });
+
+    it("a real subdirectory of cwd is still allowed, and a cwd that is itself a symlink still allows its real subdirectories", async () => {
+      mkdirSync(join(project, "app"));
+      writeFileSync(join(project, "app", "package.json"), JSON.stringify({ dependencies: { react: "19" } }), "utf8");
+      writeCache("react", REACT_URL, "# React fresh");
+      stubFetch({});
+      const direct = vi.spyOn(process, "cwd").mockReturnValue(project);
+      try {
+        expect(await warmToolText(registry(), join(project, "app"))).toContain("1/1 dependencies cached");
+      } finally {
+        direct.mockRestore();
+      }
+      // cwd reached through a symlink: realpath(cwd) is the real project, realpath(target) beneath it.
+      const linkedCwd = join(outside, "proj-link");
+      symlinkSync(project, linkedCwd);
+      const linked = vi.spyOn(process, "cwd").mockReturnValue(linkedCwd);
+      try {
+        expect(await warmToolText(registry(), join(linkedCwd, "app"))).toContain("1/1 dependencies cached");
+      } finally {
+        linked.mockRestore();
+      }
+    });
   });
 });

@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
@@ -42,8 +43,10 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
  * is …`), so a Python project asking for `stripe` sees it got stripe-node. An `ecosystem`
  * field on entries is a queued follow-up.
  *
- * D-10 (oversight, 2026-09-06): the MCP tool (`warmToolText`) accepts only the server's
- * working directory or a directory beneath it; the CLI is unrestricted (the user typed it).
+ * D-10 (oversight, 2026-09-06, amended): the MCP tool (`warmToolText`) accepts only the
+ * server's working directory or a directory beneath it, decided on REAL paths — a symlink
+ * inside the working directory that points elsewhere is refused (S-A). The CLI is
+ * unrestricted (the user typed it).
  *
  * Every table cell passes through `cleanText` before rendering (S3).
  *
@@ -303,12 +306,39 @@ export function formatWarmTable(report: WarmReport): string {
   return lines.join("\n");
 }
 
-/** D-10: is `dir` the working directory or beneath it? Lexical (resolve, no realpath — the
- *  directory need not exist yet; discovery does its own realpath containment inside). */
-export function isWithinCwd(dir: string, cwd = process.cwd()): boolean {
-  const target = resolve(dir);
-  const base = resolve(cwd);
+/** `target` is `base` or beneath it, comparing whole path components (so `/a/proj-evil` is
+ *  NOT beneath `/a/proj`). */
+function beneath(target: string, base: string): boolean {
   return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
+}
+
+/** Best-effort real path: the resolved path itself when it does not exist (or cannot be
+ *  resolved), so containment can still be decided lexically. */
+function realOrLexical(path: string): { real: string; existed: boolean } {
+  try {
+    return { real: realpathSync(path), existed: true };
+  } catch {
+    return { real: path, existed: false };
+  }
+}
+
+/**
+ * D-10 (amended by oversight, 2026-09-06): is `dir` the working directory or beneath it,
+ * decided on REAL paths? `realpathSync(target)` must be `realpathSync(cwd)` or beneath it,
+ * compared component-wise, so a symlink inside the working directory pointing anywhere else
+ * on the filesystem is refused (S-A) and a sibling that merely shares the prefix
+ * (`/a/proj-evil` against `/a/proj`) is refused too. The working directory may itself be
+ * reached through a symlink: both sides are resolved.
+ *
+ * When the target does not exist, its real path is unknowable, so the check falls back to
+ * the lexical path against the real working directory and discovery reports "not a
+ * directory" / "no dependency manifest" — an honest error rather than a containment verdict.
+ */
+export function isWithinCwd(dir: string, cwd = process.cwd()): boolean {
+  const base = realOrLexical(resolve(cwd)).real;
+  const { real, existed } = realOrLexical(resolve(dir));
+  if (existed) return beneath(real, base);
+  return beneath(real, base) || beneath(resolve(dir), resolve(cwd));
 }
 
 /** The MCP `warm_project` tool body: the table for `dir` (default: the server's working
