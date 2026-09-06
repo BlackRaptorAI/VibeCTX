@@ -13,6 +13,7 @@ import {
   readIndex,
   resetSearchIndexMemo,
   searchIndexPath,
+  shedInThisProcess,
   writeIndex,
   MAX_INDEX_FILE_BYTES,
   MAX_LAZY_INDEX_DOCS,
@@ -749,30 +750,35 @@ describe("D-42 · a shed corpus is rebuilt and rewritten once, not on every sear
     return `${head}${parts.join(",")}]}}`;
   }
 
-  it("the second search over a shed corpus writes nothing — same bytes, same mtime — and still searches and names the library", () => {
-    const doc = uniqueDoc(400);
-    writeCache("shed", SHED_URL, doc);
-
-    // What the shed entry costs on disk, priced exactly as `writeIndex` prices it.
+  /**
+   * Plant an index file just under the cap, in entries each far smaller than the one `search`
+   * will build for `doc` — so THAT entry is the largest, and therefore the one D-40 sheds.
+   * Asserts the fixture's own preconditions (readable as it stands, over the cap once the new
+   * entry joins it — a fixture failing either would prove nothing) and returns what the shed
+   * entry costs on disk, priced exactly as `writeIndex` prices it.
+   */
+  function plantIndexJustUnderCap(doc: string): number {
     const built = indexDocument(SHED_URL, doc, AT)!;
     const postings: Record<string, number[]> = {};
     for (const [term, list] of built.postings) postings[term] = list;
     const entryBytes =
       Buffer.byteLength(JSON.stringify({ url: built.url, fetchedAt: built.fetchedAt, hash: built.hash, lengths: built.lengths, postings }), "utf8") + 8;
-
-    // A file just under the cap, in entries each far smaller than the one above — so the entry
-    // `search` builds is the LARGEST, and therefore the one D-40 sheds.
     const planted = plantedEntry(Math.floor(entryBytes / 10));
     const per = planted.length + 8;
     const count = Math.floor((MAX_INDEX_FILE_BYTES - Math.floor(entryBytes / 2)) / per);
     const libraries = Array.from({ length: count }, (_, i) => `"p${i}":${planted}`).join(",");
     const text = `{"schemaVersion":${SEARCH_INDEX_SCHEMA_VERSION},"retrievalVersion":${RETRIEVAL_VERSION},"libraries":{${libraries}}}`;
     writeFileSync(searchIndexPath(), text, "utf8");
-    // The fixture's own preconditions: readable as it stands, over the cap once the new entry
-    // joins it. A fixture that failed either of these would prove nothing.
     expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(MAX_INDEX_FILE_BYTES);
     expect(Buffer.byteLength(text, "utf8") + entryBytes).toBeGreaterThan(MAX_INDEX_FILE_BYTES);
     expect(readIndex().problem).toBeUndefined();
+    return entryBytes;
+  }
+
+  it("the second search over a shed corpus writes nothing — same bytes, same mtime — and still searches and names the library", () => {
+    const doc = uniqueDoc(400);
+    writeCache("shed", SHED_URL, doc);
+    plantIndexJustUnderCap(doc);
 
     const reg: Registry = { entries: new Map([["shed", { name: "shed", urls: [SHED_URL] }]]) };
     const first = runSearch(reg, { query: "shedding", warn: () => {} });
@@ -800,5 +806,49 @@ describe("D-42 · a shed corpus is rebuilt and rewritten once, not on every sear
     expect(second.groups[0].sections[0].body.length).toBeGreaterThan(0);
     expect(second.groups[0].note).toMatch(/not indexed/);
     expect(second.notes.join(" ")).toMatch(/not indexed .*limit.*: shed/);
+  }, 300_000);
+
+  /**
+   * The other half of the memo's claim, and the half nothing else here holds: it is keyed by
+   * document HASH, not by name. A verdict of "too big to index" is true of a TEXT — a document
+   * later refreshed, or shrunk, is a different text and gets a fresh hearing. Key it by name
+   * alone and the library is written off for the life of the process: never rebuilt, never
+   * written, tokenized on every search for ever, and no `invalidateIndex` in sight to clear it
+   * (a refresh through the index's back door — the case D-33 exists for — never calls it).
+   */
+  it("a shed library whose document CHANGES is offered again — the memo is keyed by hash, not by name", () => {
+    const big = uniqueDoc(400);
+    // The memo is per-process and `resetSearchIndexMemo` clears it between tests: the case above
+    // shed exactly this library for exactly this text, and none of that verdict survives here.
+    expect(shedInThisProcess("shed", documentHash(big))).toBe(false);
+    writeCache("shed", SHED_URL, big);
+    plantIndexJustUnderCap(big);
+
+    const reg: Registry = { entries: new Map([["shed", { name: "shed", urls: [SHED_URL] }]]) };
+    const first = runSearch(reg, { query: "shedding", warn: () => {} });
+    expect(first.indexWritten).toBe(true);
+    expect(first.notes.join(" ")).toMatch(/not indexed .*limit.*: shed/);
+    expect(readIndex().libraries.has("shed")).toBe(false); // shed: the file does not hold it
+    expect(shedInThisProcess("shed", documentHash(big))).toBe(true);
+
+    // The document is REFRESHED behind the index's back — new text, new hash, and deliberately
+    // no `invalidateIndex`, which is the only other thing that clears the memo.
+    const small = ["# shed", "", "## shedding heading", "", "The corpus shrank: shedding is now one short section."].join("\n");
+    writeCache("shed", SHED_URL, small);
+    expect(shedInThisProcess("shed", documentHash(small))).toBe(false); // a new text, not a settled verdict
+
+    const second = runSearch(reg, { query: "shedding", warn: () => {} });
+    // The verdict was about the OLD text, so this one is built, kept, and written to the file…
+    expect(second.indexWritten).toBe(true);
+    expect(readIndex().libraries.get("shed")?.hash).toBe(documentHash(small));
+    // …and nothing calls the library slow-to-search any more, because it no longer is.
+    expect(second.groups[0].library).toBe("shed");
+    expect(second.groups[0].note).toBeUndefined();
+    expect(second.notes.join(" ")).not.toMatch(/not indexed/);
+    // Proof it is a real entry and not a rebuild repeated: the next call answers from the index.
+    const third = runSearch(reg, { query: "shedding", warn: () => {} });
+    expect(third.fromIndex).toBe(1);
+    expect(third.tokenized).toBe(0);
+    expect(third.indexWritten).toBe(false);
   }, 300_000);
 });
