@@ -1,4 +1,5 @@
-import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import { adoptResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import { resolvePackage } from "./resolve.js";
 import {
   getLibraryDoc,
   fetchLinkedPage,
@@ -41,7 +42,9 @@ export interface GetDocsOutcome {
   returnedFromFollowed: number;
   /** Followed index links, in follow order. */
   followed: string[];
-  /** Index links that were candidates but not followed, by reason. */
+  /** Index links that were candidates but not followed, by reason. `outsideOrigin` counts
+   *  links the allowed-host policy refused (before or after redirects); the key keeps its
+   *  0.1.3 name because doctor's JSON sums it. */
   dropped: { outsideOrigin: number; tooLarge: number; unavailable: number };
 }
 
@@ -58,14 +61,23 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<s
 }
 
 /** The MCP `get_docs` tool body: resolve `library` (canonical name or alias) and run
- *  getDocs, or return the unknown-library text without touching the network. */
+ *  getDocs. An unknown name is resolved implicitly through resolve_library (PAR-655) —
+ *  npm / PyPI metadata → llms.txt → GitHub README — and, when that works, the entry
+ *  joins the live registry so the next call is a plain hit; when it does not, the
+ *  could-not-resolve line is returned. Offline, an unknown name gets the unknown-library
+ *  text without touching the network. */
 export async function getDocsToolText(
   registry: Registry,
   args: GetDocsArgs & { library: string },
 ): Promise<string> {
   const { library, ...rest } = args;
-  const entry = resolveLibrary(registry, library);
-  if (!entry) return unknownLibraryMessage(registry, library);
+  let entry = resolveLibrary(registry, library);
+  if (!entry) {
+    if (rest.offline) return unknownLibraryMessage(registry, library);
+    const out = await resolvePackage(library);
+    if (!out.ok || !out.entry) return out.text;
+    entry = adoptResolvedEntry(registry, out.entry);
+  }
   return getDocs(entry, rest);
 }
 
@@ -120,21 +132,21 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     // fetchLinkedPage re-checks the guard; this is the visible layer, that one is the safety layer.
     const candidates = rankLinks(doc.content, topic, doc.url, Number.POSITIVE_INFINITY);
     const allowed = candidates.filter((link) => {
-      const ok = isAllowedLink(link.url, doc.url);
+      const ok = isAllowedLink(link.url, doc.url, entry);
       if (!ok) skippedOutsideOrigin += 1;
       return ok;
     });
     let followedBytes = 0;
     for (const link of allowed.slice(0, limit)) {
       if (followedBytes >= MAX_FOLLOWED_BYTES) break;
-      const result = await fetchLinkedPage(entry.name, link.url, doc.url, entry.ttlHours, args.offline);
+      const result = await fetchLinkedPage(entry.name, link.url, doc.url, entry.ttlHours, args.offline, entry);
       switch (result.status) {
         case "ok":
           corpus += `\n\n# ${link.title}\n\n${result.page.content}`;
           followed.push(link.url);
           followedBytes += result.page.content.length;
           break;
-        case "refused": // redirect escaped the origin
+        case "refused": // redirect left the allowed hosts
           skippedOutsideOrigin += 1;
           break;
         case "too-large":
@@ -151,9 +163,8 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   const notes: string[] = [];
   if (followed.length) notes.push(`Followed index links: ${followed.join(", ")}`);
   if (skippedOutsideOrigin > 0) {
-    notes.push(
-      `Skipped ${skippedOutsideOrigin} index links outside ${new URL(doc.url).origin} (same-origin https only)`,
-    );
+    const hosts = [new URL(doc.url).hostname, ...(entry.allowedHosts ?? [])];
+    notes.push(`Skipped ${skippedOutsideOrigin} index links outside allowed hosts (${hosts.join(", ")})`);
   }
   if (tooLarge.length) {
     notes.push(

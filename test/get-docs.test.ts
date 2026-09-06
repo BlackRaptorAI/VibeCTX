@@ -79,7 +79,7 @@ describe("getDocs index following", () => {
     const spy = stubFetch({});
     const out = await getDocs(entry, { topic: "request" });
     expect(spy).not.toHaveBeenCalled();
-    expect(out).toContain("Skipped 2 index links outside https://fastify.dev");
+    expect(out).toContain("Skipped 2 index links outside allowed hosts (fastify.dev)");
   });
 
   it("does not let guard-refused links consume the follow budget", async () => {
@@ -98,7 +98,7 @@ describe("getDocs index following", () => {
     const out = await getDocs(entry, { topic: "request" });
     expect(spy).toHaveBeenCalledTimes(1);
     expect(out).toContain("Followed index links: https://fastify.dev/docs/D.md");
-    expect(out).toContain("Skipped 3 index links outside https://fastify.dev");
+    expect(out).toContain("Skipped 3 index links outside allowed hosts (fastify.dev)");
   });
 
   it("renders the skipped note on the no-match response (protocol-relative links, topic only in the resolved URL)", async () => {
@@ -116,7 +116,7 @@ describe("getDocs index following", () => {
     const out = await getDocs(entry, { topic: "https" });
     expect(spy).not.toHaveBeenCalled();
     expect(out).toContain('No sections matched "https"');
-    expect(out).toContain("Skipped 3 index links outside https://fastify.dev");
+    expect(out).toContain("Skipped 3 index links outside allowed hosts (fastify.dev)");
   });
 
   it("counts a followed link whose redirect escaped the origin as skipped, not as a fetch failure", async () => {
@@ -128,7 +128,7 @@ describe("getDocs index following", () => {
     });
     vi.stubGlobal("fetch", spy);
     const out = await getDocs(entry, { topic: "request" });
-    expect(out).toContain("Skipped 1 index links outside https://fastify.dev");
+    expect(out).toContain("Skipped 1 index links outside allowed hosts (fastify.dev)");
     expect(out).not.toContain("Could not fetch");
     expect(out).not.toContain("SECRET");
   });
@@ -304,6 +304,43 @@ describe("getDocs index following", () => {
     expect(out.dropped.unavailable).toBe(1);
   });
 
+  it("follows a cross-host link when the entry's allowedHosts permits it, and lists the allowed hosts in the skipped note (PAR-655)", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Request on api](https://api.fastify.dev/Request.md)",
+        "- [Request mirror](https://mirror.example.net/Request.md)",
+        "- [Reply](/docs/Reply.md)",
+      ].join("\n"),
+    );
+    const spy = stubFetch({ "https://api.fastify.dev/Request.md": "# Request\n\n## request.hostname\n\nFrom the api host." });
+    const withHosts = { ...entry, allowedHosts: ["api.fastify.dev"] };
+    const out = await getDocs(withHosts, { topic: "request hostname" });
+    expect(spy).toHaveBeenCalledWith("https://api.fastify.dev/Request.md", expect.anything());
+    expect(out).toContain("From the api host");
+    expect(out).toContain("Followed index links: https://api.fastify.dev/Request.md");
+    expect(out).toContain("Skipped 1 index links outside allowed hosts (fastify.dev, api.fastify.dev)");
+  });
+
+  it("a followed link whose redirect lands on an allowed host is served; one that lands elsewhere is skipped", async () => {
+    seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    const redirectTo = (target: string) =>
+      vi.fn(async () => {
+        const res = new Response("# Request\n\n## request.hostname\n\nredirected body", { status: 200, headers: { "content-type": "text/plain" } });
+        Object.defineProperty(res, "url", { value: target });
+        return res;
+      });
+    const withHosts = { ...entry, allowedHosts: ["*.fastify.dev"] };
+    // Escaping redirect first: refused, so nothing is cached under the link URL …
+    vi.stubGlobal("fetch", redirectTo("https://docs.fastify.dev.evil.net/Request.md"));
+    const out = await getDocs(withHosts, { topic: "request hostname" });
+    expect(out).not.toContain("redirected body");
+    expect(out).toContain("Skipped 1 index links outside allowed hosts (fastify.dev, *.fastify.dev)");
+    // … and the allowed redirect is then fetched and served.
+    vi.stubGlobal("fetch", redirectTo("https://docs.fastify.dev/Request.md"));
+    expect(await getDocs(withHosts, { topic: "request hostname" })).toContain("redirected body");
+  });
+
   it("does not follow links when the document is prose", async () => {
     seedIndex(
       [
@@ -341,9 +378,45 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(await getDocsToolText(registry, { library: "React" })).toContain(`Source: ${REACT_URL}`);
   });
 
-  it("an unknown library returns the Unknown-library text listing canonical names only, without fetching", async () => {
+  it("an unknown library is resolved implicitly (PAR-655): metadata → document → docs, and the entry joins the live registry", async () => {
+    const spy = stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      "https://raw.githubusercontent.com/elysiajs/elysia/main/README.md": "# Elysia\n\n## Middleware\n\nUse .onBeforeHandle() for middleware.",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    const out = await getDocsToolText(reg, { library: "Elysia", topic: "middleware" });
+    expect(out).toContain("Source: https://raw.githubusercontent.com/elysiajs/elysia/main/README.md");
+    expect(out).toContain("onBeforeHandle");
+    expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
+    expect(spy).toHaveBeenCalledTimes(1 + 3); // metadata, two llms probes, README main
+    // Second call: served from the adopted entry and the cache — no new fetch.
+    spy.mockClear();
+    expect(await getDocsToolText(reg, { library: "elysia", topic: "middleware" })).toContain("onBeforeHandle");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("an unknown library nothing can resolve returns the could-not-resolve line (never the stack), after at most the metadata fetches", async () => {
     const spy = stubFetch({});
-    expect(await getDocsToolText(registry, { library: "nope", topic: "x" })).toBe(
+    const reg: Registry = { entries: new Map(registry.entries) };
+    const out = await getDocsToolText(reg, { library: "nope", topic: "x" });
+    expect(out).toBe(
+      'Could not resolve "nope": npm: no metadata (404 or unreachable); PyPI: no metadata (404 or unreachable). ' +
+        'Add it to vibectx.config.json like: { "name": "nope", "urls": ["https://..."] }',
+    );
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(reg.entries.size).toBe(2);
+  });
+
+  it("an implausible name is refused without any fetch", async () => {
+    const spy = stubFetch({});
+    const out = await getDocsToolText(registry, { library: "https://evil.example/x" });
+    expect(out).toMatch(/^Could not resolve "https:\/\/evil\.example\/x": .*not a valid npm or PyPI package name; nothing was fetched\./);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("offline: an unknown library returns the Unknown-library text listing canonical names, without fetching", async () => {
+    const spy = stubFetch({});
+    expect(await getDocsToolText(registry, { library: "nope", topic: "x", offline: true })).toBe(
       'Unknown library "nope". Known: react, hono',
     );
     expect(spy).not.toHaveBeenCalled();
