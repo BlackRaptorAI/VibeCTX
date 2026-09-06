@@ -7,6 +7,7 @@ import {
   CONFIG_ENV,
   CONFIG_FILENAME,
   LEGACY_CONFIG_FILENAME,
+  USER_CONFIG_FILENAME,
   describeConfig,
   discoverConfig,
   readConfigFile,
@@ -177,6 +178,23 @@ describe("discoverConfig: the walk-up is confined to the repository (D-15)", () 
     // No config in the foreign directory: nothing to say, and no noise on every start.
     rmSync(join(repo, CONFIG_FILENAME));
     expect(discover({ cwd: join(repo, "src"), ownerUid: (dir) => (dir === repo ? mine + 1 : mine) }).notes).toEqual([]);
+  });
+
+  it("D-20: a user config does not silence the ignored-foreign-config note", () => {
+    // The note answers "why is my committed config not in force?". A user-level file loading
+    // is not an answer to that question, so it must not take the note away: the walk still
+    // stopped on a foreign-owned directory that holds a project config.
+    write(join(home, ".config", "vibectx"), USER_CONFIG_FILENAME, CONFIG("u", "https://u.example.com/llms.txt"));
+    write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
+    const mine = process.getuid?.() ?? 0;
+    const res = discover({ cwd: join(repo, "src"), ownerUid: (dir) => (dir === repo ? mine + 1 : mine) });
+    expect(res.files.map((f) => f.scope)).toEqual(["user"]); // the user layer did load
+    expect(res.notes).toEqual([`${join(repo, CONFIG_FILENAME)} is ignored: ${repo} is owned by another user`]);
+    // And the D-18 header carries it, which is where most readers will meet it.
+    expect(describeConfig(res, { cwd: join(repo, "src"), home })).toEqual([
+      "config: ~/.config/vibectx/config.json (user)",
+      `${join(repo, CONFIG_FILENAME)} is ignored: ${repo} is owned by another user`,
+    ]);
   });
 
   it("D-20: a foreign-owned working directory yields no project config at all", () => {

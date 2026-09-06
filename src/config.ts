@@ -88,10 +88,12 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   const user = userDir === undefined ? undefined : pickInDirectory(userDir, "user", USER_CONFIG_FILENAME, notes, show);
   if (user) files.push(user); // lowest precedence first
   const walk = projectDirs(opts.cwd, opts.ownerUid ?? directoryUid);
+  let projectFound = false;
   for (const dir of walk.dirs) {
     const hit = pickInDirectory(dir, "project", CONFIG_FILENAME, notes, show);
     if (hit) {
       files.push(hit); // nearest wins; parents are NOT layered (monorepo layering is a follow-up)
+      projectFound = true;
       break;
     }
   }
@@ -99,7 +101,12 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   // say so. Silence would leave a team believing their committed file is in force — the
   // failure mode D-19 exists to prevent — while a directory without one says nothing, so
   // an ordinary start under /tmp stays quiet.
-  if (files.length === 0 && walk.foreign !== undefined) {
+  //
+  // The gate is "no PROJECT-scope file was found", not "no file at all": a user-level config
+  // loading is not an answer to "why is my committed config not in force?", and gating on
+  // `files.length` would have let the presence of `~/.config/vibectx/config.json` — which
+  // almost every long-time user has — silence the note for everybody.
+  if (!projectFound && walk.foreign !== undefined) {
     for (const name of [CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
       if (fileKind(join(walk.foreign, name)) !== "absent") {
         notes.push(`${show(join(walk.foreign, name))} is ignored: ${show(walk.foreign)} is owned by another user`);
