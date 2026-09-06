@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { discoverConfig, readConfigFile, type ConfigFile, type ConfigResolution } from "./config.js";
 import { normaliseAllowedHost } from "./link-policy.js";
 import { readResolvedEntries } from "./resolved-store.js";
 import { normalisePyPiName } from "./package-names.js";
@@ -412,10 +412,9 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
 
 export interface Registry {
   entries: Map<string, LibraryEntry>;
-}
-
-function isStringList(v: unknown): v is string[] {
-  return Array.isArray(v) && v.every((s) => typeof s === "string" && s.trim().length > 0);
+  /** The config sources this registry was built from (PAR-657), for the list_libraries header.
+   *  Absent on a hand-built registry (tests, callers that assemble entries themselves). */
+  config?: ConfigResolution;
 }
 
 /** Registry keys (names and aliases) are compared and stored in this form. */
@@ -428,22 +427,87 @@ const fold = (s: string): string => s.trim().toLowerCase();
  * config claimed — so a collision here is always something the config must change.
  * `configNames` tells the message whether the colliding canonical is a default or config entry.
  */
-function validateAliases(entries: Map<string, LibraryEntry>, configNames: ReadonlySet<string>): void {
+function validateAliases(
+  entries: Map<string, LibraryEntry>,
+  configNames: ReadonlySet<string>,
+  fileOf: ReadonlyMap<string, string>,
+): void {
   const owner = new Map<string, string>();
+  /** D-17: a config-caused failure names the file it came from; a defaults-only one cannot. */
+  const at = (name: string): string => {
+    const file = fileOf.get(fold(name));
+    return file === undefined ? "" : `${file}: `;
+  };
   for (const e of entries.values()) {
     for (const raw of e.aliases ?? []) {
       const a = fold(raw);
       if (entries.has(a)) {
         const what = a === fold(e.name) ? "the entry itself" : configNames.has(a) ? "another config entry" : "a default library";
         throw new Error(
-          `alias "${a}" on config entry "${e.name}" collides with the canonical name "${a}" (${what}); ` +
+          `${at(e.name)}alias "${a}" on config entry "${e.name}" collides with the canonical name "${a}" (${what}); ` +
             `rename the alias, or override "${a}" (with its urls) and set aliases: [] on that entry`,
         );
       }
       const other = owner.get(a);
-      if (other !== undefined) throw new Error(`alias "${a}" is declared on both "${other}" and "${e.name}"`);
+      if (other !== undefined) throw new Error(`${at(e.name)}alias "${a}" is declared on both "${other}" and "${e.name}"`);
       owner.set(a, e.name);
     }
+  }
+}
+
+/**
+ * Normalise one config file's entries: keys folded, allowed hosts normalised, any `resolved`
+ * marker dropped (only the resolver may set one). Shape was already validated by
+ * `readConfigFile`; what can still fail here is a host VALUE the link policy refuses.
+ */
+function normaliseLayer(libraries: LibraryEntry[], file: string): LibraryEntry[] {
+  return libraries.map((e) => {
+    const normalised: LibraryEntry = { ...e, name: fold(e.name) };
+    if (e.aliases !== undefined) normalised.aliases = e.aliases.map(fold);
+    if (e.allowedHosts !== undefined) {
+      try {
+        normalised.allowedHosts = e.allowedHosts.map(normaliseAllowedHost);
+      } catch (err) {
+        throw new Error(`${file}: config entry "${e.name}": ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    delete normalised.resolved;
+    return normalised;
+  });
+}
+
+/**
+ * Merge one config layer over everything loaded so far — the same D-06 / D-07 rules that
+ * applied between a config and the defaults, now applied between layers (PAR-657 D-14):
+ * project over user over defaults. `entries` is mutated; `configNames` and `fileOf`
+ * accumulate across layers so an error can say which file and which kind of entry.
+ */
+function applyLayer(
+  entries: Map<string, LibraryEntry>,
+  layer: LibraryEntry[],
+  configNames: Set<string>,
+  fileOf: Map<string, string>,
+  file: string,
+): void {
+  // D-06: every key this layer claims — as a name or an alias — leaves the layers below.
+  const claimed = new Set<string>();
+  for (const e of layer) {
+    claimed.add(e.name);
+    configNames.add(e.name);
+    fileOf.set(e.name, file);
+    for (const a of e.aliases ?? []) claimed.add(a);
+  }
+  const rewritten: [string, LibraryEntry][] = [];
+  for (const [key, below] of entries) {
+    // copy: never mutate the shipped defaults (or a lower layer's entry)
+    if (below.aliases?.some((a) => claimed.has(a))) rewritten.push([key, { ...below, aliases: below.aliases.filter((a) => !claimed.has(a)) }]);
+  }
+  for (const [key, e] of rewritten) entries.set(key, e);
+  // Merge, this layer wins on name; D-07 alias inheritance from the layer it replaces.
+  for (const e of layer) {
+    const replaced = entries.get(e.name);
+    if (e.aliases === undefined && replaced?.aliases !== undefined) e.aliases = replaced.aliases;
+    entries.set(e.name, e);
   }
 }
 
@@ -468,67 +532,55 @@ function validateAliases(entries: Map<string, LibraryEntry>, configNames: Readon
  *   `includeResolved: false` skips the file (tests; tools that must not read the cache).
  */
 export function loadRegistry(configPath?: string, opts: { includeResolved?: boolean } = {}): Registry {
+  const files: ConfigFile[] = configPath ? [{ path: configPath, scope: "flag", legacy: false }] : [];
+  return loadRegistryFrom({ files, notes: [] }, opts);
+}
+
+/**
+ * The one loader (PAR-657): defaults, then every config file in `resolution.files` applied in
+ * order — LOWEST precedence first, so user layers over the defaults and project over user.
+ * `loadRegistry(path)` is this with a single `--config` layer, which is why every 0.1.x
+ * behaviour above is unchanged for an explicit config.
+ */
+export function loadRegistryFrom(resolution: ConfigResolution, opts: { includeResolved?: boolean } = {}): Registry {
   const entries = new Map<string, LibraryEntry>();
   for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
   const configNames = new Set<string>();
-  if (configPath) {
-    const raw = JSON.parse(readFileSync(configPath, "utf8")) as { libraries?: LibraryEntry[] };
-    // Pass 1: validate shape and normalise keys.
-    const config: LibraryEntry[] = [];
-    for (const e of raw.libraries ?? []) {
-      if (typeof e.name !== "string" || fold(e.name).length === 0 || !Array.isArray(e.urls) || e.urls.length === 0) {
-        throw new Error(`config entry missing name/urls: ${JSON.stringify(e)}`);
-      }
-      if (e.probeQueries !== undefined && !isStringList(e.probeQueries)) {
-        throw new Error(
-          `config entry "${e.name}": probeQueries must be an array of non-empty strings, got ${JSON.stringify(e.probeQueries)}`,
-        );
-      }
-      if (e.aliases !== undefined && !isStringList(e.aliases)) {
-        throw new Error(
-          `config entry "${e.name}": aliases must be an array of non-empty strings, got ${JSON.stringify(e.aliases)}`,
-        );
-      }
-      if (e.allowedHosts !== undefined && !Array.isArray(e.allowedHosts)) {
-        throw new Error(`config entry "${e.name}": allowedHosts must be an array of hostnames, got ${JSON.stringify(e.allowedHosts)}`);
-      }
-      const normalised: LibraryEntry = { ...e, name: fold(e.name) };
-      if (e.aliases !== undefined) normalised.aliases = e.aliases.map(fold);
-      if (e.allowedHosts !== undefined) {
-        try {
-          normalised.allowedHosts = e.allowedHosts.map(normaliseAllowedHost);
-        } catch (err) {
-          throw new Error(`config entry "${e.name}": ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      delete normalised.resolved; // only the resolver may mark an entry resolved
-      config.push(normalised);
-    }
-    // Pass 2 (D-06): every key a config entry claims — as a name or an alias — leaves the defaults' alias lists.
-    const claimed = new Set<string>();
-    for (const e of config) {
-      claimed.add(e.name);
-      configNames.add(e.name);
-      for (const a of e.aliases ?? []) claimed.add(a);
-    }
-    for (const d of DEFAULT_REGISTRY) {
-      if (d.aliases?.some((a) => claimed.has(a))) {
-        entries.set(d.name, { ...d, aliases: d.aliases.filter((a) => !claimed.has(a)) }); // copy: never mutate the shipped defaults
-      }
-    }
-    // Pass 3: merge, config wins on name; D-07 alias inheritance.
-    for (const e of config) {
-      const replaced = entries.get(e.name);
-      if (e.aliases === undefined && replaced?.aliases !== undefined) e.aliases = replaced.aliases;
-      entries.set(e.name, e);
-    }
+  const fileOf = new Map<string, string>();
+  for (const file of resolution.files) {
+    const { libraries } = readConfigFile(file.path);
+    applyLayer(entries, normaliseLayer(libraries, file.path), configNames, fileOf, file.path);
   }
-  validateAliases(entries, configNames);
+  validateAliases(entries, configNames, fileOf);
   if (opts.includeResolved !== false) {
     const taken = curatedKeys(entries);
     for (const r of readResolvedEntries()) if (!isTaken(taken, r.name)) entries.set(r.name, r);
   }
-  return { entries };
+  return { entries, config: resolution };
+}
+
+export interface DiscoveredRegistryOptions {
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  /** The `--config` value, when one was passed. */
+  flag?: string;
+  /** Home directory for the user-level file (default: os.homedir()). */
+  home?: string;
+  includeResolved?: boolean;
+  /** Where the D-16 deprecation notes go, once, at load (stderr for the server and the CLI). */
+  warn?: (message: string) => void;
+}
+
+/**
+ * `discoverConfig` + `loadRegistryFrom` — the single entry point the stdio server (index.ts)
+ * and every CLI subcommand use, so a committed `vibectx.config.json` reaches an MCP client
+ * that can only ever launch a fixed command line (PAR-657).
+ */
+export function loadDiscoveredRegistry(opts: DiscoveredRegistryOptions): Registry {
+  const resolution = discoverConfig({ cwd: opts.cwd, env: opts.env, flag: opts.flag, home: opts.home });
+  const registry = loadRegistryFrom(resolution, { includeResolved: opts.includeResolved });
+  for (const note of resolution.notes) opts.warn?.(note);
+  return registry;
 }
 
 /** Every key a curated (non-resolved) entry claims: names, aliases, and each one's PEP 503

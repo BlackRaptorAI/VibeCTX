@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_REGISTRY,
   installResolvedEntry,
+  loadDiscoveredRegistry,
   loadRegistry,
+  loadRegistryFrom,
   nearestLibraryName,
   resolveLibrary,
   unknownLibraryMessage,
@@ -33,6 +35,13 @@ function writeConfig(libraries: unknown[]): string {
   writeFileSync(path, JSON.stringify({ libraries }), "utf8");
   return path;
 }
+
+/** D-17 (PAR-657): a config file's urls must be https, so the old `"u"` placeholder is now
+ *  spelled out. Nothing else about these cases changed. */
+const U = "https://placeholder.example.com/llms.txt";
+
+/** Paths go into RegExps in a couple of message assertions. */
+const escapeRe = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 const PARAGON_EXAMPLE = fileURLToPath(new URL("../docs/examples/paragon.vibectx.config.json", import.meta.url));
 
@@ -144,8 +153,8 @@ describe("docs/examples/paragon.vibectx.config.json (Paragon's stack, moved to c
 describe("resolveLibrary", () => {
   const reg: Registry = {
     entries: new Map<string, LibraryEntry>([
-      ["next.js", { name: "next.js", urls: ["u"], aliases: ["next", "nextjs"] }],
-      ["hono", { name: "hono", urls: ["u"] }],
+      ["next.js", { name: "next.js", urls: [U], aliases: ["next", "nextjs"] }],
+      ["hono", { name: "hono", urls: [U] }],
     ]),
   };
 
@@ -191,8 +200,8 @@ describe("config aliases validation", () => {
   });
 
   it("accepts aliases: [] (no aliases) and an entry without aliases", () => {
-    expect(loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: [] }])).entries.get("hono")?.aliases).toEqual([]);
-    expect(loadRegistry(writeConfig([{ name: "hono", urls: ["u"] }])).entries.get("hono")?.aliases).toBeUndefined();
+    expect(loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: [] }])).entries.get("hono")?.aliases).toEqual([]);
+    expect(loadRegistry(writeConfig([{ name: "hono", urls: [U] }])).entries.get("hono")?.aliases).toBeUndefined();
   });
 
   it.each([
@@ -207,19 +216,19 @@ describe("config aliases validation", () => {
   });
 
   it("rejects an alias that collides with a canonical name (default or config), with an actionable hint", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["react"] }]))).toThrow(
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["react"] }]))).toThrow(
       /alias "react" on config entry "hono" collides with the canonical name "react" \(a default library\); rename the alias, or override "react" \(with its urls\) and set aliases: \[\]/,
     );
     expect(() =>
       loadRegistry(writeConfig([
-        { name: "hono", urls: ["u"] },
-        { name: "elysia", urls: ["u"], aliases: ["hono"] },
+        { name: "hono", urls: [U] },
+        { name: "elysia", urls: [U], aliases: ["hono"] },
       ])),
     ).toThrow(/alias "hono" on config entry "elysia" collides with the canonical name "hono" \(another config entry\)/);
   });
 
   it("rejects an alias equal to the entry's own name", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["hono"] }]))).toThrow(
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["hono"] }]))).toThrow(
       /alias "hono" on config entry "hono" collides with the canonical name "hono" \(the entry itself\)/,
     );
   });
@@ -227,8 +236,8 @@ describe("config aliases validation", () => {
   it("rejects the same alias on two config entries", () => {
     expect(() =>
       loadRegistry(writeConfig([
-        { name: "a", urls: ["u"], aliases: ["shared"] },
-        { name: "b", urls: ["u"], aliases: ["shared"] },
+        { name: "a", urls: [U], aliases: ["shared"] },
+        { name: "b", urls: [U], aliases: ["shared"] },
       ])),
     ).toThrow(/alias "shared".*both "a" and "b"/);
   });
@@ -249,14 +258,14 @@ describe("D-06: config beats default alias (backward compatibility with 0.1.3 co
   });
 
   it("a config ALIAS equal to a default alias also wins: the default loses it", () => {
-    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["tailwind"] }]));
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: [U], aliases: ["tailwind"] }]));
     expect(resolveLibrary(reg, "tailwind")?.name).toBe("mine");
     expect(reg.entries.get("tailwindcss")?.aliases).not.toContain("tailwind");
     expect(reg.entries.get("tailwindcss")?.aliases).toEqual(["@tailwindcss/postcss"]); // the unclaimed alias stays
   });
 
   it("never mutates the shared DEFAULT_REGISTRY objects when dropping an alias", () => {
-    loadRegistry(writeConfig([{ name: "next", urls: ["u"] }]));
+    loadRegistry(writeConfig([{ name: "next", urls: [U] }]));
     expect(DEFAULT_REGISTRY.find((e) => e.name === "next.js")?.aliases).toEqual(["next", "nextjs"]);
     expect(resolveLibrary(loadRegistry(), "next")?.name).toBe("next.js");
   });
@@ -270,13 +279,13 @@ describe("D-07: an override that omits aliases inherits the default's; aliases: 
   });
 
   it("[] → cleared", () => {
-    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["u"], aliases: [] }]));
+    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: [U], aliases: [] }]));
     expect(reg.entries.get("next.js")?.aliases).toEqual([]);
     expect(resolveLibrary(reg, "next")).toBeUndefined();
   });
 
   it("an explicit list replaces the default's", () => {
-    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: ["u"], aliases: ["nextjs"] }]));
+    const reg = loadRegistry(writeConfig([{ name: "next.js", urls: [U], aliases: ["nextjs"] }]));
     expect(reg.entries.get("next.js")?.aliases).toEqual(["nextjs"]);
     expect(resolveLibrary(reg, "next")).toBeUndefined();
   });
@@ -302,28 +311,30 @@ describe("config normalization: names and aliases are trimmed and lower-cased be
   });
 
   it('alias "React" on another entry is rejected as a canonical collision', () => {
-    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: ["u"], aliases: ["React"] }]))).toThrow(
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["React"] }]))).toThrow(
       /alias "react" on config entry "hono" collides with the canonical name "react"/,
     );
   });
 
   it('alias " bar " is stored and resolves as "bar"', () => {
-    const reg = loadRegistry(writeConfig([{ name: "foo", urls: ["u"], aliases: [" bar "] }]));
+    const reg = loadRegistry(writeConfig([{ name: "foo", urls: [U], aliases: [" bar "] }]));
     expect(reg.entries.get("foo")?.aliases).toEqual(["bar"]);
     expect(resolveLibrary(reg, "bar")?.name).toBe("foo");
     expect(resolveLibrary(reg, " BAR ")?.name).toBe("foo");
   });
 
   it("a name that folds to empty is rejected", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "   ", urls: ["u"] }]))).toThrow(/missing name\/urls/);
+    expect(() => loadRegistry(writeConfig([{ name: "   ", urls: [U] }]))).toThrow(
+      /libraries\[0\]\.name: must be a non-empty string/,
+    );
   });
 
   it("two config entries whose names fold to the same key are one override (last wins)", () => {
     const reg = loadRegistry(writeConfig([
-      { name: "Foo", urls: ["a"] },
-      { name: "foo ", urls: ["b"] },
+      { name: "Foo", urls: ["https://a.example.com/llms.txt"] },
+      { name: "foo ", urls: ["https://b.example.com/llms.txt"] },
     ]));
-    expect(reg.entries.get("foo")?.urls).toEqual(["b"]);
+    expect(reg.entries.get("foo")?.urls).toEqual(["https://b.example.com/llms.txt"]);
     expect([...reg.entries.keys()].filter((k) => k === "foo")).toHaveLength(1);
   });
 });
@@ -332,8 +343,8 @@ describe("unknownLibraryMessage", () => {
   it("lists canonical names only (aliases are shown by list_libraries)", () => {
     const reg: Registry = {
       entries: new Map<string, LibraryEntry>([
-        ["next.js", { name: "next.js", urls: ["u"], aliases: ["next"] }],
-        ["hono", { name: "hono", urls: ["u"] }],
+        ["next.js", { name: "next.js", urls: [U], aliases: ["next"] }],
+        ["hono", { name: "hono", urls: [U] }],
       ]),
     };
     expect(unknownLibraryMessage(reg, "nope")).toBe('Unknown library "nope". Known: next.js, hono');
@@ -371,7 +382,12 @@ describe("config probeQueries validation", () => {
   });
 
   it("still rejects an entry missing name or urls", () => {
-    expect(() => loadRegistry(writeConfig([{ name: "x" }]))).toThrow(/missing name\/urls/);
+    expect(() => loadRegistry(writeConfig([{ name: "x" }]))).toThrow(
+      /libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+    );
+    expect(() => loadRegistry(writeConfig([{ urls: ["https://x.example.com/llms.txt"] }]))).toThrow(
+      /libraries\[0\]\.name: must be a non-empty string/,
+    );
   });
 });
 
@@ -382,12 +398,20 @@ describe("config allowedHosts validation (PAR-655)", () => {
   });
 
   it("accepts allowedHosts: [] and an entry without it", () => {
-    expect(loadRegistry(writeConfig([{ name: "acme", urls: ["u"], allowedHosts: [] }])).entries.get("acme")?.allowedHosts).toEqual([]);
-    expect(loadRegistry(writeConfig([{ name: "acme", urls: ["u"] }])).entries.get("acme")?.allowedHosts).toBeUndefined();
+    expect(loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts: [] }])).entries.get("acme")?.allowedHosts).toEqual([]);
+    expect(loadRegistry(writeConfig([{ name: "acme", urls: [U] }])).entries.get("acme")?.allowedHosts).toBeUndefined();
   });
 
   it.each([
     ["a string", "api.acme.com"],
+    ["a non-string element", [1]],
+  ])("rejects allowedHosts whose SHAPE is wrong (%s) with the schema's path + message", (_label, allowedHosts) => {
+    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts }]))).toThrow(
+      /libraries\[0\]\.allowedHosts: must be an array of hostnames/,
+    );
+  });
+
+  it.each([
     ["a scheme", ["https://api.acme.com"]],
     ["a path", ["api.acme.com/docs"]],
     ["a port", ["api.acme.com:8443"]],
@@ -399,14 +423,149 @@ describe("config allowedHosts validation (PAR-655)", () => {
     ["a .internal host", ["vault.internal"]],
     ["a single label", ["intranet"]],
     ["an empty element", [""]],
-    ["a non-string element", [1]],
-  ])("rejects allowedHosts that is %s, naming the entry", (_label, allowedHosts) => {
-    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: ["u"], allowedHosts }]))).toThrow(/config entry "acme": allowedHosts/);
+  ])("rejects the host VALUE %s, naming the file and the entry", (_label, allowedHosts) => {
+    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts }]))).toThrow(/config entry "acme": allowedHosts/);
   });
 
   it("strips a `resolved` marker from config entries (only the resolver may set it)", () => {
-    const reg = loadRegistry(writeConfig([{ name: "acme", urls: ["u"], resolved: { source: "npm", resolvedAt: "x", metadataUrl: "y" } }]));
+    const reg = loadRegistry(writeConfig([{ name: "acme", urls: [U], resolved: { source: "npm", resolvedAt: "x", metadataUrl: "y" } }]));
     expect(reg.entries.get("acme")?.resolved).toBeUndefined();
+  });
+});
+
+describe("loadRegistryFrom: layered config, project over user over defaults (D-14, PAR-657)", () => {
+  const layerFile = (name: string, libraries: unknown[]): string => {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify({ libraries }), "utf8");
+    return path;
+  };
+  const layered = (user: string, project: string) =>
+    loadRegistryFrom({
+      files: [
+        { path: user, scope: "user", legacy: false },
+        { path: project, scope: "project", legacy: false },
+      ],
+      notes: [],
+    });
+
+  it("lets the project file win on a name the user file also defines", () => {
+    const user = layerFile("user.json", [{ name: "acme", urls: ["https://user.example.com/llms.txt"] }]);
+    const project = layerFile("project.json", [{ name: "acme", urls: ["https://project.example.com/llms.txt"] }]);
+    const reg = layered(user, project);
+    expect(reg.entries.get("acme")?.urls).toEqual(["https://project.example.com/llms.txt"]);
+  });
+
+  it("keeps entries only one layer defines, and both layers override a default", () => {
+    const user = layerFile("user.json", [
+      { name: "only-user", urls: ["https://user.example.com/llms.txt"] },
+      { name: "react", urls: ["https://user.example.com/react.txt"] },
+    ]);
+    const project = layerFile("project.json", [
+      { name: "only-project", urls: ["https://project.example.com/llms.txt"] },
+      { name: "zod", urls: ["https://project.example.com/zod.txt"] },
+    ]);
+    const reg = layered(user, project);
+    expect(reg.entries.get("only-user")?.urls).toEqual(["https://user.example.com/llms.txt"]);
+    expect(reg.entries.get("only-project")?.urls).toEqual(["https://project.example.com/llms.txt"]);
+    expect(reg.entries.get("react")?.urls).toEqual(["https://user.example.com/react.txt"]);
+    expect(reg.entries.get("zod")?.urls).toEqual(["https://project.example.com/zod.txt"]);
+    expect(reg.entries.size).toBe(32);
+  });
+
+  it("D-06 between layers: a project entry claiming a user alias takes it from the user entry", () => {
+    const user = layerFile("user.json", [{ name: "mine", urls: [U], aliases: ["shared"] }]);
+    const project = layerFile("project.json", [{ name: "shared", urls: ["https://project.example.com/llms.txt"] }]);
+    const reg = layered(user, project);
+    expect(reg.entries.get("mine")?.aliases).toEqual([]);
+    expect(resolveLibrary(reg, "shared")?.urls).toEqual(["https://project.example.com/llms.txt"]);
+  });
+
+  it("D-07 between layers: a project override that omits aliases inherits the user layer's", () => {
+    const user = layerFile("user.json", [{ name: "acme", urls: [U], aliases: ["acme-js"] }]);
+    const project = layerFile("project.json", [{ name: "acme", urls: ["https://project.example.com/llms.txt"] }]);
+    const reg = layered(user, project);
+    expect(reg.entries.get("acme")?.aliases).toEqual(["acme-js"]);
+    expect(resolveLibrary(reg, "acme-js")?.urls).toEqual(["https://project.example.com/llms.txt"]);
+    const cleared = layerFile("cleared.json", [{ name: "acme", urls: ["https://project.example.com/llms.txt"], aliases: [] }]);
+    expect(layered(user, cleared).entries.get("acme")?.aliases).toEqual([]);
+  });
+
+  it("names the FILE a semantic failure came from (D-17)", () => {
+    const user = layerFile("user.json", [{ name: "mine", urls: [U] }]);
+    const project = layerFile("project.json", [{ name: "hono", urls: [U], aliases: ["react"] }]);
+    expect(() => layered(user, project)).toThrow(new RegExp(`${escapeRe(project)}: alias "react" on config entry "hono"`));
+    const badHost = layerFile("bad-host.json", [{ name: "acme", urls: [U], allowedHosts: ["localhost"] }]);
+    expect(() => layered(user, badHost)).toThrow(new RegExp(`${escapeRe(badHost)}: config entry "acme": allowedHosts`));
+  });
+
+  it("carries the resolution on registry.config for the list_libraries header (D-18)", () => {
+    const project = layerFile("project.json", [{ name: "acme", urls: [U] }]);
+    const resolution = { files: [{ path: project, scope: "project" as const, legacy: false }], notes: ["a note"] };
+    expect(loadRegistryFrom(resolution).config).toEqual(resolution);
+    expect(loadRegistry().config).toEqual({ files: [], notes: [] });
+    expect(loadRegistry(project).config?.files[0].scope).toBe("flag");
+  });
+});
+
+describe("loadDiscoveredRegistry: the path index.ts and the CLI use (D-14, PAR-657)", () => {
+  let repo: string;
+  let home: string;
+  beforeEach(() => {
+    repo = join(dir, "repo");
+    home = join(dir, "home");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    mkdirSync(join(home, ".config", "vibectx"), { recursive: true });
+  });
+
+  const at = (path: string, url: string): string => {
+    writeFileSync(path, JSON.stringify({ libraries: [{ name: "acme", urls: [url] }] }), "utf8");
+    return path;
+  };
+  const url = (reg: Registry) => reg.entries.get("acme")?.urls[0];
+
+  it("resolves flag > env > project > user > defaults for the same library name", () => {
+    at(join(home, ".config", "vibectx", "config.json"), "https://user.example.com/x.txt");
+    at(join(repo, "vibectx.config.json"), "https://project.example.com/x.txt");
+    const envPath = at(join(dir, "env.json"), "https://env.example.com/x.txt");
+    const flagPath = at(join(dir, "flag.json"), "https://flag.example.com/x.txt");
+    const load = (env: NodeJS.ProcessEnv, flag?: string) => loadDiscoveredRegistry({ cwd: repo, env, home, flag });
+
+    expect(url(load({ VIBECTX_CONFIG: envPath }, flagPath))).toBe("https://flag.example.com/x.txt");
+    expect(url(load({ VIBECTX_CONFIG: envPath }))).toBe("https://env.example.com/x.txt");
+    expect(url(load({}))).toBe("https://project.example.com/x.txt");
+    rmSync(join(repo, "vibectx.config.json"));
+    expect(url(load({}))).toBe("https://user.example.com/x.txt");
+    rmSync(join(home, ".config", "vibectx", "config.json"));
+    expect(url(load({}))).toBeUndefined(); // shipped defaults only
+    expect(load({}).entries.size).toBe(30);
+  });
+
+  it("an explicit source skips discovery entirely: the project file is not layered under it", () => {
+    at(join(repo, "vibectx.config.json"), "https://project.example.com/x.txt");
+    writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [
+      { name: "acme", urls: ["https://project.example.com/x.txt"] },
+      { name: "project-only", urls: ["https://project.example.com/only.txt"] },
+    ] }), "utf8");
+    const flagPath = at(join(dir, "flag.json"), "https://flag.example.com/x.txt");
+    const reg = loadDiscoveredRegistry({ cwd: repo, env: {}, home, flag: flagPath });
+    expect(url(reg)).toBe("https://flag.example.com/x.txt");
+    expect(reg.entries.has("project-only")).toBe(false);
+  });
+
+  it("emits the D-16 deprecation note to warn once, and still loads the file", () => {
+    at(join(repo, "docs-cache.config.json"), "https://legacy.example.com/x.txt");
+    const warnings: string[] = [];
+    const reg = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: (m) => warnings.push(m) });
+    expect(url(reg)).toBe("https://legacy.example.com/x.txt");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/docs-cache\.config\.json is deprecated/);
+  });
+
+  it("reports a bad discovered file as one line naming that file", () => {
+    writeFileSync(join(repo, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
+    expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home })).toThrow(
+      /vibectx\.config\.json: libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+    );
   });
 });
 
@@ -499,7 +658,7 @@ describe("curated keys also claim their PEP 503 spelling (schema gate, PAR-655)"
   });
 
   it("aliases and default names claim their PEP 503 form too; a resolved record may still use an unrelated key", () => {
-    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["my_alias.x"] }]));
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: [U], aliases: ["my_alias.x"] }]));
     const meta = { source: "npm" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/x/latest" };
     expect(installResolvedEntry(reg, { name: "my-alias-x", urls: ["https://evil.example.com/x"], resolved: meta })).toBe(false);
     expect(installResolvedEntry(reg, { name: "react-router", urls: ["https://evil.example.com/x"], resolved: meta })).toBe(false); // default
@@ -511,17 +670,17 @@ describe("curated keys also claim their PEP 503 spelling (schema gate, PAR-655)"
 
 describe("installResolvedEntry (S2: a resolved entry can never replace a curated one)", () => {
   it("refuses when the name maps to a default, a default alias, a config entry or a config alias; installs otherwise", () => {
-    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["mine-alias"] }]));
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: [U], aliases: ["mine-alias"] }]));
     const meta = { source: "npm" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/x/latest" };
     for (const name of ["react", "next", "mine", "mine-alias"]) {
       expect(installResolvedEntry(reg, { name, urls: ["https://evil.example.com/x"], resolved: meta }), name).toBe(false);
     }
     expect(reg.entries.get("react")?.urls[0]).toBe("https://react.dev/llms-full.txt");
-    expect(reg.entries.get("mine")?.urls).toEqual(["u"]);
+    expect(reg.entries.get("mine")?.urls).toEqual([U]);
     expect(installResolvedEntry(reg, { name: "fresh", urls: ["https://fresh.example.com/x"], resolved: meta })).toBe(true);
     expect(installResolvedEntry(reg, { name: "fresh", urls: ["https://fresh.example.com/y"], resolved: { ...meta, source: "pypi" } })).toBe(true); // replaces a resolved one
     expect(reg.entries.get("fresh")?.resolved?.source).toBe("pypi");
-    expect(installResolvedEntry(reg, { name: "plain", urls: ["u"] })).toBe(false); // not a resolved entry
+    expect(installResolvedEntry(reg, { name: "plain", urls: [U] })).toBe(false); // not a resolved entry
   });
 
   it("even a hostile exact-case key already in the map cannot be promoted onto the curated key", () => {
