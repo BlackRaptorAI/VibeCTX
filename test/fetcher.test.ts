@@ -77,6 +77,13 @@ describe("isAllowedLink (SSRF guard)", () => {
     expect(isAllowedLink("not a url", source)).toBe(false);
   });
 
+  it("rejects non-http(s) schemes: file:, javascript:, data:", () => {
+    for (const link of ["file:///etc/passwd", "javascript:alert(1)", "data:text/plain,x"]) {
+      expect(isAllowedLink(link, source), link).toBe(false);
+      expect(isAllowedLink(link, source, { allowedHosts: ["*.example.com"] }), link).toBe(false);
+    }
+  });
+
   it("rejects userinfo, IPv6 literals and single-label hosts even when passed as the source (PAR-655 additions)", () => {
     expect(isAllowedLink("https://u:p@docs.example.com/x", source)).toBe(false);
     expect(isAllowedLink("https://[::1]/x", source)).toBe(false);
@@ -95,6 +102,17 @@ describe("getLinkedPage origin enforcement", () => {
       "https://docs.example.com/llms.txt",
     );
     expect(result).toBeUndefined();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("refuses file:, javascript: and data: links without touching the network, policy or not", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const source = "https://docs.example.com/llms.txt";
+    for (const link of ["file:///etc/passwd", "javascript:alert(1)", "data:text/plain,x"]) {
+      expect(await getLinkedPage("lib", link, source), link).toBeUndefined();
+      expect(await fetchLinkedPage("lib", link, source, 168, false, { allowedHosts: ["*.example.com"] }), link).toEqual({ status: "refused" });
+    }
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
