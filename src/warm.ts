@@ -245,6 +245,23 @@ function recentFailures(dir: string, nowMs: number): Map<string, WarmRow> {
 }
 
 /**
+ * D-19 (PAR-657): the discovered config files the registry could not load, as report notes.
+ * A warm run that quietly fell back to the shipped defaults — because the project's committed
+ * `vibectx.config.json` was skipped — otherwise reads as a clean run, and a `--json` consumer
+ * never sees the stderr line the loader wrote. Appended to the existing `notes[]`, which is
+ * an additive change: no `schemaVersion` bump (README: new keys may be appended, and this
+ * adds no key at all).
+ */
+function configNotes(registry: Registry): string[] {
+  const notes: string[] = [];
+  for (const file of registry.config?.files ?? []) {
+    if (file.error === undefined) continue;
+    notes.push(`config: ${file.display ?? file.path} (${file.scope}) not loaded: ${file.error}`);
+  }
+  return notes;
+}
+
+/**
  * Warm a project. Throws (→ CLI exit 2) when `dir` is not a directory or holds no manifest
  * discovery can read; every per-name problem is a row, never an exception. Writes the
  * project record unless `offline`.
@@ -268,7 +285,7 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     dir,
     offline: opts.offline === true,
     manifests: discovery.manifests,
-    notes: discovery.notes,
+    notes: [...discovery.notes, ...configNotes(registry)],
     dependencies: rows,
     cached,
     attempted: rows.length - denied,

@@ -149,8 +149,10 @@ offline, manifests, notes, dependencies: [{ name, ecosystem, source, library?, s
 note?, failedAt? }], cached, attempted, denied, total }` — keys in that order (each row's
 keys in that order too); new keys may be appended; read keys by name. `schemaVersion` is
 bumped when a key is renamed, removed or changes meaning **and when a status value is added
-or removed** — readers drop rows whose status they do not know. `--config <path>` loads your
-config first, so pinned entries win.
+or removed** — readers drop rows whose status they do not know. A discovered config file the
+loader skipped adds one `notes` entry, `config: <path> (<scope>) not loaded: <reason>`, to
+both the table and `--json`, so a run that fell back to the shipped defaults never reads as a
+clean one. `--config <path>` loads your config first, so pinned entries win.
 
 **Noise list.** `DEPENDENCY_DENYLIST` in `src/project-deps.ts` (a trailing `*` is a prefix
 rule): npm `@types/*`, `eslint*`, `@eslint/*`, `prettier*`, `@typescript-eslint/*`,

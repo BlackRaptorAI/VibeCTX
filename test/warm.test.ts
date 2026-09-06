@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
-import { loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
+import { loadDiscoveredRegistry, loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 import { runWarm, formatWarmTable, warmExitCode, warmToolText, WARM_CONCURRENCY, WARM_SCHEMA_VERSION, type WarmReport } from "../src/warm.js";
@@ -353,6 +353,21 @@ describe("formatWarmTable / warmToolText", () => {
     expect(text).toContain("0/1 dependencies cached");
     expect(text).toContain("✗ zz-nothing: npm: no metadata (404 or unreachable)");
     expect(text).toContain("note: requirements.txt: -r missing.txt not found; skipped");
+  });
+
+  it("D-19: a skipped discovered config file is a note in --json and in the text report", async () => {
+    // The whole point of `warm` is "your stack's docs are on disk". A run that quietly used
+    // the shipped defaults, because the project's committed config was skipped, must not
+    // read as a clean run — and `--json` consumers never see the stderr line.
+    mkdirSync(join(project, ".git"), { recursive: true });
+    writeFileSync(join(project, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
+    writePackageJson({ react: "19" });
+    const reg = loadDiscoveredRegistry({ cwd: project, env: {}, home: join(cache, "home") });
+    const report = await runWarm(reg, { dir: project, offline: true });
+    const note = 'config: ./vibectx.config.json (project) not loaded: libraries[0].urls ("a"): must be a non-empty array of https URLs';
+    expect(JSON.parse(JSON.stringify(report)).notes).toContain(note); // the --json report
+    expect(formatWarmTable(report)).toContain(`note: ${note}`);
+    expect(report.schemaVersion).toBe(WARM_SCHEMA_VERSION); // additive: no schema bump
   });
 
   it("warmToolText returns the table for a directory, or the error line for a bad one (never throws)", async () => {
