@@ -160,6 +160,15 @@ describe("splitSections — code fences (D-25)", () => {
     const doc = ["# A", "    ```", "text `a` more", "## B", "body"].join("\n");
     expect(splitSections(doc).map((s) => s.heading)).toEqual(["A", "B"]);
   });
+
+  it("known limitation: a fence that is never closed runs to the end of the document", () => {
+    // CommonMark says the same, and a stray fence breaks rendering everywhere else too,
+    // so this is spec behaviour rather than a bug — pinned here so it stays deliberate.
+    const doc = ["# A", "```", "never closed", "## B", "swallowed"].join("\n");
+    const sections = splitSections(doc);
+    expect(sections.map((s) => s.heading)).toEqual(["A"]);
+    expect(sections[0].body).toContain("## B");
+  });
 });
 
 describe("rankSections — BM25 (D-24)", () => {
@@ -262,6 +271,24 @@ describe("rankSections — performance bound (D-24)", () => {
     rankSections(large, query);
     const largeMs = performance.now() - t;
     expect(largeMs / smallMs).toBeLessThan(6); // 4x the input, well under 6x the time
+  });
+});
+
+describe("rankSnippets — performance bound (D-26)", () => {
+  it("extracts and ranks a multi-megabyte code-heavy corpus inside the same budget as sections mode", () => {
+    const lines: string[] = [];
+    for (let i = 0; i < 5000; i++) {
+      lines.push(`## Section ${i}`);
+      lines.push(`The ${i} handler registers a route and validates the request body with a schema. `.repeat(8));
+      lines.push("```ts", `const reply = await server.streamingReply({ cache: 'policy', id: ${i} });`, "console.log(reply.body);", "```");
+    }
+    const big = lines.join("\n");
+    expect(big.length).toBeGreaterThan(3_000_000);
+    const t0 = performance.now();
+    const ranked = rankSnippets(big, "streaming reply cache policy");
+    const ms = performance.now() - t0;
+    expect(ranked.length).toBe(5000);
+    expect(ms).toBeLessThan(5000);
   });
 });
 
