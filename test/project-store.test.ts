@@ -187,6 +187,43 @@ describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHE
     expect(readProjectRecord(project)?.dependencies).toEqual(keep);
   });
 
+  it("K-1: a source is refused for what it DOES, not for its alphabet — any relative path survives, an absolute or traversing one drops the row", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const base = record().dependencies[0];
+    const keep = [
+      "package.json",
+      "sub/requirements.txt",
+      "req+dev/extra.txt", // a character the old allow-list did not know
+      "треб/extra.txt", // a non-ASCII directory: a real path on a real machine
+      "req dir/dev.txt", // a space: legal in every filesystem this runs on
+      "requirements(dev).txt",
+      "a/b/c/pyproject.toml",
+      "..hidden/req.txt", // leading dots, but not a `..` SEGMENT
+    ];
+    const drop = [
+      "../../etc/passwd",
+      "/etc/passwd",
+      "C:\\x",
+      "\\\\server\\share\\req.txt",
+      "a/../b",
+      "a\\..\\b", // a `..` segment on the other separator
+      "..",
+      "",
+      "sub/\u0000passwd",
+      "\u200b/etc/passwd", // absolute once cleaned
+      `${"x".repeat(257)}.txt`,
+    ];
+    const rows = [
+      ...keep.map((source, i) => ({ ...base, name: `keep-${i}`, source })),
+      ...drop.map((source, i) => ({ ...base, name: `drop-${i}`, source })),
+    ];
+    writeFileSync(projectRecordPath(project), JSON.stringify({ ...record(), dependencies: rows }), "utf8");
+    const back = readProjectRecord(project)!;
+    expect(back.dependencies.map((d) => d.source)).toEqual(keep);
+    expect(back.dependencies.map((d) => d.name)).toEqual(keep.map((_, i) => `keep-${i}`));
+    expect(JSON.stringify(back)).not.toContain("passwd");
+  });
+
   it("K3: an unknown status is dropped on read; failedAt must be a date when present", () => {
     mkdirSync(join(dir, "projects"), { recursive: true });
     const rows = record().dependencies;

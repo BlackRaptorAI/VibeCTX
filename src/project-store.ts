@@ -21,7 +21,8 @@ import { cleanText, type DependencyEcosystem } from "./project-deps.js";
  * ISO-8601 UTC instant (`Date.parse` alone accepts `2020-01-01 (‮evil)`, and that string
  * lands verbatim in the list_libraries footer), and `dependencies` must be an array — any of
  * those failing makes the record absent. Then, per row: `name` 1…214 characters, `ecosystem`
- * exactly npm or pypi, `source` a relative manifest path (no absolute path, no `..` segment),
+ * exactly npm or pypi, `source` a relative manifest path (bounded, no absolute path, no `..`
+ * segment — any alphabet),
  * `status` one of WARM_STATUSES and `failedAt` a strict ISO-8601 instant when present — each
  * of those failing drops the ROW; `library`
  * over 214 characters and a `url` that is not an https URL passing `sanitizeRemoteUrl` drop
@@ -152,16 +153,31 @@ export const MAX_NOTE = 512;
 
 /**
  * A `source` is a manifest file name relative to the project directory — `package.json`,
- * `requirements-dev.txt`, `sub/requirements.txt`. Accepted characters are the ones those
- * names use; a path that is absolute or contains a `..` segment is refused outright, because
- * this field is echoed into the table and nothing this tool writes ever traverses.
+ * `requirements-dev.txt`, `sub/requirements.txt`. The reader refuses it for what it DOES,
+ * never for its alphabet: a real project directory may be named `треб/`, `req dir/` or
+ * `req+dev/`, and an allow-list of ASCII punctuation would drop those rows as if the file
+ * were hostile. So the rule is the property that matters — the path must be RELATIVE and must
+ * not traverse — checked on the CLEANED text, since `cleanText` is what the row will actually
+ * carry (`a U+200B before /etc/passwd` cleans to an absolute path and must be refused as one):
+ *
+ *   - no NUL in the raw value (`cleanText` would strip it, hiding a truncation trick),
+ *   - bounded by MAX_SOURCE and non-empty once cleaned,
+ *   - not absolute: no leading `/`, no leading `\` (a Windows root or a `\\server\share` UNC),
+ *     no `X:` drive prefix,
+ *   - no `..` segment, splitting on BOTH separators — `a/../b` and `a\..\b` alike.
+ *
+ * Failure drops the ROW. This is a read-side gate only: writers go through `makeWarmRow`, and
+ * a source discovered on this machine is never validated on the way out — a path we can read
+ * is a path we can record.
  */
-const SOURCE_CHARS = /^[A-Za-z0-9._@/-]{1,256}$/;
+const WINDOWS_DRIVE = /^[A-Za-z]:/;
 function validSource(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_SOURCE) return false;
-  if (!SOURCE_CHARS.test(value)) return false;
-  if (value.startsWith("/")) return false;
-  return !value.split("/").includes("..");
+  if (value.includes("\u0000")) return false;
+  const text = cleanText(value);
+  if (text.length === 0) return false;
+  if (text.startsWith("/") || text.startsWith("\\") || WINDOWS_DRIVE.test(text)) return false;
+  return !text.split(/[/\\]/).includes("..");
 }
 
 /**
@@ -211,7 +227,10 @@ function cleanNote(value: unknown): string | undefined {
  *
  *   name       required, 1…214 characters       — row dropped otherwise
  *   ecosystem  exactly "npm" or "pypi"          — row dropped otherwise
- *   source     a relative manifest path         — row dropped otherwise (see validSource)
+ *   source     a relative, non-traversing path  — row dropped otherwise (see validSource:
+ *              ≤ 256 characters, non-empty once cleaned, no NUL, not absolute (no leading
+ *              `/` or `\`, no `X:` drive), no `..` segment on either separator. Any other
+ *              character is fine — `треб/extra.txt` is a real manifest path, not an attack.)
  *   status     one of WARM_STATUSES             — row dropped otherwise (K3)
  *   failedAt   a strict ISO-8601 instant when present — row dropped otherwise
  *   library    1…214 characters                 — FIELD dropped otherwise
