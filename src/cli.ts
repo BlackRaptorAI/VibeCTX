@@ -3,10 +3,11 @@ import { ConfigError } from "./config.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
+import { formatSearchResults, runSearch, searchExitCode } from "./search.js";
 
 /**
- * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve` and `warm`; anything
- * else falls through to the MCP stdio server in index.ts. Kept transport- and
+ * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm` and `search`;
+ * anything else falls through to the MCP stdio server in index.ts. Kept transport- and
  * process-free so the dispatcher is unit-testable.
  */
 
@@ -32,6 +33,15 @@ export interface WarmCliArgs {
   config?: string;
 }
 
+export interface SearchCliArgs {
+  json: boolean;
+  query: string;
+  /** Repeatable `--library <name>`; empty means every cached library. */
+  libraries: string[];
+  maxTokens?: number;
+  config?: string;
+}
+
 export interface CliIo {
   stdout(s: string): void;
   stderr(s: string): void;
@@ -40,6 +50,8 @@ export interface CliIo {
 export const DOCTOR_USAGE = "usage: vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]";
 export const RESOLVE_USAGE = "usage: vibectx resolve <package> [--npm | --pypi] [--config <path>]";
 export const WARM_USAGE = "usage: vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]";
+export const SEARCH_USAGE =
+  "usage: vibectx search <query> [--library <name>]… [--max-tokens <n>] [--json] [--config <path>]";
 
 /** Parse the arguments after `doctor`. Throws on anything not in DOCTOR_USAGE. */
 export function parseDoctorArgs(args: string[]): DoctorCliArgs {
@@ -133,6 +145,48 @@ export function parseWarmArgs(args: string[]): WarmCliArgs {
         parsed.dir = arg;
     }
   }
+  return parsed;
+}
+
+/**
+ * Parse the arguments after `search` (PAR-659): one query — the words may be quoted as one
+ * argument or left as several, because `vibectx search server-sent events streaming` is what a
+ * person actually types — plus a repeatable `--library`, `--max-tokens`, `--json`, `--config`.
+ *
+ * A bare word is query text, never a flag: `--library` is the only way to name a library, so a
+ * package called `warm` or `--json`-shaped text cannot be misread as one.
+ */
+export function parseSearchArgs(args: string[]): SearchCliArgs {
+  const words: string[] = [];
+  const parsed: SearchCliArgs = { json: false, query: "", libraries: [] };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    switch (arg) {
+      case "--json":
+        parsed.json = true;
+        break;
+      case "--library":
+      case "--max-tokens":
+      case "--config": {
+        const value = args[i + 1];
+        if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+        if (arg === "--library") parsed.libraries.push(value);
+        else if (arg === "--config") parsed.config = value;
+        else {
+          const n = Number(value);
+          if (!Number.isInteger(n) || n <= 0) throw new Error(`--max-tokens requires a positive whole number, not "${value}"`);
+          parsed.maxTokens = n;
+        }
+        i += 1;
+        break;
+      }
+      default:
+        if (arg.startsWith("-")) throw new Error(`Unknown option "${arg}"`);
+        words.push(arg);
+    }
+  }
+  parsed.query = words.join(" ").trim();
+  if (parsed.query.length === 0) throw new Error("search requires a query");
   return parsed;
 }
 
@@ -242,15 +296,50 @@ export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
   return warmExitCode(report);
 }
 
-const SUBCOMMANDS = new Set(["doctor", "resolve", "warm"]);
+/**
+ * Run `vibectx search <query>`; prints the grouped results (or `--json`) on stdout.
+ * Exit 0 at least one section returned · 1 nothing matched · 2 usage / config error.
+ * Never touches the network (D-35), so there is no offline flag: it is always offline.
+ */
+export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
+  let parsed: SearchCliArgs;
+  try {
+    parsed = parseSearchArgs(args);
+  } catch (e) {
+    io.stderr(`${message(e)}\n${SEARCH_USAGE}\n`);
+    return 2;
+  }
+  let registry;
+  try {
+    registry = registryFor(parsed.config, io);
+  } catch (e) {
+    io.stderr(configError(e));
+    return 2;
+  }
+  const outcome = runSearch(registry, {
+    query: parsed.query,
+    maxTokens: parsed.maxTokens,
+    libraries: parsed.libraries.length > 0 ? parsed.libraries : undefined,
+    warn: io.stderr,
+  });
+  io.stdout(parsed.json ? `${JSON.stringify(outcome, null, 2)}\n` : `${formatSearchResults(outcome)}\n`);
+  return searchExitCode(outcome);
+}
 
-/** Index of the first subcommand token in argv, skipping option VALUES so a library,
- *  package or config path named "doctor" / "resolve" / "warm" is not mistaken for it; -1 when
- *  absent. The FIRST token wins: `warm doctor` warms a directory named doctor. */
+const SUBCOMMANDS = new Set(["doctor", "resolve", "warm", "search"]);
+
+/** Options whose VALUE must be skipped when looking for the subcommand token, so a library,
+ *  package, directory or config path named "doctor" / "resolve" / "warm" / "search" is not
+ *  mistaken for one. */
+const OPTIONS_WITH_VALUES = new Set(["--config", "--library", "--max-tokens"]);
+
+/** Index of the first subcommand token in argv, skipping option VALUES; -1 when absent. The
+ *  FIRST token wins: `warm doctor` warms a directory named doctor, and `search warm` searches
+ *  for the word "warm". */
 function findSubcommand(argv: string[]): number {
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === "--config" || arg === "--library") {
+    if (OPTIONS_WITH_VALUES.has(arg)) {
       i += 1;
       continue;
     }
@@ -272,6 +361,8 @@ export async function dispatchCli(argv: string[], io: CliIo): Promise<number | u
       return runDoctorCli(rest, io);
     case "resolve":
       return runResolveCli(rest, io);
+    case "search":
+      return runSearchCli(rest, io);
     default:
       return runWarmCli(rest, io);
   }

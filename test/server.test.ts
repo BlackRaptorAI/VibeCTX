@@ -68,14 +68,14 @@ async function connect(reg: Registry, env: NodeJS.ProcessEnv = {}) {
 }
 
 describe("buildServer", () => {
-  it("registers the six tools", async () => {
+  it("registers the seven tools", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = buildServer(registry());
     await server.connect(serverTransport);
     const client = new Client({ name: "probe", version: "0" });
     await client.connect(clientTransport);
     const tools = (await client.listTools()).tools.map((t) => t.name).sort();
-    expect(tools).toEqual(["doctor", "get_docs", "list_libraries", "refresh", "resolve_library", "warm_project"]);
+    expect(tools).toEqual(["doctor", "get_docs", "list_libraries", "refresh", "resolve_library", "search", "warm_project"]);
     expect(autowarmStatus().started).toBe(false); // buildServer alone never warms
     await client.close();
   });
@@ -244,6 +244,79 @@ describe("done-when (PAR-657): a committed vibectx.config.json reaches a flagles
 
     await started.autowarm; // the autowarm's "configured libraries" include the discovered entry
     expect(spy.mock.calls.map((c) => String(c[0]))).toContain(ACME_URL);
+    await client.close();
+  });
+});
+
+/**
+ * PAR-659 · D-35 — the `search` tool over the real transport. What matters over MCP and
+ * nowhere else: the input schema is what a model sees, so an empty query and an over-long
+ * library list must be SCHEMA errors the client is told about, not silently-wide searches.
+ */
+describe("search over the transport (PAR-659)", () => {
+  const HONO_URL = "https://hono.dev/llms.txt";
+  const AI_URL = "https://ai-sdk.dev/llms.txt";
+  const searchRegistry = (): Registry => ({
+    entries: new Map([
+      ["hono", { name: "hono", urls: [HONO_URL], description: "Hono" }],
+      ["ai-sdk", { name: "ai-sdk", aliases: ["ai"], urls: [AI_URL], description: "AI SDK" }],
+    ]),
+  });
+
+  function seed(): void {
+    writeCache("hono", HONO_URL, "# Hono\n\n## Streaming responses\n\nUse streamSSE to send server-sent events to the client.");
+    writeCache("ai-sdk", AI_URL, "# AI SDK\n\n## streamText\n\nstreamText pipes a model response into a server-sent events stream.");
+  }
+
+  it("returns sections grouped by library, with Source lines and the searched/configured count", async () => {
+    seed();
+    const { call, client } = await connect(searchRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("search", { query: "server-sent events streaming" });
+    expect(out).toContain("# hono");
+    expect(out).toContain(`Source: ${HONO_URL}`);
+    expect(out).toContain("# ai-sdk");
+    expect(out).toContain("Searched 2 of 2 configured libraries");
+    await client.close();
+  });
+
+  it("honours the libraries filter and maxTokens", async () => {
+    seed();
+    const { call, client } = await connect(searchRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("search", { query: "streaming", libraries: ["ai"], maxTokens: 500 });
+    expect(out).toContain("# ai-sdk");
+    expect(out).not.toContain("# hono");
+    expect(out).toContain("Searched 1 of 1 configured library");
+    await client.close();
+  });
+
+  it("an empty query, a non-integer maxTokens and an over-long libraries list are schema errors", async () => {
+    seed();
+    const { client, call } = await connect(searchRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    // The SDK reports a schema violation as an error result, not a thrown transport error.
+    for (const args of [
+      { query: "" },
+      { query: "streaming", maxTokens: 1.5 },
+      { query: "streaming", maxTokens: 0 },
+      { query: "streaming", maxTokens: -100 },
+      { query: "streaming", libraries: Array.from({ length: 31 }, (_, i) => `l${i}`) },
+    ]) {
+      const out = await call("search", args);
+      expect(out).toContain("Input validation error");
+      expect(out).not.toContain("Source:");
+    }
+    await client.close();
+  });
+
+  it("its description tells an agent when to reach for it instead of get_docs", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = buildServer(searchRegistry());
+    await server.connect(serverTransport);
+    const client = new Client({ name: "probe", version: "0" });
+    await client.connect(clientTransport);
+    const tool = (await client.listTools()).tools.find((t) => t.name === "search")!;
+    expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(["libraries", "maxTokens", "query"]);
+    expect(tool.description).toContain("get_docs");
+    expect(tool.description).toMatch(/cache-only|offline/i);
     await client.close();
   });
 });

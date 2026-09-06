@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
 import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
-import { parseDoctorArgs, parseResolveArgs, dispatchCli, RESOLVE_USAGE, type CliIo } from "../src/cli.js";
+import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
+import { resetSearchIndexMemo } from "../src/search-index.js";
+import { SEARCH_SCHEMA_VERSION } from "../src/search.js";
 
 let dir: string;
 /** A working directory with no `.git` and no config file (Q1). */
@@ -34,6 +36,7 @@ beforeEach(() => {
   process.env.HOME = join(dir, "home");
   process.env.XDG_CONFIG_HOME = join(dir, "xdg");
   vi.spyOn(process, "cwd").mockReturnValue(sandbox);
+  resetSearchIndexMemo();
 });
 
 afterEach(() => {
@@ -517,5 +520,127 @@ describe("CLI config discovery: no flag needed (PAR-657)", () => {
     const report = JSON.parse(a.out.join(""));
     expect(report.dependencies.find((d: { name: string }) => d.name === "acme")?.library).toBe("acme");
     expect(code).toBe(0);
+  });
+});
+
+describe("parseSearchArgs (PAR-659)", () => {
+  it("takes the query as one quoted argument or as several bare words", () => {
+    expect(parseSearchArgs(["server-sent events streaming"])).toEqual({ json: false, query: "server-sent events streaming", libraries: [] });
+    expect(parseSearchArgs(["server-sent", "events", "streaming"])).toEqual({ json: false, query: "server-sent events streaming", libraries: [] });
+  });
+
+  it("parses every documented flag, --library repeating", () => {
+    expect(parseSearchArgs(["streaming", "--library", "hono", "--library", "ai-sdk", "--max-tokens", "800", "--json", "--config", "c.json"])).toEqual({
+      json: true,
+      query: "streaming",
+      libraries: ["hono", "ai-sdk"],
+      maxTokens: 800,
+      config: "c.json",
+    });
+  });
+
+  it("rejects an empty query, unknown flags, missing values and a bad --max-tokens", () => {
+    expect(() => parseSearchArgs([])).toThrow(/search requires a query/);
+    expect(() => parseSearchArgs(["--json"])).toThrow(/search requires a query/);
+    expect(() => parseSearchArgs(["x", "--bogus"])).toThrow(/Unknown option "--bogus"/);
+    expect(() => parseSearchArgs(["x", "--library"])).toThrow(/--library requires a value/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "zero"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "0"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "1.5"])).toThrow(/positive whole number/);
+  });
+
+  it("a bare word is query text, never a library — only --library names one", () => {
+    expect(parseSearchArgs(["hono", "streaming"]).libraries).toEqual([]);
+    expect(parseSearchArgs(["hono", "streaming"]).query).toBe("hono streaming");
+  });
+});
+
+describe("dispatchCli search (PAR-659)", () => {
+  const HONO_URL = "https://hono.dev/llms.txt";
+  const HONO_DOC = "# Hono\n\n## Streaming responses\n\nUse streamSSE to send server-sent events to the client.";
+
+  function config(): string {
+    return writeConfig([
+      { name: "hono", urls: [HONO_URL] },
+      { name: "react", urls: [REACT_URL] },
+    ]);
+  }
+
+  it("prints grouped results and exits 0; the network is never touched", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const fetchSpy = vi.fn(() => {
+      throw new Error("vibectx search must never fetch");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const o = io();
+    const code = await dispatchCli(["node", "vibectx", "search", "server-sent events", "--config", config()], o);
+    expect(code).toBe(0);
+    expect(o.out.join("")).toContain("# hono");
+    expect(o.out.join("")).toContain(`Source: ${HONO_URL}`);
+    // The config LAYERS over the shipped defaults, so "configured" counts all of them; one is cached.
+    expect(o.out.join("")).toMatch(/Searched 1 of \d+ configured libraries/);
+    expect(o.out.join("")).toContain("Run `vibectx warm`");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("exits 1 when nothing matched, naming what was searched", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "search", "kubernetes", "--config", config()], o)).toBe(1);
+    expect(o.out.join("")).toContain("No sections matched");
+    expect(o.out.join("")).toContain("searched 1 cached library: hono");
+  });
+
+  it("exits 2 on a usage error and prints the usage line", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "search", "--json"], o)).toBe(2);
+    expect(o.err.join("")).toContain(SEARCH_USAGE);
+  });
+
+  it("--library filters, and a subcommand name given as a library value is not a subcommand", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    writeCache("react", REACT_URL, REACT_DOC);
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "search", "streaming cleanup", "--library", "hono", "--config", config()], o)).toBe(0);
+    expect(o.out.join("")).toContain("# hono");
+    expect(o.out.join("")).not.toContain("# react");
+    expect(o.out.join("")).toContain("Searched 1 of 1 configured library");
+  });
+
+  it("--json prints the outcome with a stable key order", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "search", "streaming", "--json", "--config", config()], o)).toBe(0);
+    const parsed = JSON.parse(o.out.join(""));
+    expect(Object.keys(parsed)).toEqual([
+      "schemaVersion",
+      "generatedAt",
+      "query",
+      "groups",
+      "configured",
+      "searched",
+      "searchedLibraries",
+      "unknown",
+      "uncached",
+      "fromIndex",
+      "tokenized",
+      "indexWritten",
+      "notes",
+    ]);
+    expect(parsed.schemaVersion).toBe(SEARCH_SCHEMA_VERSION);
+    expect(parsed.groups[0].library).toBe("hono");
+    expect(parsed.groups[0].sections[0].body).toContain("streamSSE");
+    expect(parsed.uncached).toContain("react");
+    expect(parsed.uncached).not.toContain("hono");
+    expect(parsed.searchedLibraries).toEqual(["hono"]);
+  });
+
+  it("`search warm` searches for the word warm rather than dispatching to warm", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const o = io();
+    const code = await dispatchCli(["node", "vibectx", "search", "warm", "--config", config()], o);
+    expect(code).toBe(1); // nothing in the cache says "warm"
+    expect(o.out.join("")).toContain('No sections matched "warm"');
+    expect(o.out.join("")).not.toContain("dependencies cached");
   });
 });

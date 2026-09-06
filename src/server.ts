@@ -3,6 +3,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { Registry } from "./registry.js";
 import { getDocsToolText } from "./get-docs.js";
+import { searchToolText } from "./search.js";
 import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
@@ -59,6 +60,33 @@ export function buildServer(registry: Registry): McpServer {
     },
     async ({ library, topic, maxTokens, mode }) =>
       text(await getDocsToolText(registry, { library, topic, maxTokens, mode })),
+  );
+
+  server.registerTool(
+    "search",
+    {
+      description:
+        "Search ALL cached library docs at once and get the best sections grouped by library — use this when you do not know which library owns a concept (\"how do I stream a response to the client\" could be Next.js, the AI SDK or Hono), or to find out which of your dependencies documents something. Use get_docs instead when you already know the library. Cache-only and offline by design: it never fetches, so it searches exactly the libraries already cached (the response says which, and how to cache the rest with warm_project).",
+      inputSchema: {
+        // A non-empty query: an empty string is a schema error the client sees, not a search
+        // that quietly returns everything.
+        query: z.string().min(1).describe("What you are looking for, in plain words — e.g. \"server-sent events streaming\""),
+        maxTokens: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Approximate response budget (default 4000), shared across all libraries"),
+        // Capped at 30: a filter is a shortlist, and an unbounded list is a way to make one
+        // call do thirty libraries' work of name resolution.
+        libraries: z
+          .array(z.string())
+          .max(30)
+          .optional()
+          .describe("Restrict the search to these libraries, by name or alias (default: every cached library)"),
+      },
+    },
+    async ({ query, maxTokens, libraries }) => text(searchToolText(registry, { query, maxTokens, libraries })),
   );
 
   server.registerTool(
