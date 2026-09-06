@@ -748,6 +748,25 @@ describe("warm leaves a usable cross-library search index behind (PAR-659, D-34)
     expect(out.groups[0].library).toBe("hono");
   });
 
+  it("PAR-659 R1: a NEWLY RESOLVED library is indexed too — the branch the caller-side hook missed", async () => {
+    // `warm`'s `resolved+cached` branch never reached `indexWarmed`: the document was fetched
+    // inside `resolvePackage`, so the library was cached and UNINDEXED, and every search until
+    // the next warm re-tokenized it. The hook now sits at that single writer instead.
+    writePackageJson({ elysia: "1" });
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia\n\n## Streaming\n\nStream server-sent events to the client.",
+    });
+    const reg = registry();
+    expect(byName(await runWarm(reg, { dir: project })).elysia.status).toBe("resolved+cached");
+    expect(readIndex().libraries.has("elysia")).toBe(true);
+
+    resetSearchIndexMemo(); // a new process, so only what is ON DISK can help
+    const out = runSearch(reg, { query: "server-sent events streaming" });
+    expect(out.tokenized).toBe(0);
+    expect(out.groups[0].library).toBe("elysia");
+  });
+
   it("an offline warm indexes what the cache already holds", async () => {
     writeCache("hono", HONO_URL, "# Hono\n\n## Streaming\n\nstreamSSE sends server-sent events.");
     writePackageJson({ hono: "4" });

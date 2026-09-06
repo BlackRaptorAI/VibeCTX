@@ -6,6 +6,7 @@ import { readCache, writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { refreshToolText } from "../src/refresh.js";
 import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
+import { runSearch } from "../src/search.js";
 
 let dir: string;
 
@@ -116,6 +117,34 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     const after = readIndex().libraries;
     expect(after.get("react")!.hash).toBe(documentHash("# React new")); // rebuilt, not stale
     expect(after.get("hono")!.hash).toBe(documentHash("# Hono")); // every other library untouched
+  });
+
+  it("PAR-659 R1: a SUCCESSFUL refresh of a RESOLVED entry rebuilds the index — it used to leave it deleted", async () => {
+    // The missing hook the review gate found: this branch invalidated the entry and then
+    // returned through `resolvePackage`, which had no index hook of its own — so a refresh
+    // that WORKED left the library unindexed until something else happened to rewrite it, and
+    // every search until then re-tokenized it.
+    const resolvedHono = {
+      name: "hono",
+      urls: [HONO_URL],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    indexCachedDocument("hono", HONO_URL, "# Hono old", "2026-09-06T00:00:00.000Z");
+    stubFetch({
+      "https://registry.npmjs.org/hono/latest": JSON.stringify({ homepage: "https://hono.dev" }),
+      "https://hono.dev/llms-full.txt": "# Hono new\n\n## Streaming\n\nStream events to the client.",
+    });
+
+    const out = await refreshToolText(reg, "hono");
+    expect(out).toMatch(/^hono: re-resolved via npm/);
+    const entry = readIndex().libraries.get("hono")!;
+    expect(entry.hash).toBe(documentHash("# Hono new\n\n## Streaming\n\nStream events to the client."));
+    expect(entry.url).toBe("https://hono.dev/llms-full.txt");
+
+    // …and the first search after it costs no tokenizing at all.
+    resetSearchIndexMemo();
+    expect(runSearch(reg, { query: "streaming events" }).tokenized).toBe(0);
   });
 
   it("PAR-659 D-34: a refresh that FAILS leaves the entry invalidated rather than stale", async () => {

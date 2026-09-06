@@ -13,6 +13,7 @@ import { fetchUrl, getLibraryDoc } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, normalisePyPiName, pypiNameError } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
+import { indexCachedDocument } from "./search-index.js";
 import { classifySourceKind, type SourceKind } from "./source-kind.js";
 
 /**
@@ -416,6 +417,20 @@ export async function resolvePackage(
       );
       continue;
     }
+    // D-34 (PAR-659, R1) — RESOLUTION IS A WRITER OF A PRIMARY CACHED DOCUMENT, so it keeps
+    // the cross-library search index current like every other writer. The hooks used to sit at
+    // the CALLERS, and two callers had none: `warm`'s `resolved+cached` branch left a
+    // newly-resolved library unindexed, and `refresh`'s resolved branch invalidated the entry
+    // and then returned without rebuilding it — so a SUCCESSFUL refresh left that library
+    // deleted from the index until something else rewrote it.
+    //
+    // One hook here closes the class rather than the two instances: both callers reach the
+    // cache through this function, and this is the only place that holds the document text and
+    // the entry name together without a second read. (A hook inside `cache.ts`'s `writeCache`
+    // would have been lower still, but that writer also serves FOLLOWED PAGES, which D-34
+    // deliberately does not index — it would have filed a followed page under the library's
+    // name and displaced its primary document.)
+    indexCachedDocument(entry.name, doc.url, doc.content, undefined, opts.warn);
     let saveNote: string | undefined;
     const saved = saveResolvedEntry(entry, (m) => {
       saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();

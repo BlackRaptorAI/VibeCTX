@@ -28,6 +28,10 @@ export async function refreshToolText(registry: Registry, library?: string): Pro
     // from whatever the cache then holds.
     invalidateIndex(entry.name);
     if (entry.resolved) {
+      // R1: `resolvePackage` re-indexes what it caches (D-34's hook lives at that single
+      // writer), so a SUCCESSFUL re-resolve leaves the entry rebuilt rather than merely
+      // deleted by the `invalidateIndex` above. A failed one leaves it deleted, which is the
+      // safe state: nothing stale can be served from an entry that is not there.
       const out = await resolvePackage(entry.name, { ecosystem: entry.resolved.source });
       if (out.ok && out.entry) {
         if (!installResolvedEntry(registry, out.entry)) {
