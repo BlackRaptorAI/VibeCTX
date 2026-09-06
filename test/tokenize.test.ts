@@ -19,7 +19,8 @@ describe("tokenize — camelCase and PascalCase splitting (D-23)", () => {
 
   it("splits an acronym run before the following word", () => {
     expect(tokenize("HTTPServer")).toEqual(["http", "server", "httpserver"]);
-    expect(tokenize("parseJSONBody")).toEqual(["parse", "json", "body", "parsejsonbody"]);
+    // "parse" stems to "pars" (silent-e cut) — see the stemmer describe below.
+    expect(tokenize("parseJSONBody")).toEqual(["pars", "json", "body", "parsejsonbody"]);
   });
 
   it("keeps a bare acronym as one token", () => {
@@ -43,11 +44,12 @@ describe("tokenize — camelCase and PascalCase splitting (D-23)", () => {
   });
 
   it("splits a mixed identifier path the way an agent would say it", () => {
+    // "stripe" and "create" both lose their silent e, the same way the documents do.
     expect(tokenize("stripe.checkout.sessions.create")).toEqual([
-      "stripe",
+      "strip",
       "checkout",
       "session",
-      "create",
+      "creat",
     ]);
   });
 });
@@ -88,12 +90,14 @@ describe("tokenize — light suffix stemmer (D-23)", () => {
 
   it("applies the plural rule then the ing/ed rule, so plural gerunds converge", () => {
     expect(tokenize("settings")).toEqual(tokenize("setting"));
-    expect(tokenize("settings")).toEqual(["sett"]);
+    expect(tokenize("settings")).toEqual(["set"]); // ing → "sett" → de-doubled → "set"
+    expect(tokenize("settings")).toEqual(tokenize("set"));
   });
 
   it("never stems below three characters", () => {
     expect(tokenize("ring")).toEqual(["ring"]); // ing → "r" is too short
-    expect(tokenize("used")).toEqual(["used"]); // ed → "us" is too short
+    expect(tokenize("sing")).toEqual(["sing"]);
+    expect(tokenize("added")).toEqual(["add"]); // ed → "add", de-doubling to "ad" is too short
   });
 
   it("falls through to the next plural rule when one would cut below three characters", () => {
@@ -121,6 +125,108 @@ describe("tokenize — light suffix stemmer (D-23)", () => {
     expect(tokenize("invalidateQueries")).toEqual(
       expect.arrayContaining(tokenize("invalidate queries")),
     );
+  });
+});
+
+describe("tokenize — step-1b repairs, so inflections converge (D-23 amended)", () => {
+  const one = (text: string) => {
+    const out = tokenize(text);
+    expect(out).toHaveLength(1); // each of these is a single word
+    return out[0];
+  };
+
+  /**
+   * The point of the amendment: the forms a vibe coder types and the forms the docs
+   * are written in have to land on the same token. Left column is the query word,
+   * the rest are the inflections that must reduce to the same stem.
+   */
+  it("stems inflections of the same word to one token", () => {
+    const families: ReadonlyArray<readonly [string, ...string[]]> = [
+      ["pars", "parse", "parsing", "parsed", "parses"],
+      ["creat", "create", "creating", "created", "creates"],
+      ["use", "use", "uses", "used"],
+      ["run", "run", "running", "runs"],
+      ["handl", "handle", "handling", "handled", "handles"],
+      ["cach", "cache", "caching", "cached", "caches"],
+      ["rout", "route", "routes", "routing", "routed"],
+      ["policy", "policy", "policies"],
+      ["query", "query", "queries", "querying"],
+      ["set", "set", "sets", "setting", "settings"],
+      ["stream", "stream", "streams", "streaming", "streamed"],
+    ];
+    for (const [stem, ...forms] of families) {
+      for (const form of forms) {
+        expect({ form, stem: one(form) }).toEqual({ form, stem });
+      }
+    }
+  });
+
+  /**
+   * Documented non-convergences. Both are deliberate: fixing either would cost more
+   * than it buys, and a reader of the ranker needs to know they exist.
+   */
+  it("leaves the documented non-convergences distinct: 'using' and 'handler'", () => {
+    // "using" is a stopword, so it is dropped from any real query before stemming
+    // ever sees it; alone, ing → "us" is under the floor, so it keeps its own form.
+    expect(STOPWORDS.has("using")).toBe(true);
+    expect(tokenize("using the parser")).toEqual(["parser"]);
+    expect(one("using")).toBe("using");
+    expect(one("using")).not.toBe(one("use"));
+
+    // There is no agent-noun rule: "handler" is a thing, "handling" is an action,
+    // and folding -er away would merge "router" into "route" too.
+    expect(one("handler")).toBe("handler");
+    expect(one("handler")).not.toBe(one("handle"));
+    expect(one("router")).toBe("router");
+  });
+
+  it("(a) drops one of a doubled consonant left behind by ing/ed", () => {
+    expect(one("running")).toBe("run");
+    expect(one("stopped")).toBe("stop");
+    expect(one("getting")).toBe("get");
+    expect(one("embedded")).toBe("embed");
+  });
+
+  it("(a) keeps a doubled l, s or z, which are spellings in their own right", () => {
+    expect(one("calling")).toBe("call"); // not "cal"
+    expect(one("calling")).toBe(one("call"));
+    expect(one("passed")).toBe("pass"); // not "pas"
+    expect(one("passed")).toBe(one("pass"));
+    expect(one("fizzing")).toBe("fizz");
+    expect(one("installed")).toBe(one("install"));
+  });
+
+  it("(b) strips a trailing e from tokens of five characters or more", () => {
+    expect(one("parse")).toBe("pars");
+    expect(one("middleware")).toBe("middlewar");
+    expect(one("note")).toBe("note"); // four characters: left alone
+    expect(one("notes")).toBe("note");
+    expect(one("type")).toBe("type");
+    expect(one("types")).toBe("type");
+  });
+
+  it("(b) also applies to the stem left by the s / ing / ed rules", () => {
+    expect(one("parses")).toBe("pars"); // s → "parse" → e → "pars"
+    expect(one("routes")).toBe("rout");
+    expect(one("parsing")).toBe("pars");
+  });
+
+  it("falls back to cutting the d alone when 'ed' would go under the floor", () => {
+    // "use" + "ed" is spelled "used": the e belongs to the stem, so take the d.
+    expect(one("used")).toBe("use");
+    expect(one("used")).toBe(one("use"));
+    expect(one("iced")).toBe("ice");
+  });
+
+  it("(c) keeps the previous form when a repair would go under three characters", () => {
+    expect(one("added")).toBe("add"); // "ad" is too short
+    expect(one("odds")).toBe("odd");
+    expect(one("ring")).toBe("ring");
+  });
+
+  it("still never stems a token containing a digit, whatever the suffix", () => {
+    expect(tokenize("base64ed")).toEqual(["base64ed"]);
+    expect(tokenize("utf8e")).toEqual(["utf8e"]);
   });
 });
 

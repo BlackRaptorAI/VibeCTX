@@ -50,7 +50,12 @@ No embeddings, no network at query time, same answer every run.
 split at camelCase and PascalCase boundaries — `useEffect` becomes `use` + `effect`,
 `HTTPServer` becomes `http` + `server` — while the whole compound (`useeffect`) is kept
 too, so a literal `useEffect` still scores. A light suffix stemmer folds `policies` onto
-`policy` and `hooks` onto `hook`. A small stopword list drops "how do I use the …"
+`policy`, `hooks` onto `hook`, and — after the plural and `ing`/`ed` rules — repairs the
+spelling the suffix changed, so `parse` / `parsing` / `parsed` / `parses` all land on
+`pars`, `running` on `run`, and `cache` / `caching` / `cached` on `cach`. Two exceptions
+are deliberate: `using` is a stopword and keeps its own form, and there is no agent-noun
+rule, so `handler` and `router` stay distinct from `handle` and `route`. A small
+stopword list drops "how do I use the …"
 scaffolding, unless the query is nothing but stopwords. The result: asking for "use
 effect cleanup" finds `useEffect`, and asking for `useEffect` finds "use effect".
 

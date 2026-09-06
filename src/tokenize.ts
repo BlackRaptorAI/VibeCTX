@@ -84,6 +84,8 @@ function hasDigit(token: string): boolean {
 
 const MIN_STEM_INPUT = 4;
 const MIN_STEM_RESULT = 3;
+/** Shorter than this, a trailing `e` is load-bearing: `note` and `type` keep theirs. */
+const MIN_E_STRIP_INPUT = 5;
 
 /** Apply one suffix rule if the result stays at least MIN_STEM_RESULT long. */
 function chop(token: string, suffix: string, replacement: string): string | undefined {
@@ -92,12 +94,64 @@ function chop(token: string, suffix: string, replacement: string): string | unde
   return stemmed.length >= MIN_STEM_RESULT ? stemmed : undefined;
 }
 
+/** Consonants a suffix may have doubled. `l`, `s` and `z` are excluded because a
+ *  double there is usually the word's own spelling: `call`, `pass`, `fizz` — cutting
+ *  those would push `calling` onto `cal` and away from `call`. */
+const DEDOUBLE = new Set("bcdfghjkmnpqrtvwxy".split(""));
+
 /**
- * D-23's light deterministic stemmer: a plural pass (`ies→y`, `sses→ss`, trailing
- * `s` but never `ss`) then a verb pass (`ing`, `ed`), each rule refusing to cut
- * below three characters. Two passes rather than one so `settings` and `setting`
- * converge on the same stem. Tokens under four characters, and any token
- * containing a digit (`utf8s`, version numbers), are left alone.
+ * Repair (a) — Porter step 1b's de-doubling. `running` loses `ing` and leaves `runn`;
+ * the second `n` was the suffix's doing, so drop it. Undefined when the token does not
+ * end in a doubled consonant, or when the cut would fall under the floor (`added` →
+ * `add` stays `add`, since `ad` is too short).
+ */
+function dedouble(t: string): string | undefined {
+  const n = t.length;
+  if (n < 2 || t[n - 1] !== t[n - 2] || !DEDOUBLE.has(t[n - 1])) return undefined;
+  const out = t.slice(0, n - 1);
+  return out.length >= MIN_STEM_RESULT ? out : undefined;
+}
+
+/**
+ * Repair (b) — the silent-e cut. English drops the `e` before `ing`/`ed`, so `parse`
+ * and `parsing` can only meet at `pars`, `create` and `created` at `creat`. Applied to
+ * the token that survives the suffix passes, which is what also carries `parses` →
+ * `parse` → `pars` home. Only from five characters up: below that the `e` is usually
+ * the word (`note`, `type`, `use`), and a 3-char stem collides with too much.
+ */
+function stripSilentE(t: string): string | undefined {
+  if (t.length < MIN_E_STRIP_INPUT || !t.endsWith("e")) return undefined;
+  const out = t.slice(0, t.length - 1);
+  return out.length >= MIN_STEM_RESULT ? out : undefined;
+}
+
+/**
+ * D-23's light deterministic stemmer. Three ordered passes, every rule refusing to cut
+ * below three characters (c), and nothing at all applied to a token under four
+ * characters or containing a digit (`utf8s`, version numbers):
+ *
+ *   1. plural — `ies→y`, `sses→ss`, trailing `s` but never `ss`
+ *   2. verb   — `ing`, `ed`, then repair (a), the de-doubling: `running` → `run`.
+ *               When `ed` alone would go under the floor the `e` belongs to the stem
+ *               (`use` + `ed` is spelled `used`), so the `d` is cut instead.
+ *   3. repair (b) — the silent `e`, unless (a) already fired. (A de-doubled stem ends
+ *      in a consonant, so this exclusion is belt-and-braces, not a live branch.)
+ *
+ * Two passes for suffixes rather than one so `settings` → `setting` → `set` converges
+ * with `set`. What this buys, MEASURED by test/tokenize.test.ts "stems inflections of
+ * the same word to one token": parse/parsing/parsed/parses, create/creating/created,
+ * use/uses/used, run/running, handle/handling, cache/caching/cached,
+ * route/routes/routing, policy/policies, query/queries/querying all converge.
+ *
+ * Two deliberate non-convergences, and the reason for each:
+ *   - `using` ≠ `use`. It is a stopword, so no real query reaches the stemmer with it;
+ *     standing alone, `ing` → `us` is under the floor and it keeps its own form.
+ *   - `handler` ≠ `handle`. There is no agent-noun rule: an `er` rule would also merge
+ *     `router` into `route` and `parser` into `parse`, which loses more than it gains.
+ *
+ * The silent-e cut over-stems a few nouns that merely end in `e` — `stripe` → `strip`,
+ * `middleware` → `middlewar`. Queries and documents go through the same function, so a
+ * collision costs precision, never a match.
  */
 export function stem(token: string): string {
   if (hasDigit(token)) return token;
@@ -109,9 +163,24 @@ export function stem(token: string): string {
       (t.endsWith("ss") ? undefined : chop(t, "s", ""));
     if (plural !== undefined) t = plural;
   }
+  let dedoubled = false;
   if (t.length >= MIN_STEM_INPUT) {
-    const verb = chop(t, "ing", "") ?? chop(t, "ed", "");
-    if (verb !== undefined) t = verb;
+    const verb =
+      chop(t, "ing", "") ??
+      chop(t, "ed", "") ??
+      (t.endsWith("ed") ? chop(t, "d", "") : undefined);
+    if (verb !== undefined) {
+      t = verb;
+      const single = dedouble(t);
+      if (single !== undefined) {
+        t = single;
+        dedoubled = true;
+      }
+    }
+  }
+  if (!dedoubled) {
+    const bare = stripSilentE(t);
+    if (bare !== undefined) t = bare;
   }
   return t;
 }
