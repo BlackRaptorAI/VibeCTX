@@ -1,6 +1,6 @@
 import type { LibraryEntry } from "./registry.js";
 import { readCache, writeCache, touchCache } from "./cache.js";
-import { isAllowedLink, type LinkPolicy } from "./link-policy.js";
+import { isAllowedLink, isForbiddenHost, type LinkPolicy } from "./link-policy.js";
 
 export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 
@@ -34,6 +34,20 @@ export interface FetchOptions {
   /** When set, the response's final URL must pass `isAllowedLink` against this source
    *  document and policy — the same function the pre-fetch guard applied to the link. */
   linkGuard?: { sourceUrl: string; policy?: LinkPolicy };
+  /** When set, the response's final URL must be https on a non-forbidden host (any host:
+   *  cross-host redirects stay allowed, per D-04). Used for content-derived primary URLs
+   *  (resolved entries) and registry metadata, whose targets no operator vetted. */
+  publicFinalUrl?: boolean;
+}
+
+/** https on a host `isForbiddenHost` does not name; false for anything unparseable. */
+function isPublicHttpsUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && !isForbiddenHost(u.hostname);
+  } catch {
+    return false;
+  }
 }
 
 /** Read a body up to `maxBytes`; `undefined` once the cap is exceeded (the stream
@@ -88,6 +102,10 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
         return { status: "refused" };
       }
     }
+    if (opts.publicFinalUrl && !isPublicHttpsUrl(res.url || url)) {
+      await res.body?.cancel();
+      return { status: "refused" };
+    }
     if (res.status === 304) return { status: "not-modified" };
     if (!res.ok) return { status: "miss" };
     const declared = Number(res.headers.get("content-length"));
@@ -136,8 +154,14 @@ export async function getLibraryDoc(
     for (const url of entry.urls) {
       const cached = readCache(entry.name, url, ttl);
       // No origin pin here: primary URLs legitimately redirect across hosts
-      // (docs.anthropic.com → platform.claude.com); they are operator-configured, not content-derived.
-      const out = await fetchUrl(url, { etag: cached?.meta.etag, maxBytes: PRIMARY_DOC_MAX_BYTES });
+      // (docs.anthropic.com → platform.claude.com) — D-04. Curated entries are operator-configured;
+      // a resolved entry's URLs came from package metadata, so its final URL must at least be
+      // https on a public host.
+      const out = await fetchUrl(url, {
+        etag: cached?.meta.etag,
+        maxBytes: PRIMARY_DOC_MAX_BYTES,
+        publicFinalUrl: entry.resolved !== undefined,
+      });
       if (out.status === "not-modified" && cached) {
         touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
         return { content: cached.content, url };

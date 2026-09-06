@@ -141,6 +141,37 @@ describe("fetchLinkedPage redirect enforcement (SSRF guard, post-redirect)", () 
     const doc = await getLibraryDoc({ name: "anthropic", urls: ["https://docs.anthropic.com/llms.txt"] });
     expect(doc?.content).toBe("# Claude docs");
   });
+
+  describe("resolved entries: primary URLs are content-derived, so their final URL must be https on a public host (PAR-655)", () => {
+    const resolved = {
+      name: "evil-pkg",
+      urls: ["https://evil-pkg.example.com/llms.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/evil-pkg/latest" },
+    };
+
+    it.each([
+      "http://169.254.169.254/latest/meta-data",
+      "https://169.254.169.254/latest/meta-data",
+      "https://localhost/admin",
+      "https://[::1]/x",
+      "https://intranet/x",
+      "http://evil-pkg.example.com/llms.txt",
+    ])("refuses a primary whose redirect chain ends at %s and caches nothing", async (final) => {
+      vi.stubGlobal("fetch", vi.fn(async () => responseAt(final, "SECRET")));
+      expect(await getLibraryDoc(resolved)).toBeUndefined();
+      expect(readCache(resolved.name, resolved.urls[0], 999)).toBeUndefined();
+    });
+
+    it("still allows a cross-host https redirect to a public host (D-04 preserved)", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://docs.evil-pkg.example.org/llms.txt", "# Docs")));
+      expect((await getLibraryDoc(resolved))?.content).toBe("# Docs");
+    });
+
+    it("a curated (non-resolved) entry keeps the 0.1.3 behaviour on a cross-host redirect", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://mirror.example.org/llms.txt", "# Mirror")));
+      expect((await getLibraryDoc({ name: "curated", urls: ["https://docs.example.com/llms.txt"] }))?.content).toBe("# Mirror");
+    });
+  });
 });
 
 describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {

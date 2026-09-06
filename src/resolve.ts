@@ -248,7 +248,7 @@ export function couldNotResolveMessage(name: string, attempts: string[]): string
 }
 
 async function fetchMetadata(url: string): Promise<{ json?: unknown; why?: string }> {
-  const out = await fetchUrl(url, { maxBytes: METADATA_MAX_BYTES });
+  const out = await fetchUrl(url, { maxBytes: METADATA_MAX_BYTES, publicFinalUrl: true });
   if (out.status === "too-large") return { why: `larger than ${METADATA_MAX_BYTES / (1024 * 1024)} MiB` };
   if (out.status !== "ok" || out.body === undefined) return { why: "404 or unreachable" };
   try {

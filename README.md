@@ -34,10 +34,92 @@ npx -y @blackraptorai/vibectx
 |---|---|
 | `list_libraries()` | Registry + per-library cache status |
 | `get_docs(library, topic?, maxTokens?)` | Fetch-or-cache, then return the sections best matching `topic` (follows llms.txt index links when needed). No topic → table of contents + document head |
-| `refresh(library?)` | Force refetch past the TTL (all libraries when omitted) |
+| `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved) |
+| `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
 
-`library` is a name from `list_libraries` or one of its aliases (`next`, `tailwind`, `remix`, …).
+`library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
+or **any npm / PyPI package name** — an unknown name is resolved on the spot.
+
+## Any library, no config
+
+Ask `get_docs` for a name the registry does not know and it resolves the package itself —
+no curation, no config. `resolve_library` does the same step explicitly and shows its work;
+`vibectx resolve <name>` prints the identical report from the command line.
+
+```
+$ npx -y @blackraptorai/vibectx resolve fastapi
+Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
+  homepage:   —
+  docs:       https://fastapi.tiangolo.com/
+  repository: https://github.com/fastapi/fastapi
+  candidates (probed in order; first usable document wins):
+    1. https://fastapi.tiangolo.com/llms-full.txt — no document
+    2. https://fastapi.tiangolo.com/llms.txt — no document
+    3. https://raw.githubusercontent.com/fastapi/fastapi/HEAD/README.md — chosen
+    4. https://raw.githubusercontent.com/fastapi/fastapi/HEAD/readme.md — not tried
+    …
+  chosen: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/README.md (readme, 22,568 chars)
+  followed-link hosts: fastapi.tiangolo.com (plus the source document's own host; https only)
+  saved to ~/.docs-cache-mcp/resolved.json — get_docs("fastapi") works now; pin or override it in vibectx.config.json.
+```
+
+**What resolution does**, in order, stopping at the first usable document:
+
+1. **Registry hit** — a canonical name or alias is served as before; nothing is resolved.
+2. **Package metadata** — npm (`registry.npmjs.org/<name>/latest`), then PyPI
+   (`pypi.org/pypi/<name>/json`). The name must look like a package name (npm rules or
+   PEP 503) or nothing is fetched. When both registries know the name, the one whose
+   metadata carries a **homepage or docs URL** wins; a hit that offers only a repository
+   README yields to the other ecosystem if that one has a docs site (so `httpx`, `fastapi`
+   and `requests` resolve to the Python projects even though same-named npm packages
+   exist); ties go to npm. npm's `security-holder` placeholder counts as no package.
+   Pass `ecosystem: "npm" | "pypi"` (CLI `--npm` / `--pypi`) to decide yourself.
+3. **llms.txt probing** — `llms-full.txt` then `llms.txt`, under the docs URL's path and
+   its origin, then under the homepage's; at most 8 URLs. HTML served with a 200 does
+   not count as a document.
+4. **GitHub README** — for a `github.com` repository only, via
+   `raw.githubusercontent.com/<owner>/<repo>/HEAD/<README.md | readme.md | Readme.md | README.rst>`
+   (`HEAD` is the default branch, whatever it is called).
+5. Otherwise one plain line: what was tried, and the config snippet to pin the library.
+
+**Fetch bound.** A resolution makes at most **14 requests**: 2 metadata, 8 llms.txt
+probes, 4 README variants — and stops as soon as one document is usable. Metadata
+responses over 8 MiB are treated as absent; documents keep the normal 25 MiB cap.
+
+**Where it persists.** Successful resolutions are written to `resolved.json` in the
+cache directory (`~/.docs-cache-mcp/`, or `DOCS_CACHE_DIR`) via a temp file and rename.
+On startup they are merged **below** the defaults and your config: a real registry or
+config entry always wins, and a persisted resolution never overrides one. Records are
+re-validated on every load (bad ones are skipped; a corrupt file is ignored).
+`list_libraries` marks them `[resolved]`; `doctor` checks them like any entry;
+`refresh` re-resolves them through the same ecosystem, so a project that later publishes
+`llms.txt` is picked up.
+
+**Pin or override.** To fix a resolution you dislike, add the name to `vibectx.config.json`
+with your own `urls` — config beats resolution, and the entry stops being `[resolved]`.
+To resolve a name into the other ecosystem, run `vibectx resolve <name> --pypi` (or
+`--npm`); the later explicit resolution replaces the earlier one.
+
+**`allowedHosts` and followed links.** Followed index links are `https`-only and confined
+to the source document's own host **plus** the entry's `allowedHosts`. For a resolved
+entry that set is derived from its metadata — the homepage host, the docs-URL host and
+`docs.<registrable domain of the homepage>` — and is recomputed on every load, never read
+from `resolved.json`. In config, `allowedHosts` is an array of bare hostnames
+(`"api.acme.com"`), lowercase, or `"*.acme.com"` for subdomains (never the apex); no
+scheme, path, port or userinfo. IP literals, `localhost`, `.local`, `.internal` and
+single-label names are rejected on the way in and refused on the way out, whatever any
+list says. Redirects are re-checked against the same rule. The registrable-domain helper
+is deliberately small (last two labels, or three under a short list of two-part suffixes
+such as `co.uk`, `com.au`, `github.io`) — no Public Suffix List — so an unlisted
+two-part suffix derives a `docs.` host that simply does not exist; harmless, but not
+useful.
+
+**Honest limit.** Resolution finds a *source*; it does not make the source good. A
+project that publishes `llms.txt` gives full-text answers; most today do not, so the
+README on GitHub is what you get — fine for "how do I install / basic usage", thin for
+deep API questions. `vibectx doctor --library <name>` tells you which you got. A project
+with no GitHub repository and no `llms.txt` cannot be resolved; pin it in config.
 
 ## Configuration
 
@@ -78,7 +160,8 @@ npx -y @blackraptorai/vibectx --config ./vibectx.config.json
       "urls": ["https://elysiajs.com/llms-full.txt", "https://elysiajs.com/llms.txt"],
       "ttlHours": 168,
       "description": "Elysia web framework",
-      "probeQueries": ["middleware"]
+      "probeQueries": ["middleware"],
+      "allowedHosts": ["*.elysiajs.com"]
     }
   ]
 }
@@ -87,6 +170,8 @@ npx -y @blackraptorai/vibectx --config ./vibectx.config.json
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
+`allowedHosts` (optional) lists extra hosts followed index links may target — see
+[`allowedHosts` and followed links](#any-library-no-config).
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
 uses to prove the entry answers; without them a query is derived from the description.
 An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.
@@ -160,7 +245,7 @@ Per library it reports:
   returned section came from a followed index page — the index alone would have
   returned only its link list), or `no match`. `(derived)` marks a query derived
   from the description because the entry has no `probeQueries`.
-- **links** — index links followed / dropped (outside origin, over 2 MiB, or unreachable).
+- **links** — index links followed / dropped (outside the allowed hosts, over 2 MiB, or unreachable).
 
 **Exit code** `0` when every checked library is healthy; `1` when any is
 `unreachable`, `index-only` with zero links followed, has a probe with `no match`,
@@ -193,9 +278,10 @@ cache without touching the network (`unknown` until something is cached).
   best-matching links — absolute or relative — are fetched (and cached) one level deep:
   up to 3 links, or 5 when the index has more than 200. Each followed page is capped at
   2 MiB (larger responses are dropped, not cached), and no new fetch starts once ~2 MB of
-  followed content has accumulated. Primary documents are capped at 25 MiB. Only
-  same-origin `https` links are followed, checked again after redirects; skipped,
-  oversize or unreachable links are reported in the response rather than dropped silently.
+  followed content has accumulated. Primary documents are capped at 25 MiB. Only `https`
+  links on the source document's host or the entry's `allowedHosts` are followed, checked
+  again after redirects; skipped, oversize or unreachable links are reported in the
+  response rather than dropped silently.
 - **Deterministic retrieval:** markdown heading-split + keyword scoring. No embeddings,
   no external calls at query time, same answer every run.
 
