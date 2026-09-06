@@ -261,8 +261,9 @@ describe("dispatchCli resolve (PAR-655)", () => {
 });
 
 import { parseWarmArgs, WARM_USAGE } from "../src/cli.js";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { mkdtempSync as mkdtemp2 } from "node:fs";
+import { projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 
 describe("parseWarmArgs (PAR-656)", () => {
   it("takes an optional directory plus --offline / --json / --config", () => {
@@ -317,6 +318,19 @@ describe("dispatchCli warm (PAR-656)", () => {
       ["react", "already fresh"],
       ["hono", "unreachable"],
     ]);
+  });
+
+  it("--json carries the note when a newer schema on disk owns the project record", async () => {
+    writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19" } }), "utf8");
+    writeCache("react", REACT_URL, REACT_DOC);
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    writeFileSync(projectRecordPath(project), JSON.stringify({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION + 1, dir: project }), "utf8");
+    stubFetch({});
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--json"], a)).toBe(0);
+    const report = JSON.parse(a.out.join(""));
+    expect(report.notes).toContain("project record not written: newer schema on disk");
+    expect(a.err.join("")).toMatch(/newer schemaVersion 2/);
   });
 
   it("defaults the directory to the working directory", async () => {

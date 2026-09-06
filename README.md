@@ -169,7 +169,8 @@ manifest exists.
 directory>.json` in the cache directory — `{ schemaVersion: 1, dir, manifests,
 dependencies, warmedAt }`, atomically and validated on read. A file with an **older**
 `schemaVersion` is replaced; one with a **newer** `schemaVersion` (written by a newer
-vibectx) is left alone with a note on stderr — the same rule `resolved.json` follows. The
+vibectx) is left alone with a note on stderr and a `project record not written: newer schema
+on disk` note in the report (`--json` included) — the same rule `resolved.json` follows. The
 record is **best effort**: if it cannot be written (an unwritable cache directory, a full
 disk) the run still prints its table and still exits on the dependencies alone, with one
 stderr line and a `project record not written: <reason>` note. It feeds one decision, the

@@ -280,7 +280,12 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     // cache costs the next run one resolution retry — it must never cost the user the report
     // they asked for, so a failure is a warn line plus a note, and the exit code is unchanged.
     try {
-      writeProjectRecord({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir, manifests: report.manifests, dependencies: rows, warmedAt: report.generatedAt }, opts.warn);
+      // K2: a file written by a NEWER vibectx is not ours to overwrite. writeProjectRecord
+      // says so on stderr and returns false — the report gets the same sentence, because a
+      // `--json` consumer never sees stderr and would otherwise read a run that silently
+      // kept no memo as one that wrote one.
+      const written = writeProjectRecord({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir, manifests: report.manifests, dependencies: rows, warmedAt: report.generatedAt }, opts.warn);
+      if (!written) report.notes.push("project record not written: newer schema on disk");
     } catch (e) {
       const reason = cleanText(errorMessage(e));
       report.notes.push(`project record not written: ${reason}`);

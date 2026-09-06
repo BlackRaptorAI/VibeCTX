@@ -257,6 +257,22 @@ describe("runWarm (PAR-656)", () => {
     expect(formatWarmTable(report)).toMatch(/note: project record not written: /);
   });
 
+  it("K2/D-13: a record refused because a NEWER schema owns the file is a report note as well as a stderr line", async () => {
+    writeCache("react", REACT_URL, "# React fresh");
+    writePackageJson({ react: "19" });
+    mkdirSync(join(cache, "projects"), { recursive: true });
+    const future = JSON.stringify({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION + 1, dir: project });
+    writeFileSync(projectRecordPath(project), future, "utf8");
+    stubFetch({});
+    const warnings: string[] = [];
+    const report = await runWarm(registry(), { dir: project, warn: (m) => warnings.push(m) });
+    expect(warmExitCode(report)).toBe(0); // the docs are cached; only the memo was refused
+    expect(report.notes).toContain("project record not written: newer schema on disk");
+    expect(warnings.join("")).toMatch(/newer schemaVersion 2/);
+    expect(formatWarmTable(report)).toContain("note: project record not written: newer schema on disk");
+    expect(readFileSync(projectRecordPath(project), "utf8")).toBe(future); // untouched
+  });
+
   it("a per-name failure (cache write error) is an `unreachable` row with the message, never a thrown run", async () => {
     writePackageJson({ react: "19", hono: "4" });
     stubFetch({ [REACT_URL]: "# React", [HONO_URL]: "# Hono" });
