@@ -3,7 +3,8 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
-import { DEFAULT_REGISTRY } from "../src/registry.js";
+import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
+import { listLibrariesText } from "../src/list-libraries.js";
 import { parseDoctorArgs, parseResolveArgs, dispatchCli, RESOLVE_USAGE, type CliIo } from "../src/cli.js";
 
 let dir: string;
@@ -103,7 +104,8 @@ describe("dispatchCli", () => {
     expect(code).toBe(1);
     expect(spy).not.toHaveBeenCalled();
     const report = JSON.parse(a.out.join(""));
-    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total"]);
+    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total", "configIssues"]);
+    expect(report.configIssues).toEqual([]);
     expect(report.schemaVersion).toBe(1);
     expect(report.total).toBe(DEFAULT_REGISTRY.length);
     expect(report.total).toBe(30); // PAR-654: the vibe-coder top-30
@@ -445,13 +447,43 @@ describe("CLI config discovery: no flag needed (PAR-657)", () => {
     expect(names).not.toContain("acme");
   });
 
-  it("exits 2 with one line naming the discovered file when it is invalid", async () => {
+  it("D-19: a broken DISCOVERED file is skipped — doctor still runs, warns once, and is unhealthy", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
     writeFileSync(join(repo, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": [] }] }', "utf8");
     const a = io();
-    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--offline"], a)).toBe(2);
+    // Without the broken file this run is exit 0 (one healthy library); the skipped config
+    // is what makes it 1 — and the run happens at all, which is the point of D-19.
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--library", "react", "--offline"], a)).toBe(1);
     const err = a.err.join("");
-    expect(err).toMatch(/^\.\/vibectx\.config\.json: libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/m);
     expect(err.trim().split("\n")).toHaveLength(1);
+    expect(err).toMatch(
+      /^vibectx: \.\/vibectx\.config\.json: libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs — file skipped, continuing without it$/m,
+    );
+    const out = a.out.join("");
+    expect(out).toMatch(/react\s+full-text/); // the run itself is complete
+    expect(out).toContain(
+      '✗ config ./vibectx.config.json (project): libraries[0].urls ("a"): must be a non-empty array of https URLs — file skipped',
+    );
+  });
+
+  it("D-19: the same failure through an EXPLICIT --config or VIBECTX_CONFIG stays fatal (exit 2)", async () => {
+    const broken = join(dir, "broken.json");
+    writeFileSync(broken, '{ "libraries": [{ "name": "a", "urls": [] }] }', "utf8");
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", broken, "--offline"], a)).toBe(2);
+    process.env.VIBECTX_CONFIG = broken;
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--offline"], a)).toBe(2);
+    expect(a.err.join("").trim().split("\n")).toHaveLength(2);
+    expect(a.err.join("")).not.toContain("file skipped");
+    expect(a.out).toEqual([]);
+  });
+
+  it("D-19: a broken discovered file is named NOT LOADED on the list_libraries header", async () => {
+    writeFileSync(join(repo, "vibectx.config.json"), "{ oops", "utf8");
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home: join(dir, "home") });
+    expect(listLibrariesText(registry, { cwd: repo, home: join(dir, "home") }).split("\n")[0]).toMatch(
+      /^config: \.\/vibectx\.config\.json \(project\) — NOT LOADED: invalid JSON/,
+    );
   });
 
   it("warns once on stderr about the deprecated filename, and still loads it", async () => {

@@ -590,21 +590,82 @@ export interface LoadRegistryOptions {
 export function loadRegistryFrom(resolution: ConfigResolution, opts: LoadRegistryOptions = {}): Registry {
   const cwd = opts.cwd ?? process.cwd();
   const home = opts.home ?? homedir();
-  const entries = new Map<string, LibraryEntry>();
-  for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
-  const configNames = new Set<string>();
-  const fileOf = new Map<string, ConfigSite>();
-  for (const file of resolution.files) {
-    const display = displayPath(file.path, cwd, home);
-    const { libraries } = readConfigFile(file.path, display);
-    applyLayer(entries, normaliseLayer(libraries, display), configNames, fileOf, display);
+  /** D-19: discovered files that failed, by path, with the one-line reason. */
+  const skipped = new Map<string, string>();
+  let entries: Map<string, LibraryEntry>;
+  for (;;) {
+    const active = resolution.files.filter((f) => !skipped.has(f.path));
+    try {
+      entries = buildEntries(active, cwd, home);
+      break;
+    } catch (failure) {
+      // An explicit source (flag or env) that cannot be honoured is fatal — the user asked
+      // for that file by name. A discovered one is dropped and the rest is rebuilt without
+      // it, so an ambient file cannot take the server down for everyone who launches it.
+      if (!(failure instanceof LayerFailure) || failure.file.scope === "flag" || failure.file.scope === "env") {
+        throw failure instanceof LayerFailure ? failure.error : failure;
+      }
+      skipped.set(failure.file.path, failure.reason);
+    }
   }
-  validateAliases(entries, configNames, fileOf);
   if (opts.includeResolved !== false) {
     const taken = curatedKeys(entries);
     for (const r of readResolvedEntries()) if (!isTaken(taken, r.name)) entries.set(r.name, r);
   }
-  return { entries, config: resolution };
+  const files = resolution.files.map((f) => {
+    const display = displayPath(f.path, cwd, home);
+    const error = skipped.get(f.path);
+    return error === undefined ? { ...f, display } : { ...f, display, error };
+  });
+  return { entries, config: { files, notes: resolution.notes } };
+}
+
+/** A config layer that failed, and which file it was — so the caller can decide between
+ *  "fatal" and "skip it and rebuild" (D-19) without re-parsing the message. */
+class LayerFailure extends Error {
+  constructor(
+    readonly file: ConfigFile,
+    readonly error: Error,
+  ) {
+    super(error.message);
+    this.name = "LayerFailure";
+  }
+  /** The message without the file path: what the D-18 header shows after NOT LOADED. */
+  get reason(): string {
+    return this.error instanceof ConfigError ? this.error.detail : this.error.message;
+  }
+}
+
+/**
+ * The shipped defaults with `files` applied over them in order (lowest precedence first).
+ * Throws `LayerFailure` for anything attributable to one config file — including the
+ * cross-layer alias validation, which runs once at the end so that the D-06 alias claims a
+ * later layer makes are already in effect, exactly as when every file loads.
+ */
+function buildEntries(files: readonly ConfigFile[], cwd: string, home: string): Map<string, LibraryEntry> {
+  const entries = new Map<string, LibraryEntry>();
+  for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
+  const configNames = new Set<string>();
+  const fileOf = new Map<string, ConfigSite>();
+  const byDisplay = new Map<string, ConfigFile>();
+  for (const file of files) {
+    const display = displayPath(file.path, cwd, home);
+    byDisplay.set(display, file);
+    try {
+      const { libraries } = readConfigFile(file.path, display);
+      applyLayer(entries, normaliseLayer(libraries, display), configNames, fileOf, display);
+    } catch (e) {
+      throw new LayerFailure(file, e as Error);
+    }
+  }
+  try {
+    validateAliases(entries, configNames, fileOf);
+  } catch (e) {
+    const file = e instanceof ConfigError ? byDisplay.get(e.display) : undefined;
+    if (file === undefined) throw e; // a defaults-only collision is nobody's file
+    throw new LayerFailure(file, e as Error);
+  }
+  return entries;
 }
 
 export interface DiscoveredRegistryOptions {
@@ -632,6 +693,13 @@ export function loadDiscoveredRegistry(opts: DiscoveredRegistryOptions): Registr
     home: opts.home ?? homedir(),
   });
   for (const note of resolution.notes) opts.warn?.(note);
+  // D-19: one line per discovered file that was skipped. Most MCP clients swallow stderr,
+  // which is exactly why the same fact is also on the list_libraries header and in doctor.
+  for (const file of registry.config?.files ?? []) {
+    if (file.error !== undefined) {
+      opts.warn?.(`vibectx: ${file.display ?? file.path}: ${file.error} — file skipped, continuing without it`);
+    }
+  }
   return registry;
 }
 

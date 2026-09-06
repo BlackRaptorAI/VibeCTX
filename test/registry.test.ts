@@ -505,14 +505,20 @@ describe("loadRegistryFrom: layered config, project over user over defaults (D-1
     expect(layered(user, cleared).entries.get("acme")?.aliases).toEqual([]);
   });
 
-  it("names the FILE a semantic failure came from (D-17)", () => {
+  it("names the FILE a semantic failure came from (D-22), and skips only that layer (D-19)", () => {
     const user = layerFile("user.json", [{ name: "mine", urls: [U] }]);
     const project = layerFile("project.json", [{ name: "hono", urls: [U], aliases: ["react"] }]);
-    expect(() => layered(user, project)).toThrow(
-      new RegExp(`${escapeRe(project)}: libraries\\[0\\]\\.aliases \\("hono"\\): alias "react" collides`),
+    const reg = layered(user, project);
+    expect(reg.config?.files.find((f) => f.path === project)?.error).toMatch(
+      /^libraries\[0\]\.aliases \("hono"\): alias "react" collides with the canonical name "react"/,
     );
+    expect(reg.entries.has("mine")).toBe(true); // the user layer below it still loaded
     const badHost = layerFile("bad-host.json", [{ name: "acme", urls: [U], allowedHosts: ["localhost"] }]);
-    expect(() => layered(user, badHost)).toThrow(
+    expect(layered(user, badHost).config?.files.find((f) => f.path === badHost)?.error).toMatch(
+      /^libraries\[0\]\.allowedHosts \("acme"\): "localhost" must have at least two labels/,
+    );
+    // The same failure through an explicit --config is fatal, and the line names the file.
+    expect(() => loadRegistry(badHost)).toThrow(
       new RegExp(`${escapeRe(badHost)}: libraries\\[0\\]\\.allowedHosts \\("acme"\\): "localhost" must have at least two labels`),
     );
   });
@@ -520,7 +526,10 @@ describe("loadRegistryFrom: layered config, project over user over defaults (D-1
   it("carries the resolution on registry.config for the list_libraries header (D-18)", () => {
     const project = layerFile("project.json", [{ name: "acme", urls: [U] }]);
     const resolution = { files: [{ path: project, scope: "project" as const, legacy: false }], notes: ["a note"] };
-    expect(loadRegistryFrom(resolution).config).toEqual(resolution);
+    expect(loadRegistryFrom(resolution).config).toEqual({
+      files: [{ ...resolution.files[0], display: project }], // display: not under cwd or HOME here
+      notes: ["a note"],
+    });
     expect(loadRegistry().config).toEqual({ files: [], notes: [] });
     expect(loadRegistry(project).config?.files[0].scope).toBe("flag");
   });
@@ -580,11 +589,55 @@ describe("loadDiscoveredRegistry: the path index.ts and the CLI use (D-14, PAR-6
     expect(warnings[0]).toMatch(/docs-cache\.config\.json is deprecated/);
   });
 
-  it("reports a bad discovered file as one line naming that file", () => {
+  it("D-19: a bad DISCOVERED project file is skipped — the other layers load, with one warning", () => {
+    at(join(home, ".config", "vibectx", "config.json"), "https://user.example.com/x.txt");
     writeFileSync(join(repo, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
-    expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home })).toThrow(
-      /^\.\/vibectx\.config\.json: libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
+    const warnings: string[] = [];
+    const reg = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: (m) => warnings.push(m) });
+    expect(url(reg)).toBe("https://user.example.com/x.txt"); // the user layer still applied
+    expect(reg.entries.size).toBe(31); // defaults + the user entry
+    expect(warnings).toEqual([
+      'vibectx: ./vibectx.config.json: libraries[0].urls ("a"): must be a non-empty array of https URLs — file skipped, continuing without it',
+    ]);
+    const skipped = reg.config?.files.find((f) => f.scope === "project");
+    expect(skipped?.error).toBe('libraries[0].urls ("a"): must be a non-empty array of https URLs');
+    expect(reg.config?.files.find((f) => f.scope === "user")?.error).toBeUndefined();
+  });
+
+  it("D-19: a bad DISCOVERED user file is skipped too — the project file still decides", () => {
+    writeFileSync(join(home, ".config", "vibectx", "config.json"), "{ oops", "utf8");
+    at(join(repo, "vibectx.config.json"), "https://project.example.com/x.txt");
+    const warnings: string[] = [];
+    const reg = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: (m) => warnings.push(m) });
+    expect(url(reg)).toBe("https://project.example.com/x.txt");
+    expect(warnings.join("")).toMatch(/^vibectx: ~?[^\n]*config\.json: invalid JSON[^\n]* — file skipped, continuing without it$/);
+    expect(reg.config?.files.find((f) => f.scope === "user")?.error).toMatch(/^invalid JSON/);
+  });
+
+  it("D-19: a semantic failure in a discovered file skips that file, and the layers below still load", () => {
+    at(join(home, ".config", "vibectx", "config.json"), "https://user.example.com/x.txt");
+    writeFileSync(
+      join(repo, "vibectx.config.json"),
+      JSON.stringify({ libraries: [{ name: "mine", urls: ["https://mine.example.com/x.txt"], aliases: ["react"] }] }),
+      "utf8",
     );
+    const reg = loadDiscoveredRegistry({ cwd: repo, env: {}, home });
+    expect(url(reg)).toBe("https://user.example.com/x.txt");
+    expect(reg.entries.has("mine")).toBe(false); // the whole file is skipped, not one entry
+    expect(resolveLibrary(reg, "react")?.name).toBe("react"); // the default keeps its name
+    expect(reg.config?.files.find((f) => f.scope === "project")?.error).toMatch(/^libraries\[0\]\.aliases \("mine"\): alias "react" collides/);
+  });
+
+  it("D-19: an EXPLICIT source that cannot be honoured stays fatal (flag and env alike)", () => {
+    const broken = join(dir, "broken.json");
+    writeFileSync(broken, '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
+    expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home, flag: broken })).toThrow(
+      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
+    );
+    expect(() => loadDiscoveredRegistry({ cwd: repo, env: { VIBECTX_CONFIG: broken }, home })).toThrow(
+      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
+    );
+    expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home, flag: join(dir, "nope.json") })).toThrow(/nope\.json: not found$/);
   });
 });
 

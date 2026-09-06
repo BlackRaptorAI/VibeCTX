@@ -445,7 +445,7 @@ describe("report shape, table and exit code", () => {
 
   it("emits the documented JSON shape with stable keys", async () => {
     const report = JSON.parse(JSON.stringify(await mixedReport()));
-    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total"]);
+    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total", "configIssues"]);
     expect(report.schemaVersion).toBe(1);
     expect(Number.isNaN(Date.parse(report.generatedAt))).toBe(false);
     for (const lib of report.libraries) {
@@ -485,6 +485,20 @@ describe("report shape, table and exit code", () => {
     const report = await mixedReport();
     expect(doctorExitCode(report)).toBe(1);
     expect(doctorExitCode({ ...report, libraries: report.libraries.filter((l) => l.healthy), healthy: 1, total: 1 })).toBe(0);
+  });
+
+  it("D-19: a skipped discovered config file is unhealthy on its own — exit 1 and a reason line", async () => {
+    const report = await mixedReport();
+    const healthy = { ...report, libraries: report.libraries.filter((l) => l.healthy), healthy: 1, total: 1 };
+    expect(doctorExitCode(healthy)).toBe(0);
+    const withIssue = {
+      ...healthy,
+      configIssues: [{ path: "./vibectx.config.json", scope: "project" as const, reason: "invalid JSON at line 3 column 5" }],
+    };
+    expect(doctorExitCode(withIssue)).toBe(1);
+    expect(formatDoctorTable(withIssue)).toContain(
+      "✗ config ./vibectx.config.json (project): invalid JSON at line 3 column 5 — file skipped",
+    );
   });
 });
 

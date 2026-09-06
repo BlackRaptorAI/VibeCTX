@@ -1,4 +1,5 @@
 import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import type { ConfigScope } from "./config.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
@@ -57,12 +58,24 @@ export interface LibraryReport {
  *  appended without a bump; consumers read keys by name. */
 export const DOCTOR_SCHEMA_VERSION = 1;
 
+/** A discovered config file the loader skipped (D-19). Not a library problem, but a
+ *  configuration one the user must see: the entries in that file are NOT in this report. */
+export interface ConfigIssue {
+  /** The file as the loader named it (cwd-relative, `~/…`, else absolute). */
+  path: string;
+  scope: ConfigScope;
+  /** One line: why it was skipped. */
+  reason: string;
+}
+
 export interface DoctorReport {
   schemaVersion: typeof DOCTOR_SCHEMA_VERSION;
   generatedAt: string;
   libraries: LibraryReport[];
   healthy: number;
   total: number;
+  /** Appended in 0.2.0 (PAR-657); absent on a report built before it. */
+  configIssues?: ConfigIssue[];
 }
 
 export interface DoctorOptions {
@@ -223,6 +236,7 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
     libraries,
     healthy: libraries.filter((l) => l.healthy).length,
     total: libraries.length,
+    configIssues: configIssues(registry),
   };
 }
 
@@ -233,9 +247,20 @@ export async function doctorToolText(registry: Registry, library?: string): Prom
   return formatDoctorTable(await runDoctor(registry, { library }));
 }
 
-/** 0 when every checked library is healthy, else 1. */
+/** The discovered config files the loader skipped (D-19), in precedence order. */
+function configIssues(registry: Registry): ConfigIssue[] {
+  const issues: ConfigIssue[] = [];
+  for (const file of registry.config?.files ?? []) {
+    if (file.error !== undefined) issues.push({ path: file.display ?? file.path, scope: file.scope, reason: file.error });
+  }
+  return issues;
+}
+
+/** 0 when every checked library is healthy AND every discovered config file loaded, else 1.
+ *  A skipped config file (D-19) is a health problem in its own right: the libraries it
+ *  pins are simply missing, so every row can be green while the answer is wrong. */
 export function doctorExitCode(report: DoctorReport): 0 | 1 {
-  return report.healthy === report.total ? 0 : 1;
+  return report.healthy === report.total && (report.configIssues?.length ?? 0) === 0 ? 0 : 1;
 }
 
 function describeProbes(probes: ProbeResult[]): string {
@@ -279,6 +304,9 @@ export function formatDoctorTable(report: DoctorReport): string {
   ];
   for (const lib of report.libraries) {
     if (!lib.healthy) lines.push(`✗ ${lib.library}: ${lib.reasons.join("; ")}`);
+  }
+  for (const issue of report.configIssues ?? []) {
+    lines.push(`✗ config ${issue.path} (${issue.scope}): ${issue.reason} — file skipped`);
   }
   return lines.join("\n");
 }

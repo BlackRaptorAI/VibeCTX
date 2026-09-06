@@ -435,6 +435,17 @@ describe("describeConfig: the list_libraries header (D-18)", () => {
     expect(lines({ cwd: join(repo, "src") })[0]).toBe(`config: ${join(repo, CONFIG_FILENAME)} (project)`);
   });
 
+  it("D-19: shows a discovered file that could not be loaded as NOT LOADED, with the reason", () => {
+    const project = write(repo, CONFIG_FILENAME, CONFIG("x", "https://p.example.com/llms.txt"));
+    const resolution = {
+      files: [{ path: project, scope: "project" as const, legacy: false, error: "invalid JSON at line 3 column 5" }],
+      notes: [],
+    };
+    expect(describeConfig(resolution, { cwd: repo, home })).toEqual([
+      "config: ./vibectx.config.json (project) — NOT LOADED: invalid JSON at line 3 column 5",
+    ]);
+  });
+
   it("puts the deprecation and ignored-file notes on the following lines", () => {
     write(repo, LEGACY_CONFIG_FILENAME, CONFIG("x", "https://p.example.com/llms.txt"));
     const out = lines();

@@ -42,6 +42,12 @@ export interface ConfigFile {
   scope: ConfigScope;
   /** True when this is the deprecated `docs-cache.config.json` name. */
   legacy: boolean;
+  /** D-19: set by the loader when a DISCOVERED file failed and was skipped — the reason,
+   *  one line, without the path (the header and the warning add it). Never set for an
+   *  explicit source: a `--config` or `VIBECTX_CONFIG` that cannot be honoured is fatal. */
+  error?: string;
+  /** How the loader named this file in its messages (cwd-relative, `~/…`, else absolute). */
+  display?: string;
 }
 
 export interface ConfigResolution {
@@ -197,7 +203,9 @@ export function describeConfig(resolution: ConfigResolution, opts: { cwd: string
     const shown = displayPath(f.path, opts.cwd, opts.home);
     if (f.scope === "flag") return `--config ${shown}`;
     if (f.scope === "env") return `${CONFIG_ENV}=${shown}`;
-    return `${shown} (${f.scope})`;
+    // D-19: a discovered file that failed is still named — silence would leave the reader
+    // believing their committed config is in force.
+    return `${shown} (${f.scope})${f.error === undefined ? "" : ` — NOT LOADED: ${f.error}`}`;
   });
   const header = parts.length === 0 ? "config: none (shipped defaults)" : `config: ${parts.join(" · ")}`;
   return [header, ...resolution.notes].map(cleanText);
