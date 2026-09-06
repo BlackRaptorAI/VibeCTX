@@ -95,7 +95,7 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<s
   }
   if (tooLarge.length) {
     notes.push(
-      `Skipped ${tooLarge.length} index links larger than ${LINKED_PAGE_MAX_BYTES / (1024 * 1024)} MB: ${tooLarge.join(", ")}`,
+      `Skipped ${tooLarge.length} index links larger than ${LINKED_PAGE_MAX_BYTES / (1024 * 1024)} MiB: ${tooLarge.join(", ")}`,
     );
   }
   if (failed.length) notes.push(`Could not fetch ${failed.length} index links: ${failed.join(", ")}`);

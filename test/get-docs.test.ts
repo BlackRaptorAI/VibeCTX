@@ -144,7 +144,7 @@ describe("getDocs index following", () => {
       ),
     );
     const out = await getDocs(entry, { topic: "request" });
-    expect(out).toContain("Skipped 1 index links larger than 2 MB: https://fastify.dev/docs/Request.md");
+    expect(out).toContain("Skipped 1 index links larger than 2 MiB: https://fastify.dev/docs/Request.md");
   });
 
   it("keeps the no-match response for a topic nothing in the index mentions", async () => {

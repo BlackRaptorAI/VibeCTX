@@ -175,6 +175,34 @@ describe("extractLinks", () => {
     expect(elapsed).toBeLessThan(100);
   });
 
+  it("does not backtrack quadratically on an unterminated-href run '[a](' (security)", () => {
+    // 200 KB on a single line: one line is enough to reach looksLikeIndex's sample window.
+    const hostile = "[a](".repeat(50_000);
+    expect(hostile.length).toBe(200_000);
+
+    let t0 = performance.now();
+    const links = extractLinks(hostile, source);
+    const extractMs = performance.now() - t0;
+
+    t0 = performance.now();
+    const isIndex = looksLikeIndex(hostile);
+    const indexMs = performance.now() - t0;
+
+    expect(links).toEqual([]);
+    expect(isIndex).toBe(false);
+    expect(extractMs).toBeLessThan(100);
+    expect(indexMs).toBeLessThan(100);
+  });
+
+  it("skips hrefs containing parens or brackets and keeps the neighbours", () => {
+    // Such hrefs were already truncated at the first ')' before; now they are skipped whole.
+    const links = extractLinks("[Req](/docs/Request.md) [Odd](/docs/a(b).md) [Br](/docs/x[1].md) [Reply](/docs/Reply.md)", source);
+    expect(links.map((l) => l.url)).toEqual([
+      "https://fastify.dev/docs/Request.md",
+      "https://fastify.dev/docs/Reply.md",
+    ]);
+  });
+
   it("recovers the right title after a stray unmatched '[' earlier on the line", () => {
     const links = extractLinks("[ oops [Request](/docs/Request.md)", source);
     expect(links).toEqual([{ title: "Request", url: "https://fastify.dev/docs/Request.md" }]);

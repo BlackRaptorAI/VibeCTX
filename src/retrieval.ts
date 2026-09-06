@@ -74,9 +74,11 @@ export function assemble(sections: Section[], maxTokens: number): string {
 }
 
 /** Non-image markdown link `[title](href)`; href may be absolute or relative.
- *  The title class excludes `[` as well as `]` so a run of unmatched `[` cannot
- *  be re-scanned from every position (quadratic backtracking on hostile input). */
-const LINK_RE = /(?<!!)\[([^\[\]]+)\]\(([^)\s]+)\)/g;
+ *  Both classes exclude the delimiters `[`, `]`, `(`, `)` (and the href class
+ *  whitespace) so a run of unmatched openers — `[[[[` or `[a]([a]([a](` — cannot
+ *  be re-scanned from every position (quadratic backtracking on hostile input).
+ *  Cost: an href containing `(`, `[` or `]` is skipped; it was truncated before. */
+const LINK_RE = /(?<!!)\[([^\[\]]+)\]\(([^()\[\]\s]+)\)/g;
 
 /** A followable href: anything except a same-document anchor. */
 function isFollowableHref(href: string): boolean {
