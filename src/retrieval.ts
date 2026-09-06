@@ -478,8 +478,15 @@ function longestBacktickRun(code: string): number {
  * already strips fence characters, so its run is 0 today — but the width is computed
  * over everything the block renders, so neither route can widen the opener alone.
  *
- * This is what makes the rendered block well-formed markdown for ANY code content, which
- * is a test (`snippet rendering is inescapable and bounded`), not a claim in a comment.
+ * This is what makes the rendered block well-formed markdown for ANY code content AND
+ * ANY info string, which is a test (`snippet rendering is inescapable and bounded`), not
+ * a claim in a comment.
+ *
+ * One residual remains, and it is a deliberate ordering rather than a hole: the final
+ * `slice(0, budget)` in `clipSnippet` can cut mid-fence when the budget is smaller than
+ * the block's own overhead. There the CAP wins over well-formedness — already documented
+ * on `clipSnippet` and pinned by `(D-29) prefers the cap over a closed fence when the
+ * budget cannot hold the header`. Nothing else in the render path can leave a block open.
  */
 function fenceFor(code: string, lang: string): string {
   const run = Math.max(longestBacktickRun(code), longestBacktickRun(lang));
