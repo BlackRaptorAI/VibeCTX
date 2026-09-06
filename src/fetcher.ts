@@ -1,5 +1,8 @@
 import type { LibraryEntry } from "./registry.js";
 import { readCache, writeCache, touchCache } from "./cache.js";
+import { isAllowedLink, type LinkPolicy } from "./link-policy.js";
+
+export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 
 export interface DocResult {
   content: string;
@@ -16,20 +19,21 @@ export const PRIMARY_DOC_MAX_BYTES = 25 * 1024 * 1024;
 /** Largest single followed index page we will download. */
 export const LINKED_PAGE_MAX_BYTES = 2 * 1024 * 1024;
 
-interface FetchOutcome {
-  /** `refused`: the response's final URL (after redirects) left the allowed origin
-   *  or was not https — body never read. `too-large`: exceeded `maxBytes`. */
+export interface FetchOutcome {
+  /** `refused`: the response's final URL (after redirects) failed the link policy
+   *  (left the allowed hosts or was not https) — body never read. `too-large`: exceeded `maxBytes`. */
   status: "ok" | "not-modified" | "miss" | "refused" | "too-large";
   body?: string;
   etag?: string;
 }
 
-interface FetchOptions {
+export interface FetchOptions {
   etag?: string;
   /** Hard cap on the downloaded body; enforced via Content-Length and while streaming. */
   maxBytes: number;
-  /** When set, the response's final URL must be https on exactly this origin. */
-  allowedOrigin?: string;
+  /** When set, the response's final URL must pass `isAllowedLink` against this source
+   *  document and policy — the same function the pre-fetch guard applied to the link. */
+  linkGuard?: { sourceUrl: string; policy?: LinkPolicy };
 }
 
 /** Read a body up to `maxBytes`; `undefined` once the cap is exceeded (the stream
@@ -61,7 +65,10 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string |
   return new TextDecoder().decode(joined);
 }
 
-async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> {
+/** One capped, timed-out GET. Exported for the resolver's registry-metadata lookups
+ *  (which need the same byte cap and HTML-as-200 detection); everything else goes
+ *  through getLibraryDoc / fetchLinkedPage. */
+export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> {
   try {
     const headers: Record<string, string> = {
       "user-agent":
@@ -73,11 +80,10 @@ async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> 
       redirect: "follow",
       signal: AbortSignal.timeout(20_000),
     });
-    if (opts.allowedOrigin !== undefined) {
+    if (opts.linkGuard !== undefined) {
       // The pre-fetch guard saw the link URL; redirects can move it. Re-check
-      // where the chain actually ended before touching the body.
-      const final = new URL(res.url || url);
-      if (final.protocol !== "https:" || final.origin !== opts.allowedOrigin) {
+      // where the chain actually ended — with the SAME policy — before touching the body.
+      if (!isAllowedLink(res.url || url, opts.linkGuard.sourceUrl, opts.linkGuard.policy)) {
         await res.body?.cancel();
         return { status: "refused" };
       }
@@ -159,24 +165,9 @@ export async function getLibraryDoc(
   return undefined;
 }
 
-/**
- * Guard for followed index links: https-only, and confined to the origin of
- * the source document. Content-derived URLs are untrusted input — without
- * this, a compromised docs page could steer fetches at internal endpoints.
- */
-export function isAllowedLink(linkUrl: string, sourceUrl: string): boolean {
-  try {
-    const link = new URL(linkUrl);
-    const source = new URL(sourceUrl);
-    return link.protocol === "https:" && link.origin === source.origin;
-  } catch {
-    return false;
-  }
-}
-
 export type LinkedPageResult =
   | { status: "ok"; page: DocResult }
-  /** Guard refusal: link outside the source origin, before or after redirects. */
+  /** Guard refusal: link outside the allowed hosts (see link-policy.ts), before or after redirects. */
   | { status: "refused" }
   /** Response exceeded LINKED_PAGE_MAX_BYTES; nothing cached. */
   | { status: "too-large" }
@@ -184,18 +175,20 @@ export type LinkedPageResult =
   | { status: "unavailable" };
 
 /** Fetch a single linked page (for llms.txt index files), cache-backed with the
- *  same revalidation policy. Refuses links outside the source document's origin
- *  both before the fetch and after redirects; refused responses are never read or cached.
- *  With `offline`, the network is never attempted: cached pages (fresh or stale) are
- *  served and anything else is `unavailable`. */
+ *  same revalidation policy. Refuses links the allowed-host policy rejects (the source
+ *  document's host plus `policy.allowedHosts`; https only) both before the fetch and
+ *  after redirects; refused responses are never read or cached. Without a policy this
+ *  is the 0.1.3 same-origin rule. With `offline`, the network is never attempted: cached
+ *  pages (fresh or stale) are served and anything else is `unavailable`. */
 export async function fetchLinkedPage(
   library: string,
   url: string,
   sourceUrl: string,
   ttlHours = DEFAULT_TTL_HOURS,
   offline = false,
+  policy?: LinkPolicy,
 ): Promise<LinkedPageResult> {
-  if (!isAllowedLink(url, sourceUrl)) return { status: "refused" };
+  if (!isAllowedLink(url, sourceUrl, policy)) return { status: "refused" };
   const hit = readCache(library, url, ttlHours);
   if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url } };
   if (offline) {
@@ -208,7 +201,7 @@ export async function fetchLinkedPage(
   const out = await fetchUrl(url, {
     etag: hit?.meta.etag,
     maxBytes: LINKED_PAGE_MAX_BYTES,
-    allowedOrigin: new URL(sourceUrl).origin,
+    linkGuard: { sourceUrl, policy },
   });
   if (out.status === "refused") return { status: "refused" };
   if (out.status === "too-large") return { status: "too-large" };

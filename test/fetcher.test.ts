@@ -73,6 +73,13 @@ describe("isAllowedLink (SSRF guard)", () => {
   it("rejects unparseable urls", () => {
     expect(isAllowedLink("not a url", source)).toBe(false);
   });
+
+  it("rejects userinfo, IPv6 literals and single-label hosts even when passed as the source (PAR-655 additions)", () => {
+    expect(isAllowedLink("https://u:p@docs.example.com/x", source)).toBe(false);
+    expect(isAllowedLink("https://[::1]/x", source)).toBe(false);
+    expect(isAllowedLink("https://[::1]/x", "https://[::1]/llms.txt")).toBe(false);
+    expect(isAllowedLink("https://intranet/x", "https://intranet/llms.txt")).toBe(false);
+  });
 });
 
 describe("getLinkedPage origin enforcement", () => {
@@ -133,6 +140,72 @@ describe("fetchLinkedPage redirect enforcement (SSRF guard, post-redirect)", () 
     );
     const doc = await getLibraryDoc({ name: "anthropic", urls: ["https://docs.anthropic.com/llms.txt"] });
     expect(doc?.content).toBe("# Claude docs");
+  });
+});
+
+describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const policy = { allowedHosts: ["api.example.com", "*.example.org"] };
+
+  it("fetches a link on an allowed host that the same-origin rule would have refused", async () => {
+    const link = "https://api.example.com/v1.md";
+    const spy = vi.fn(async () => responseAt(link, "# API v1"));
+    vi.stubGlobal("fetch", spy);
+    expect(await fetchLinkedPage("lib", link, source)).toEqual({ status: "refused" }); // no policy → 0.1.3 behaviour
+    expect(spy).not.toHaveBeenCalled();
+    const result = await fetchLinkedPage("lib", link, source, 168, false, policy);
+    expect(result).toEqual({ status: "ok", page: { content: "# API v1", url: link } });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses hosts outside the policy, IP literals and http, without fetching", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    for (const bad of [
+      "https://evil.example.net/x.md",
+      "https://example.org/x.md", // apex is not covered by *.example.org
+      "https://169.254.169.254/latest/meta-data",
+      "http://api.example.com/v1.md",
+      "https://api.example.com:8443/v1.md",
+    ]) {
+      expect(await fetchLinkedPage("lib", bad, source, 168, false, policy), bad).toEqual({ status: "refused" });
+    }
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("post-redirect: a followed link that 302s to an allowed host passes and is cached under the link URL", async () => {
+    const link = "https://docs.example.com/guide.md";
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://sub.example.org/guide.md", "# Moved to sub")));
+    const result = await fetchLinkedPage("lib", link, source, 168, false, policy);
+    expect(result).toEqual({ status: "ok", page: { content: "# Moved to sub", url: link } });
+    expect(readCache("lib", link, 999)?.content).toBe("# Moved to sub");
+  });
+
+  it("post-redirect: a followed link that 302s to a host outside the policy is refused and never cached", async () => {
+    const link = "https://docs.example.com/guide.md";
+    for (const escaped of [
+      "https://evil.example.net/guide.md",
+      "https://example.org/guide.md",
+      "https://169.254.169.254/latest/meta-data",
+      "https://localhost/admin",
+      "http://api.example.com/guide.md",
+      "https://api.example.com:8443/guide.md",
+      "https://u:p@api.example.com/guide.md",
+    ]) {
+      vi.stubGlobal("fetch", vi.fn(async () => responseAt(escaped, "SECRET")));
+      expect(await fetchLinkedPage("lib", link, source, 168, false, policy), escaped).toEqual({ status: "refused" });
+      expect(readCache("lib", link, 999), escaped).toBeUndefined();
+    }
+  });
+
+  it("the post-redirect check and the pre-check are the same function (a policy the pre-check rejects is rejected after redirect too)", async () => {
+    // A malformed policy entry never matches, before or after the redirect.
+    const broken = { allowedHosts: ["https://api.example.com"] };
+    const link = "https://docs.example.com/guide.md";
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://api.example.com/guide.md", "SECRET")));
+    expect(await fetchLinkedPage("lib", "https://api.example.com/guide.md", source, 168, false, broken)).toEqual({ status: "refused" });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, broken)).toEqual({ status: "refused" });
+    expect(readCache("lib", link, 999)).toBeUndefined();
   });
 });
 
