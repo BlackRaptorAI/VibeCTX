@@ -192,6 +192,63 @@ describe("response byte caps", () => {
   });
 });
 
+describe("offline option (cache-only; PAR-707 doctor --offline)", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const link = "https://docs.example.com/guide.md";
+
+  it("getLibraryDoc serves a fresh cache hit and never calls fetch", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    writeCache("off-lib", source, "# Cached");
+    const doc = await getLibraryDoc({ name: "off-lib", urls: [source] }, { offline: true });
+    expect(doc).toEqual({ content: "# Cached", url: source });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("getLibraryDoc serves a stale cache hit flagged as offline, without calling fetch", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    writeCache("off-lib", source, "# Old");
+    const doc = await getLibraryDoc({ name: "off-lib", urls: [source], ttlHours: 0 }, { offline: true });
+    expect(doc?.content).toBe("# Old");
+    expect(doc?.staleNote).toMatch(/^STALE: .*offline/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("getLibraryDoc returns undefined when nothing is cached, without calling fetch", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const doc = await getLibraryDoc({ name: "off-lib", urls: [source, link] }, { offline: true });
+    expect(doc).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("fetchLinkedPage serves cached pages (fresh or stale) and reports the rest unavailable, never fetching", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    writeCache("off-lib", link, "# Guide");
+    expect(await fetchLinkedPage("off-lib", link, source, 168, true)).toEqual({
+      status: "ok",
+      page: { content: "# Guide", url: link },
+    });
+    const stale = await fetchLinkedPage("off-lib", link, source, 0, true);
+    expect(stale.status).toBe("ok");
+    if (stale.status === "ok") expect(stale.page.staleNote).toMatch(/^STALE:/);
+    expect(await fetchLinkedPage("off-lib", "https://docs.example.com/other.md", source, 168, true)).toEqual({
+      status: "unavailable",
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("fetchLinkedPage still refuses cross-origin links offline (guard runs before the cache)", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("off-lib", "https://evil.example.net/x.md", source, 168, true);
+    expect(result).toEqual({ status: "refused" });
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe("etag revalidation", () => {
   const entry = {
     name: "revalidate-lib",

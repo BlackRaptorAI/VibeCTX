@@ -113,7 +113,7 @@ async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> 
  */
 export async function getLibraryDoc(
   entry: LibraryEntry,
-  opts: { forceRefresh?: boolean } = {},
+  opts: { forceRefresh?: boolean; /** Cache-only: the network is never attempted. */ offline?: boolean } = {},
 ): Promise<DocResult | undefined> {
   const ttl = entry.ttlHours ?? DEFAULT_TTL_HOURS;
 
@@ -126,29 +126,33 @@ export async function getLibraryDoc(
 
   // Cache miss, stale, or forced: try the network in candidate order,
   // revalidating against any cached etag first.
-  for (const url of entry.urls) {
-    const cached = readCache(entry.name, url, ttl);
-    // No origin pin here: primary URLs legitimately redirect across hosts
-    // (docs.anthropic.com → platform.claude.com); they are operator-configured, not content-derived.
-    const out = await fetchUrl(url, { etag: cached?.meta.etag, maxBytes: PRIMARY_DOC_MAX_BYTES });
-    if (out.status === "not-modified" && cached) {
-      touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
-      return { content: cached.content, url };
-    }
-    if (out.status === "ok" && out.body !== undefined) {
-      writeCache(entry.name, url, out.body, out.etag);
-      return { content: out.body, url };
+  if (!opts.offline) {
+    for (const url of entry.urls) {
+      const cached = readCache(entry.name, url, ttl);
+      // No origin pin here: primary URLs legitimately redirect across hosts
+      // (docs.anthropic.com → platform.claude.com); they are operator-configured, not content-derived.
+      const out = await fetchUrl(url, { etag: cached?.meta.etag, maxBytes: PRIMARY_DOC_MAX_BYTES });
+      if (out.status === "not-modified" && cached) {
+        touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
+        return { content: cached.content, url };
+      }
+      if (out.status === "ok" && out.body !== undefined) {
+        writeCache(entry.name, url, out.body, out.etag);
+        return { content: out.body, url };
+      }
     }
   }
 
-  // Network failed everywhere: serve stale cache if any candidate has one.
+  // Network failed everywhere (or offline): serve stale cache if any candidate has one.
   for (const url of entry.urls) {
     const hit = readCache(entry.name, url, ttl);
     if (hit) {
       return {
         content: hit.content,
         url,
-        staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}; all candidate URLs unreachable just now.`,
+        staleNote: opts.offline
+          ? `STALE: served from cache fetched ${hit.meta.fetchedAt}; offline mode, network not attempted.`
+          : `STALE: served from cache fetched ${hit.meta.fetchedAt}; all candidate URLs unreachable just now.`,
       };
     }
   }
@@ -181,16 +185,26 @@ export type LinkedPageResult =
 
 /** Fetch a single linked page (for llms.txt index files), cache-backed with the
  *  same revalidation policy. Refuses links outside the source document's origin
- *  both before the fetch and after redirects; refused responses are never read or cached. */
+ *  both before the fetch and after redirects; refused responses are never read or cached.
+ *  With `offline`, the network is never attempted: cached pages (fresh or stale) are
+ *  served and anything else is `unavailable`. */
 export async function fetchLinkedPage(
   library: string,
   url: string,
   sourceUrl: string,
   ttlHours = DEFAULT_TTL_HOURS,
+  offline = false,
 ): Promise<LinkedPageResult> {
   if (!isAllowedLink(url, sourceUrl)) return { status: "refused" };
   const hit = readCache(library, url, ttlHours);
   if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url } };
+  if (offline) {
+    if (!hit) return { status: "unavailable" };
+    return {
+      status: "ok",
+      page: { content: hit.content, url, staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.` },
+    };
+  }
   const out = await fetchUrl(url, {
     etag: hit?.meta.etag,
     maxBytes: LINKED_PAGE_MAX_BYTES,
