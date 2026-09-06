@@ -21,6 +21,7 @@ import {
   MAX_FOLLOWED_BYTES,
   type SplitSection,
 } from "./retrieval.js";
+import { indexCachedDocument } from "./search-index.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
  *  the runnable code blocks inside them. */
@@ -128,6 +129,12 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     };
   }
   const source = { url: doc.url, stale: doc.staleNote !== undefined };
+  // D-34 (PAR-659): every writer of a PRIMARY cached document keeps the cross-library search
+  // index current — a document get_docs just fetched is one `search` would otherwise have to
+  // tokenize on its own. Only the primary document: followed index pages are per-query and
+  // would make the index unbounded. Memoized by content hash inside the hook, so the ordinary
+  // cache-hit call does no file work at all, and best effort throughout (D-13).
+  indexCachedDocument(entry.name, doc.url, doc.content);
   const isIndex = looksLikeIndex(doc.content);
   const budget = args.maxTokens ?? DEFAULT_BUDGET_TOKENS;
   const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";

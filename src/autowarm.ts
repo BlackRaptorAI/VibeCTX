@@ -2,6 +2,7 @@ import type { LibraryEntry, Registry } from "./registry.js";
 import { getLibraryDoc, type DocResult } from "./fetcher.js";
 import { readCache } from "./cache.js";
 import { mapLimit } from "./doctor.js";
+import { indexCachedDocument } from "./search-index.js";
 
 /**
  * Startup revalidation for the long-lived MCP server (PAR-656, from the PAR-653 comment:
@@ -109,6 +110,11 @@ export async function startAutowarm(
       inFlight.add(entry.name);
       try {
         const doc = await fetchDoc(entry);
+        // D-34 (PAR-659): the startup autowarm leaves a usable cross-library search index
+        // behind, so the first `search` of a session is the fast path. Only the PRIMARY
+        // document, and best effort — the index is derived, so a failure here changes nothing
+        // about the warm (D-13).
+        if (doc) indexCachedDocument(entry.name, doc.url, doc.content, undefined, warn);
         if (doc && !doc.staleNote) summary.cached += 1;
         else summary.failed.push(entry.name);
       } catch (e) {

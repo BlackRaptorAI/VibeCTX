@@ -3,8 +3,9 @@ import { basename, dirname, join, resolve, sep } from "node:path";
 import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
 import { getLibraryDoc } from "./fetcher.js";
-import { readCache, cacheRoot } from "./cache.js";
+import { readCache, cacheRoot, type CacheHit } from "./cache.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
+import { indexCachedDocument } from "./search-index.js";
 import { mapLimit } from "./doctor.js";
 import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
 import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, PROJECT_RECORD_SCHEMA_VERSION, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
@@ -121,17 +122,32 @@ function errorMessage(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** First fresh cached candidate, else the first stale one, for an entry — without touching the network. */
-function cachedState(entry: LibraryEntry): { freshUrl?: string; stale?: { url: string; fetchedAt: string } } {
+/** First fresh cached candidate, else the first stale one, for an entry — without touching the
+ *  network. The HIT is carried out with it (PAR-659): warm is the one place that has both the
+ *  document text and its cache meta in hand, so it is where the search index is kept current
+ *  without a second read. */
+function cachedState(entry: LibraryEntry): { fresh?: { url: string; hit: CacheHit }; stale?: { url: string; hit: CacheHit } } {
   const ttl = entry.ttlHours ?? DEFAULT_TTL_HOURS;
-  let stale: { url: string; fetchedAt: string } | undefined;
+  let stale: { url: string; hit: CacheHit } | undefined;
   for (const url of entry.urls) {
     const hit = readCache(entry.name, url, ttl);
     if (!hit) continue;
-    if (!hit.stale) return { freshUrl: url };
-    stale ??= { url, fetchedAt: hit.meta.fetchedAt };
+    if (!hit.stale) return { fresh: { url, hit } };
+    stale ??= { url, hit };
   }
   return { stale };
+}
+
+/**
+ * D-34 (PAR-659): keep the cross-library search index current for the document this run put
+ * (or found) in the cache, so `warm` leaves a USABLE index behind and the first `search` after
+ * it is the fast path rather than a full re-tokenization of the whole stack.
+ *
+ * Only the PRIMARY document, never a followed index page. Best effort throughout: the index is
+ * a derived cache, so a failure here changes the warm row not at all (D-13).
+ */
+function indexWarmed(entry: LibraryEntry, url: string, content: string, fetchedAt?: string, warn?: (m: string) => void): void {
+  indexCachedDocument(entry.name, url, content, fetchedAt, warn ?? ((m) => process.stderr.write(m)));
 }
 
 type Outcome = Pick<WarmRow, "status" | "url" | "note">;
@@ -161,18 +177,23 @@ function ecosystemNote(entry: LibraryEntry, dep: ProjectDependency): string | un
 
 /** Warm one registry entry: fresh cache → no network; else getLibraryDoc (etag-first). */
 async function warmEntry(entry: LibraryEntry, opts: WarmOptions): Promise<Outcome> {
-  const { freshUrl, stale } = cachedState(entry);
-  if (freshUrl) return { status: "already fresh", url: freshUrl };
+  const { fresh, stale } = cachedState(entry);
+  if (fresh) {
+    indexWarmed(entry, fresh.url, fresh.hit.content, fresh.hit.meta.fetchedAt, opts.warn);
+    return { status: "already fresh", url: fresh.url };
+  }
   if (opts.offline) {
-    return stale
-      ? { status: "cached", url: stale.url, note: `stale copy from ${stale.fetchedAt}; offline` }
-      : { status: "unreachable", note: "not cached; offline" };
+    if (!stale) return { status: "unreachable", note: "not cached; offline" };
+    indexWarmed(entry, stale.url, stale.hit.content, stale.hit.meta.fetchedAt, opts.warn);
+    return { status: "cached", url: stale.url, note: `stale copy from ${stale.hit.meta.fetchedAt}; offline` };
   }
   const doc = await getLibraryDoc(entry);
   if (!doc) return { status: "unreachable", note: "all candidate URLs unreachable" };
   if (doc.staleNote) {
-    return { status: "unreachable", url: doc.url, note: `stale copy from ${stale?.fetchedAt ?? "earlier"} kept; all candidate URLs unreachable just now` };
+    indexWarmed(entry, doc.url, doc.content, stale?.hit.meta.fetchedAt, opts.warn);
+    return { status: "unreachable", url: doc.url, note: `stale copy from ${stale?.hit.meta.fetchedAt ?? "earlier"} kept; all candidate URLs unreachable just now` };
   }
+  indexWarmed(entry, doc.url, doc.content, undefined, opts.warn);
   return { status: "cached", url: doc.url };
 }
 

@@ -5,12 +5,14 @@ import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { refreshToolText } from "../src/refresh.js";
+import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 
 let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-refresh-"));
   process.env.DOCS_CACHE_DIR = dir;
+  resetSearchIndexMemo();
 });
 
 afterEach(() => {
@@ -94,6 +96,37 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     const out = await refreshToolText(reg, "hono");
     expect(out).toMatch(/^hono: FAILED — Could not resolve "hono": npm: no metadata/);
     expect(reg.entries.get("hono")).toBe(resolvedHono);
+  });
+
+  /**
+   * PAR-659 · D-34 — the done-when case: `refresh` invalidates that library's search-index
+   * entry. Both halves are pinned, because only the pair is safe: a SUCCESSFUL refresh leaves
+   * the entry rebuilt against the new text, and a FAILED one leaves it gone rather than
+   * describing a document the cache no longer matches.
+   */
+  it("PAR-659 D-34: refresh invalidates the library's search-index entry and rebuilds it from the refreshed text", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    indexCachedDocument("react", REACT_URL, "# React old", "2026-09-06T00:00:00.000Z");
+    indexCachedDocument("hono", HONO_URL, "# Hono", "2026-09-06T00:00:00.000Z");
+    expect(readIndex().libraries.get("react")!.hash).toBe(documentHash("# React old"));
+
+    stubFetch({ [REACT_URL]: "# React new" });
+    await refreshToolText(registry, "reactjs");
+
+    const after = readIndex().libraries;
+    expect(after.get("react")!.hash).toBe(documentHash("# React new")); // rebuilt, not stale
+    expect(after.get("hono")!.hash).toBe(documentHash("# Hono")); // every other library untouched
+  });
+
+  it("PAR-659 D-34: a refresh that FAILS leaves the entry invalidated rather than stale", async () => {
+    // An index entry left over from an earlier session whose cached document is gone: exactly
+    // the state that must not survive a failed refresh.
+    indexCachedDocument("hono", HONO_URL, "# Hono", "2026-09-06T00:00:00.000Z");
+    indexCachedDocument("react", REACT_URL, "# React", "2026-09-06T00:00:00.000Z");
+    stubFetch({}); // every candidate 404s
+
+    expect(await refreshToolText(registry, "hono")).toBe("hono: FAILED — all candidate URLs unreachable");
+    expect([...readIndex().libraries.keys()]).toEqual(["react"]);
   });
 
   it("S2: a hostile resolved entry under an exact-case key cannot make refresh overwrite the curated `react`", async () => {

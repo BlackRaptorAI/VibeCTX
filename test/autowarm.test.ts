@@ -15,6 +15,8 @@ import {
 } from "../src/autowarm.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 import { dispatchCli } from "../src/cli.js";
+import { readIndex, resetSearchIndexMemo } from "../src/search-index.js";
+import { runSearch } from "../src/search.js";
 
 let dir: string;
 
@@ -245,5 +247,42 @@ describe("startAutowarm", () => {
     const index = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
     expect(index).toMatch(/process\.stdin\.once\("end", \(\) => void started\.server\.close\(\)\)/);
     expect(index).not.toContain("startAutowarm(");
+  });
+});
+
+/**
+ * PAR-659 · D-34 — the startup autowarm leaves a usable cross-library search index behind, so
+ * the first `search` of a session is the fast path rather than a full re-tokenization.
+ */
+describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
+  it("indexes each primary document it warmed", async () => {
+    resetSearchIndexMemo();
+    const reg: Registry = {
+      entries: new Map([
+        ["react", { name: "react", urls: [REACT_URL] }],
+        ["hono", { name: "hono", urls: [HONO_URL] }],
+      ]),
+    };
+    await startAutowarm(reg, {
+      fetchDoc: async (entry) => ({ content: `# ${entry.name}\n\n## Streaming\n\nserver-sent events`, url: entry.urls[0] }),
+    });
+    expect([...readIndex().libraries.keys()].sort()).toEqual(["hono", "react"]);
+    expect(runSearch(reg, { query: "server-sent events" }).tokenized).toBe(0);
+  });
+
+  it("an index failure never fails the autowarm", async () => {
+    resetSearchIndexMemo();
+    const reg: Registry = { entries: new Map([["react", { name: "react", urls: [REACT_URL] }]]) };
+    // A cache root whose parent is a FILE: mkdirSync throws ENOTDIR, so every index write fails.
+    writeFileSync(join(dir, "blocked"), "not a directory", "utf8");
+    process.env.DOCS_CACHE_DIR = join(dir, "blocked", "cache");
+    const notes: string[] = [];
+    const summary = await startAutowarm(reg, {
+      warn: (m) => notes.push(m),
+      fetchDoc: async (entry) => ({ content: "# React", url: entry.urls[0] }),
+    });
+    expect(summary.cached).toBe(1);
+    expect(summary.failed).toEqual([]);
+    expect(notes.join("")).toMatch(/search index not written|ENOTDIR/);
   });
 });

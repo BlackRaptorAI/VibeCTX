@@ -6,6 +6,8 @@ import { readCache, writeCache } from "../src/cache.js";
 import { loadDiscoveredRegistry, loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
+import { documentHash, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
+import { runSearch } from "../src/search.js";
 import { runWarm, formatWarmTable, warmExitCode, warmToolText, WARM_CONCURRENCY, WARM_SCHEMA_VERSION, type WarmReport } from "../src/warm.js";
 
 let cache: string;
@@ -16,6 +18,7 @@ beforeEach(() => {
   project = mkdtempSync(join(tmpdir(), "vibectx-warm-proj-"));
   process.env.DOCS_CACHE_DIR = cache;
   resetResolutionWindow();
+  resetSearchIndexMemo();
 });
 
 afterEach(() => {
@@ -706,5 +709,50 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
         linked.mockRestore();
       }
     });
+  });
+});
+
+/**
+ * PAR-659 · D-34 — "autowarm/warm should leave a usable index behind". The point is not that a
+ * file appears: it is that the FIRST `search` after a warm is already the fast path, so a vibe
+ * coder who runs `vibectx warm` and immediately asks a question does not pay for tokenizing
+ * their whole stack.
+ */
+describe("warm leaves a usable cross-library search index behind (PAR-659, D-34)", () => {
+  it("indexes each dependency's primary document, fetched or already fresh", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## Effects\n\nuseEffect cleanup runs on unmount.");
+    writePackageJson({ react: "19", hono: "4" });
+    stubFetch({ [HONO_URL]: "# Hono\n\n## Streaming\n\nstreamSSE sends server-sent events." });
+
+    const report = await runWarm(registry(), { dir: project });
+    expect(byName(report).react.status).toBe("already fresh");
+    expect(byName(report).hono.status).toBe("cached");
+
+    const index = readIndex().libraries;
+    expect([...index.keys()].sort()).toEqual(["hono", "react"]);
+    expect(index.get("hono")!.hash).toBe(documentHash("# Hono\n\n## Streaming\n\nstreamSSE sends server-sent events."));
+    expect(index.get("hono")!.url).toBe(HONO_URL);
+  });
+
+  it("the first search after a warm tokenizes nothing", async () => {
+    writePackageJson({ react: "19", hono: "4" });
+    stubFetch({
+      [REACT_URL]: "# React\n\n## Effects\n\nuseEffect cleanup runs on unmount.",
+      [HONO_URL]: "# Hono\n\n## Streaming\n\nstreamSSE sends server-sent events to the client.",
+    });
+    await runWarm(registry(), { dir: project });
+
+    const out = runSearch(registry(), { query: "server-sent events" });
+    expect(out.tokenized).toBe(0);
+    expect(out.fromIndex).toBe(2);
+    expect(out.groups[0].library).toBe("hono");
+  });
+
+  it("an offline warm indexes what the cache already holds", async () => {
+    writeCache("hono", HONO_URL, "# Hono\n\n## Streaming\n\nstreamSSE sends server-sent events.");
+    writePackageJson({ hono: "4" });
+    stubFetch({});
+    await runWarm(registry(), { dir: project, offline: true });
+    expect([...readIndex().libraries.keys()]).toEqual(["hono"]);
   });
 });

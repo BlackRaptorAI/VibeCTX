@@ -349,7 +349,7 @@ export function indexCachedDocument(
   library: string,
   url: string,
   text: string,
-  fetchedAt: string,
+  fetchedAt?: string,
   warn: (message: string) => void = (m) => process.stderr.write(m),
 ): void {
   const key = library.trim().toLowerCase();
@@ -363,7 +363,11 @@ export function indexCachedDocument(
       memo.set(key, hash);
       return;
     }
-    const doc = indexDocument(url, text, fetchedAt);
+    // `fetchedAt` is provenance only — it is never rendered and never gates anything (the HASH
+    // does). A caller that has the cache meta to hand passes it; one that does not (get_docs,
+    // which holds the document but not its meta) lets it default to the indexing instant rather
+    // than paying a second full read of a multi-megabyte file for a field nobody reads.
+    const doc = indexDocument(url, text, fetchedAt ?? new Date().toISOString());
     if (doc === undefined) return; // too large to index; search tokenizes it at query time (D-36)
     libraries.set(key, doc);
     if (writeIndex(libraries, warn)) memo.set(key, hash);

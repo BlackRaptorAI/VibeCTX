@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
@@ -8,6 +8,7 @@ import type { Registry } from "../src/registry.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
 import { derivedAllowedHosts } from "../src/link-policy.js";
+import { documentHash, readIndex, resetSearchIndexMemo, searchIndexPath } from "../src/search-index.js";
 
 let dir: string;
 
@@ -694,5 +695,37 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     stubFetch({});
     const out = await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched", maxTokens: 10 });
     expect(out).toMatch(/No sections matched "zzz-unmatched" in react docs/);
+  });
+});
+
+/**
+ * PAR-659 · D-34 — get_docs is a WRITER of a primary cached document, so it keeps the
+ * cross-library index current. Two properties matter and both are pinned: the PRIMARY document
+ * is indexed, and a FOLLOWED index page never is (those are per-query, and indexing them would
+ * make the file unbounded).
+ */
+describe("get_docs keeps the cross-library search index current (PAR-659, D-34)", () => {
+  it("indexes the primary document it served, and only that", async () => {
+    resetSearchIndexMemo();
+    const index = "# Fastify\n\n- [Routes](https://fastify.dev/docs/routes.md)\n- [Hooks](https://fastify.dev/docs/hooks.md)\n";
+    seedIndex(index);
+    stubFetch({ "https://fastify.dev/docs/routes.md": "# Routes\n\nRegister a route with fastify.get." });
+    await getDocs(entry, { topic: "routes" });
+
+    const libraries = readIndex().libraries;
+    expect([...libraries.keys()]).toEqual(["fastify"]);
+    expect(libraries.get("fastify")!.url).toBe(INDEX_URL);
+    expect(libraries.get("fastify")!.hash).toBe(documentHash(index));
+  });
+
+  it("a cache hit re-serving the same document does no index work at all", async () => {
+    resetSearchIndexMemo();
+    seedIndex("# Fastify\n\n## Hooks\n\nonRequest hooks run first.");
+    stubFetch({});
+    await getDocs(entry, { topic: "hooks" });
+    const before = readFileSync(searchIndexPath(), "utf8");
+    await getDocs(entry, { topic: "hooks" });
+    await getDocs(entry, { topic: "routes" });
+    expect(readFileSync(searchIndexPath(), "utf8")).toBe(before);
   });
 });
