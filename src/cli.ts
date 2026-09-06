@@ -1,4 +1,4 @@
-import { loadRegistry } from "./registry.js";
+import { loadDiscoveredRegistry, type Registry } from "./registry.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
@@ -139,6 +139,25 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/**
+ * Every subcommand resolves its config the same way the stdio server does (PAR-657 D-14):
+ * `--config` when given, else `VIBECTX_CONFIG`, else the project file found by walking up to
+ * the git root, layered over the user file. Deprecation notes go to stderr, once.
+ */
+function registryFor(flag: string | undefined, io: CliIo): Registry {
+  return loadDiscoveredRegistry({
+    cwd: process.cwd(),
+    env: process.env,
+    flag,
+    warn: (note) => io.stderr(`${note}\n`),
+  });
+}
+
+/** The one config-failure line: it already names the file, so only an explicit flag is echoed. */
+function configError(flag: string | undefined, e: unknown): string {
+  return `Could not load config${flag === undefined ? "" : ` ${flag}`}: ${message(e)}\n`;
+}
+
 /** Run `vibectx doctor <args>`; returns the process exit code:
  *  0 all healthy · 1 something unhealthy · 2 usage / config / unknown-library error. */
 export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
@@ -151,9 +170,9 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   }
   let registry;
   try {
-    registry = loadRegistry(parsed.config);
+    registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(`Could not load config ${parsed.config}: ${message(e)}\n`);
+    io.stderr(configError(parsed.config, e));
     return 2;
   }
   let report;
@@ -179,9 +198,9 @@ export async function runResolveCli(args: string[], io: CliIo): Promise<number> 
   }
   let registry;
   try {
-    registry = loadRegistry(parsed.config);
+    registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(`Could not load config ${parsed.config}: ${message(e)}\n`);
+    io.stderr(configError(parsed.config, e));
     return 2;
   }
   const text = await resolveToolText(registry, parsed.name, parsed.ecosystem);
@@ -201,9 +220,9 @@ export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
   }
   let registry;
   try {
-    registry = loadRegistry(parsed.config);
+    registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(`Could not load config ${parsed.config}: ${message(e)}\n`);
+    io.stderr(configError(parsed.config, e));
     return 2;
   }
   let report;

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
@@ -389,5 +389,87 @@ describe("warm --force and the JSON row order (PAR-656 R3 / K1)", () => {
     } finally {
       rmSync(project, { recursive: true, force: true });
     }
+  });
+});
+
+describe("CLI config discovery: no flag needed (PAR-657)", () => {
+  let repo: string;
+  let previousXdg: string | undefined;
+  let previousEnvConfig: string | undefined;
+
+  beforeEach(() => {
+    repo = join(dir, "repo");
+    mkdirSync(join(repo, ".git"), { recursive: true });
+    // Hermetic: an empty XDG_CONFIG_HOME stands in for the machine's user-level config.
+    previousXdg = process.env.XDG_CONFIG_HOME;
+    previousEnvConfig = process.env.VIBECTX_CONFIG;
+    process.env.XDG_CONFIG_HOME = join(dir, "xdg");
+    delete process.env.VIBECTX_CONFIG;
+    vi.spyOn(process, "cwd").mockReturnValue(repo);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousXdg;
+    if (previousEnvConfig === undefined) delete process.env.VIBECTX_CONFIG;
+    else process.env.VIBECTX_CONFIG = previousEnvConfig;
+  });
+
+  const commit = (name: string, libraries: unknown[]): string => {
+    const path = join(repo, name);
+    writeFileSync(path, JSON.stringify({ libraries }), "utf8");
+    return path;
+  };
+
+  it("doctor picks up a committed vibectx.config.json with no --config", async () => {
+    writeCache("acme", "https://docs.acme.example.com/llms-full.txt", REACT_DOC);
+    commit("vibectx.config.json", [
+      { name: "acme", urls: ["https://docs.acme.example.com/llms-full.txt"], probeQueries: ["useEffect cleanup"] },
+    ]);
+    const a = io();
+    const code = await dispatchCli(["node", "dist/index.js", "doctor", "--library", "acme", "--offline"], a);
+    expect(code).toBe(0);
+    expect(a.out.join("")).toMatch(/acme\s+full-text/);
+  });
+
+  it("VIBECTX_CONFIG is used when there is no flag, and skips the committed file", async () => {
+    commit("vibectx.config.json", [{ name: "acme", urls: ["https://docs.acme.example.com/llms-full.txt"] }]);
+    const envPath = join(dir, "env.json");
+    writeFileSync(envPath, JSON.stringify({ libraries: [{ name: "envonly", urls: ["https://env.example.com/llms.txt"] }] }), "utf8");
+    process.env.VIBECTX_CONFIG = envPath;
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--json", "--offline"], a)).toBe(1);
+    const names = JSON.parse(a.out.join("")).libraries.map((l: { library: string }) => l.library);
+    expect(names).toContain("envonly");
+    expect(names).not.toContain("acme");
+  });
+
+  it("exits 2 with one line naming the discovered file when it is invalid", async () => {
+    writeFileSync(join(repo, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": [] }] }', "utf8");
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--offline"], a)).toBe(2);
+    const err = a.err.join("");
+    expect(err).toMatch(/Could not load config: .*vibectx\.config\.json: libraries\[0\]\.urls: must be a non-empty array of https URLs/);
+    expect(err.trim().split("\n")).toHaveLength(1);
+  });
+
+  it("warns once on stderr about the deprecated filename, and still loads it", async () => {
+    commit("docs-cache.config.json", [{ name: "acme", urls: ["https://docs.acme.example.com/llms-full.txt"] }]);
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--json", "--offline"], a)).toBe(1);
+    expect(a.err.join("")).toMatch(/docs-cache\.config\.json is deprecated/);
+    expect(JSON.parse(a.out.join("")).libraries.map((l: { library: string }) => l.library)).toContain("acme");
+  });
+
+  it("warm reads the discovered config too (one resolution path for every subcommand)", async () => {
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ dependencies: { acme: "^1.0.0" } }), "utf8");
+    writeCache("acme", "https://docs.acme.example.com/llms-full.txt", REACT_DOC);
+    commit("vibectx.config.json", [{ name: "acme", urls: ["https://docs.acme.example.com/llms-full.txt"] }]);
+    const a = io();
+    const code = await dispatchCli(["node", "dist/index.js", "warm", repo, "--offline", "--json"], a);
+    const report = JSON.parse(a.out.join(""));
+    expect(report.dependencies.find((d: { name: string }) => d.name === "acme")?.library).toBe("acme");
+    expect(code).toBe(0);
   });
 });

@@ -8,6 +8,7 @@ import { writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { autowarmStatus, resetAutowarm } from "../src/autowarm.js";
 import { buildServer, startServer } from "../src/server.js";
+import { loadDiscoveredRegistry } from "../src/registry.js";
 
 /**
  * Q2 (PAR-656): the real McpServer over an in-memory transport — the tool list, a tool
@@ -145,5 +146,38 @@ describe("startServer + autowarm over an in-memory transport", () => {
     const summary = await started.autowarm!;
     expect(summary).toEqual({ attempted: 6, cached: 2, failed: [], aborted: 4 });
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("done-when (PAR-657): a committed vibectx.config.json reaches a flagless server start", () => {
+  const ACME_URL = "https://docs.acme-internal.example.com/llms-full.txt";
+
+  it("list_libraries shows the extra library with the (project) header, and the autowarm fetches it", async () => {
+    const repo = join(dir, "repo");
+    const home = join(dir, "home");
+    mkdirSync(join(repo, ".git"), { recursive: true }); // a real repo, not a bare directory
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      join(repo, "vibectx.config.json"),
+      JSON.stringify({ libraries: [{ name: "acme-internal", urls: [ACME_URL], description: "Acme internal platform" }] }),
+      "utf8",
+    );
+    const spy = vi.fn(async () => new Response("# Acme\n\nInternal platform docs.", { status: 200, headers: { "content-type": "text/plain" } }));
+    vi.stubGlobal("fetch", spy);
+    vi.spyOn(process, "cwd").mockReturnValue(repo);
+
+    // Exactly what index.ts does on the server path: no --config, no VIBECTX_CONFIG.
+    const registry = loadDiscoveredRegistry({ cwd: process.cwd(), env: {}, home });
+    expect(registry.entries.size).toBe(31); // the shipped 30 + the committed one
+    const { client, started, call } = await connect(registry);
+
+    const text = await call("list_libraries");
+    expect(text.split("\n")[0]).toBe("config: ./vibectx.config.json (project)");
+    expect(text).toMatch(/- \*\*acme-internal\*\* — Acme internal platform/);
+
+    await started.autowarm; // the autowarm's "configured libraries" include the discovered entry
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain(ACME_URL);
+    await client.close();
+    vi.restoreAllMocks();
   });
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { loadRegistry } from "./registry.js";
+import { loadDiscoveredRegistry } from "./registry.js";
 import { dispatchCli } from "./cli.js";
 import { startServer } from "./server.js";
 import { autowarmStatus } from "./autowarm.js";
@@ -20,8 +20,23 @@ const cliExit = await dispatchCli(process.argv, {
 if (cliExit !== undefined) {
   process.exitCode = cliExit;
 } else {
+  // PAR-657: an MCP client launches this with a fixed command line, so the config is
+  // discovered — `--config` when the launch command carries one, else VIBECTX_CONFIG, else
+  // the repo's committed vibectx.config.json layered over the user's.
   const configFlag = process.argv.indexOf("--config");
-  const registry = loadRegistry(configFlag !== -1 ? process.argv[configFlag + 1] : undefined);
+  let registry;
+  try {
+    registry = loadDiscoveredRegistry({
+      cwd: process.cwd(),
+      env: process.env,
+      flag: configFlag !== -1 ? process.argv[configFlag + 1] : undefined,
+      warn: (note) => process.stderr.write(`${note}\n`),
+    });
+  } catch (e) {
+    // One line, never a stack: this is what the client surfaces to the user.
+    process.stderr.write(`Could not load config: ${e instanceof Error ? e.message : String(e)}\n`);
+    process.exit(2);
+  }
   const transport = new StdioServerTransport();
   const started = await startServer(registry, transport, { env: process.env });
   // The SDK's stdio transport does not watch for stdin ending; close the server ourselves so
