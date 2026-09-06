@@ -117,6 +117,10 @@ export interface SearchOutcome {
   /** Their names, registry order. Named in the zero-match message so "nothing matched" is
    *  never mistaken for "nothing was looked at". */
   searchedLibraries: string[];
+  /** Of those, how many had at least one matching section — BEFORE the budget was applied.
+   *  `groups.length` can be smaller (a small budget, or MAX_RENDERED_LIBRARIES), and reporting
+   *  the rendered count as the matched count would understate what the cache actually holds. */
+  matchedLibraries: number;
   /** Library names in `libraries` that resolved to nothing. */
   unknown: string[];
   /** Names of in-scope libraries with nothing in the cache, registry order. */
@@ -283,6 +287,7 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     configured: scope.length,
     searched: 0,
     searchedLibraries: [],
+    matchedLibraries: 0,
     unknown,
     uncached: [],
     fromIndex: 0,
@@ -391,20 +396,29 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   // Libraries by their best section; registry order breaks ties (the candidate list is in it).
   const order = new Map(candidates.map((c, i) => [c.entry.name, i]));
   groups.sort((a, b) => b.bestScore - a.bestScore || order.get(a.library)! - order.get(b.library)!);
+  base.matchedLibraries = groups.length;
   if (groups.length > MAX_RENDERED_LIBRARIES) {
     notes.push(`${groups.length} libraries matched; the ${MAX_RENDERED_LIBRARIES} best are shown`);
     groups.length = MAX_RENDERED_LIBRARIES;
   }
 
   // Bodies come from the CACHED DOCUMENT, re-read and re-split here — never from the index,
-  // which holds no text. A section id the document no longer has (a document replaced between
-  // the scan and now) is dropped rather than guessed at.
+  // which holds no text.
+  //
+  // Two things this must survive. A section id the document no longer has is DROPPED rather
+  // than guessed at: between the scan above and this read, another process (a `refresh`, a
+  // get_docs fetch) may have replaced the document, and the honest answer is fewer sections,
+  // never a section chosen by position out of a document nobody scored. And the cache is
+  // re-read through the CANDIDATE's own entry, not by looking the library name up in the
+  // registry map — a registry whose map KEY differs from its entry's `name` (which the S2
+  // cases in refresh.test.ts construct) would otherwise silently render no sections at all.
+  const byLibrary = new Map(candidates.map((c) => [c.entry.name, c]));
   const withBodies: SearchGroup[] = [];
   for (const group of selectAcrossLibraries(groups, opts.maxTokens ?? DEFAULT_SEARCH_BUDGET_TOKENS)) {
-    const entry = registry.entries.get(group.library);
+    const candidate = byLibrary.get(group.library);
     let split: SplitSection[] = [];
     try {
-      const hit = entry ? readCache(entry.name, group.url, entry.ttlHours ?? DEFAULT_TTL_HOURS) : undefined;
+      const hit = candidate ? readCache(candidate.entry.name, group.url, candidate.entry.ttlHours ?? DEFAULT_TTL_HOURS) : undefined;
       if (hit) split = splitSections(hit.content);
     } catch {
       split = [];
@@ -426,9 +440,11 @@ export function searchExitCode(outcome: SearchOutcome): 0 | 1 {
 /** The closing accounting D-35 asks for: how many libraries were searched out of how many are
  *  configured, and — when fewer than all are cached — how to cache the rest. */
 function footer(outcome: SearchOutcome): string[] {
+  const shown = outcome.groups.length;
   const lines = [
     `Searched ${outcome.searched} of ${outcome.configured} configured librar${outcome.configured === 1 ? "y" : "ies"}` +
-      `${outcome.groups.length > 0 ? `; ${outcome.groups.length} matched` : ""}.`,
+      `${outcome.matchedLibraries > 0 ? `; ${outcome.matchedLibraries} matched` : ""}` +
+      `${shown > 0 && shown < outcome.matchedLibraries ? `, ${shown} shown within the budget` : ""}.`,
   ];
   if (outcome.uncached.length > 0) {
     const named =

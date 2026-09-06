@@ -423,3 +423,56 @@ describe("the README's search example (PAR-659)", () => {
     );
   });
 });
+
+/**
+ * PAR-659 — the two failure modes the excellence pass went looking for, and neither of which
+ * any earlier case would have caught.
+ */
+describe("runSearch · what the budget reports, and where bodies come from (PAR-659)", () => {
+  it("reports how many libraries MATCHED, not how many fitted the budget", () => {
+    warmAll();
+    const full = search({ query: "streaming server-sent events schema object" });
+    expect(full.matchedLibraries).toBeGreaterThanOrEqual(2);
+
+    const tight = search({ query: "streaming server-sent events schema object", maxTokens: 1 });
+    expect(tight.groups).toHaveLength(1);
+    expect(tight.matchedLibraries).toBe(full.matchedLibraries); // unchanged by the budget
+    const text = formatSearchResults(tight);
+    expect(text).toContain(`${full.matchedLibraries} matched, 1 shown within the budget`);
+  });
+
+  it("renders bodies through the entry it searched, not by name lookup — a registry whose map key differs from the entry name still answers", () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    // The shape refresh.test.ts's S2 cases construct: the map KEY is not the entry's `name`.
+    const odd: Registry = { entries: new Map([["hono-under-another-key", { name: "hono", urls: [HONO_URL] }]]) };
+    const out = runSearch(odd, { query: "server-sent events streaming" });
+    expect(out.groups).toHaveLength(1);
+    expect(out.groups[0].library).toBe("hono");
+    expect(out.groups[0].sections[0].body).toContain("streamSSE");
+  });
+
+  it("D-33: every rendered body is text the cache actually holds, even when the index says otherwise", () => {
+    warmAll();
+    search({ query: "streaming" }); // build the index against the real documents
+
+    // A planted index whose entries carry the RIGHT hashes for the wrong documents: the only
+    // way an index can still be used and still be lying about which section is which.
+    const swapped = new Map([
+      ["hono", indexDocument(HONO_URL, AI_DOC, "2026-09-06T06:00:00.000Z")!],
+      ["ai-sdk", indexDocument(AI_URL, HONO_DOC, "2026-09-06T06:00:00.000Z")!],
+    ]);
+    writeIndex(swapped);
+
+    const out = search({ query: "streaming server-sent events schema object route params" });
+    const cached: Record<string, string> = { hono: HONO_DOC, "ai-sdk": AI_DOC, "next.js": NEXT_DOC };
+    for (const g of out.groups) {
+      for (const s of g.sections) {
+        // The invariant D-33 exists for: the body is a substring of THAT library's cached
+        // document. No index, planted or otherwise, can put a word here the cache does not hold.
+        expect(cached[g.library]).toContain(s.body);
+      }
+    }
+    // And the plant was refused outright — the hashes describe the other library's document.
+    expect(out.tokenized).toBe(3);
+  });
+});

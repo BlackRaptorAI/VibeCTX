@@ -620,6 +620,7 @@ describe("dispatchCli search (PAR-659)", () => {
       "configured",
       "searched",
       "searchedLibraries",
+      "matchedLibraries",
       "unknown",
       "uncached",
       "fromIndex",
