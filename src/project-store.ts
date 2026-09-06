@@ -42,7 +42,11 @@ import { cleanText, type DependencyEcosystem } from "./project-deps.js";
 /** Bumped when a key is renamed, removed or changes meaning — and when a WarmStatus value is
  *  added or removed (K3): a reader validates `status` against WARM_STATUSES and drops rows
  *  with an unknown one, so a new value under the same version would silently lose rows for
- *  older readers. Version 1 is the first shipped shape (0.2.0). */
+ *  older readers. The ACCEPTED TIMESTAMP SHAPE is part of schemaVersion 1 on the same
+ *  grounds: `warmedAt` and `failedAt` are strict ISO-8601 UTC instants (`…Z`), and a reader
+ *  of this version treats any other shape as a corrupt record (`warmedAt`) or a bad row
+ *  (`failedAt`) — so widening it, to an offset like `+01:00` for instance, requires a version
+ *  bump exactly as the status vocabulary does. Version 1 is the first shipped shape (0.2.0). */
 export const PROJECT_RECORD_SCHEMA_VERSION = 1;
 
 export type WarmStatus =

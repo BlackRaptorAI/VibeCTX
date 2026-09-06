@@ -183,8 +183,11 @@ absolute, never containing `..`) drops the whole row, as do a bad `name`, `ecosy
 `note` is truncated. `warmedAt` and `failedAt` must be strict ISO-8601 UTC instants of the
 form `2026-09-06T06:00:00.000Z` — `Date.parse` on its own accepts a "date" with a trailing
 parenthesised comment, and `warmedAt` is printed verbatim in the `list_libraries` summary
-line, so a bad `warmedAt` makes the whole record read as absent. Control, bidi and
-zero-width characters are stripped from every field.
+line, so a bad `warmedAt` makes the whole record read as absent. That accepted timestamp
+shape is part of `schemaVersion` 1: a reader of this version rejects anything else, so
+widening it — accepting a `+01:00` offset, say — requires a version bump, exactly as adding
+or removing a status value does. Control, bidi and zero-width characters are stripped from
+every field.
 
 **The `list_libraries` summary line.** When a record exists for the server's working
 directory, `list_libraries` ends with `Project deps (<dir>): N cached, M unresolved, K
