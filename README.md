@@ -406,7 +406,9 @@ minute old, so a second vibectx sharing the cache never has its in-flight write 
 uses to prove the entry answers; without them a query is derived from the description.
 An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.
 `aliases` (optional, array of non-empty strings; `[]` = none) are other names that resolve
-to the entry. Unknown top-level keys in the config (for example `$comment`) are ignored.
+to the entry. `ttlHours` (optional) is the cache lifetime in hours; `0` means "always
+revalidate". `libraries` itself is optional — a file without it loads as no entries.
+Unknown top-level keys in the config (for example `$comment`) are ignored.
 
 Names and aliases are trimmed and lower-cased before anything else, so `"name": "Next.js"`
 overrides `next.js`. Precedence:
@@ -488,17 +490,56 @@ or `config: --config ./x.json`, or `config: none (shipped defaults)`.
 `vibectx.config.json`. If both names sit in one directory the new name wins and the old
 one is ignored (also noted).
 
-**Failures are one line.** A config that does not load names the file, the path inside it,
-and what is wrong — never a stack trace or a validator dump:
+**Failures are one line, in one grammar:** the file, then
+`libraries[i].<field> ("<name>")`, then what is wrong — never a stack trace, a validator
+dump, or anything from inside the file (a config path can name any file on disk, so a
+syntax error reports the position and nothing else):
 
 ```
-./vibectx.config.json: libraries[2].urls: must be a non-empty array of https URLs
-./vibectx.config.json: invalid JSON at line 7 column 3: Expected ',' or '}' after property value
+./vibectx.config.json: libraries[2].urls ("acme-platform"): must be a non-empty array of https URLs
+./vibectx.config.json: invalid JSON at line 7 column 3
+~/.config/vibectx/config.json: libraries[0].allowedHosts ("acme-platform"): "10.0.0.1" is a private, loopback or non-routable host
 ```
 
 `urls` must be `https:` (the fetcher refuses anything else, so a non-https entry could only
 ever be dead weight); unknown keys — top-level and inside an entry — are ignored, so a file
 written for a later version still loads; a file over 1 MiB is refused.
+
+**A broken *discovered* file is skipped, not fatal.** If the committed
+`vibectx.config.json` (or the user file) fails to load, vibectx keeps going with the
+remaining layers: one line on stderr —
+
+```
+vibectx: ./vibectx.config.json: libraries[0].urls ("acme"): must be a non-empty array of https URLs — file skipped, continuing without it
+```
+
+— the same fact on the `list_libraries` header
+(`config: ./vibectx.config.json (project) — NOT LOADED: …`), and `vibectx doctor` counts it
+as unhealthy: a `✗ config …` line, a `configIssues` entry in `--json`, and exit `1`. An
+**explicit** source is different: a `--config` or `VIBECTX_CONFIG` file that cannot be
+loaded is still a hard failure (exit `2`), because you asked for that file by name.
+One bad file in one repository should not take down a server every teammate launches;
+a flag that cannot be honoured should never be silently ignored.
+
+**Only directories you own are searched.** The walk-up stops at the first directory whose
+owner is not you, and reads no config from it — the same reasoning as git's `safe.directory`.
+On a shared machine, nobody else can leave a `.git` and a `vibectx.config.json` in a
+directory above yours and choose where your agent's documentation comes from.
+
+### Upgrading from 0.1.x
+
+Configs written for 0.1.3 keep working, with one exception:
+
+- **Breaking:** every URL in `urls` must be `https:`. The fetcher has always refused
+  anything else, so an `http:` entry could never have served a document — but it used to
+  load quietly and now names itself at startup. Change the URL to `https:` (or drop the
+  entry).
+- `libraries` is optional: `{}` and a file with the key commented out load as "no entries",
+  exactly as before.
+- `ttlHours: 0` still means "always revalidate" and is still accepted. Only negative and
+  non-finite values are refused.
+- Nothing else about `--config` changed: pass it and discovery is skipped entirely, so an
+  existing launch command behaves exactly as it did.
 
 ## Checking coverage: `vibectx doctor`
 
@@ -555,8 +596,11 @@ never stops the rest of the table. At most three libraries are checked at a time
 
 `--json` emits `{ schemaVersion: 1, generatedAt, libraries: [{ library, kind, url,
 cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed, dropped }],
-followed, dropped, healthy, reasons }], healthy, total }` — keys in that order, `null`
-for a missing URL or age. New keys may be appended in later versions; consumers should
+followed, dropped, healthy, reasons }], healthy, total, configIssues: [{ path, scope,
+reason }] }` — keys in that order, `null` for a missing URL or age. `configIssues` (added
+in 0.2.0) lists discovered config files that were skipped; while it is non-empty the exit
+code is `1` however healthy the libraries look, because the entries those files pin are
+simply missing. New keys may be appended in later versions; consumers should
 read keys by name and must not assert exact key sets. `reasons[]` strings are
 human-readable and not a contract. If you snapshot the output, note that `generatedAt`,
 `cacheAgeHours`, `url` (which candidate resolved) and `reasons[]` are non-deterministic
