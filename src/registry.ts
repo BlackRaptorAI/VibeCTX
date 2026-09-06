@@ -29,7 +29,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
       "https://raw.githubusercontent.com/fastify/fastify/main/docs/Reference/Index.md",
     ],
     description: "Fastify web framework reference",
-    probeQueries: ["querystring parsing"],
+    probeQueries: ["lifecycle hooks"],
   },
   {
     name: "prisma",
