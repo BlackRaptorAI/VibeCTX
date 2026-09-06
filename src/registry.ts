@@ -1,4 +1,19 @@
 import { readFileSync } from "node:fs";
+import { normaliseAllowedHost } from "./link-policy.js";
+import { readResolvedEntries } from "./resolved-store.js";
+
+/** Provenance of an entry synthesized by resolve_library (PAR-655). Set only by the
+ *  resolver and the persisted store; stripped from config entries. */
+export interface ResolvedMeta {
+  source: "npm" | "pypi";
+  /** ISO timestamp of the resolution. */
+  resolvedAt: string;
+  /** The registry metadata document the entry was derived from. */
+  metadataUrl: string;
+  /** Sanitized https URLs from that metadata; the allowed-host set is derived from these. */
+  homepage?: string;
+  docsUrl?: string;
+}
 
 export interface LibraryEntry {
   /** Canonical name agents use to request docs. Lowercase. See NAMING RULE below. */
@@ -17,6 +32,13 @@ export interface LibraryEntry {
    *  an empty array, which is accepted and behaves exactly as absent — doctor derives
    *  a query from the description and marks it "(derived)". */
   probeQueries?: string[];
+  /** Hosts, besides the source document's own, that followed index links may target.
+   *  Bare hostnames (no scheme / port / path), lowercase; `*.example.com` matches
+   *  subdomains, never the apex. IP literals, localhost, `.local`, `.internal` and
+   *  single-label names are rejected. See src/link-policy.ts. */
+  allowedHosts?: string[];
+  /** Present only on entries resolve_library synthesized (never on defaults or config). */
+  resolved?: ResolvedMeta;
 }
 
 /*
@@ -431,8 +453,12 @@ function validateAliases(entries: Map<string, LibraryEntry>, configNames: Readon
  *   to its own entry's name.
  * - D-07 — an override that OMITS `aliases` inherits the replaced entry's aliases;
  *   `aliases: []` clears them; an explicit list replaces them.
+ * - PAR-655 — persisted resolutions (`<cacheRoot>/resolved.json`) merge BELOW both: a
+ *   record whose name equals any canonical name or alias above is ignored, so a real
+ *   registry or config entry always wins and a persisted resolution never overrides one.
+ *   `includeResolved: false` skips the file (tests; tools that must not read the cache).
  */
-export function loadRegistry(configPath?: string): Registry {
+export function loadRegistry(configPath?: string, opts: { includeResolved?: boolean } = {}): Registry {
   const entries = new Map<string, LibraryEntry>();
   for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
   const configNames = new Set<string>();
@@ -454,8 +480,19 @@ export function loadRegistry(configPath?: string): Registry {
           `config entry "${e.name}": aliases must be an array of non-empty strings, got ${JSON.stringify(e.aliases)}`,
         );
       }
+      if (e.allowedHosts !== undefined && !Array.isArray(e.allowedHosts)) {
+        throw new Error(`config entry "${e.name}": allowedHosts must be an array of hostnames, got ${JSON.stringify(e.allowedHosts)}`);
+      }
       const normalised: LibraryEntry = { ...e, name: fold(e.name) };
       if (e.aliases !== undefined) normalised.aliases = e.aliases.map(fold);
+      if (e.allowedHosts !== undefined) {
+        try {
+          normalised.allowedHosts = e.allowedHosts.map(normaliseAllowedHost);
+        } catch (err) {
+          throw new Error(`config entry "${e.name}": ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      delete normalised.resolved; // only the resolver may mark an entry resolved
       config.push(normalised);
     }
     // Pass 2 (D-06): every key a config entry claims — as a name or an alias — leaves the defaults' alias lists.
@@ -478,7 +515,21 @@ export function loadRegistry(configPath?: string): Registry {
     }
   }
   validateAliases(entries, configNames);
+  if (opts.includeResolved !== false) {
+    const taken = new Set<string>(entries.keys());
+    for (const e of entries.values()) for (const a of e.aliases ?? []) taken.add(a);
+    for (const r of readResolvedEntries()) if (!taken.has(r.name)) entries.set(r.name, r);
+  }
   return { entries };
+}
+
+/** Add a just-resolved entry to a live registry unless a real entry or alias already owns
+ *  the name (mirrors the load-time precedence). Returns the entry that now answers to it. */
+export function adoptResolvedEntry(registry: Registry, entry: LibraryEntry): LibraryEntry {
+  const existing = resolveLibrary(registry, entry.name);
+  if (existing) return existing;
+  registry.entries.set(entry.name, entry);
+  return entry;
 }
 
 /** The text every tool returns for a name that resolves to nothing. Lists canonical names

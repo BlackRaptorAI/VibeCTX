@@ -16,9 +16,13 @@ let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-registry-"));
+  // loadRegistry also merges <cacheRoot>/resolved.json (PAR-655); point it at an empty dir
+  // so a developer's real cache cannot change entry counts here.
+  process.env.DOCS_CACHE_DIR = dir;
 });
 
 afterEach(() => {
+  delete process.env.DOCS_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -353,5 +357,95 @@ describe("config probeQueries validation", () => {
 
   it("still rejects an entry missing name or urls", () => {
     expect(() => loadRegistry(writeConfig([{ name: "x" }]))).toThrow(/missing name\/urls/);
+  });
+});
+
+describe("config allowedHosts validation (PAR-655)", () => {
+  it("accepts bare hostnames and *. wildcards, folded to lowercase, and keeps them on the entry", () => {
+    const reg = loadRegistry(writeConfig([{ name: "acme", urls: ["https://docs.acme.com/llms.txt"], allowedHosts: [" API.acme.com ", "*.Acme.dev"] }]));
+    expect(reg.entries.get("acme")?.allowedHosts).toEqual(["api.acme.com", "*.acme.dev"]);
+  });
+
+  it("accepts allowedHosts: [] and an entry without it", () => {
+    expect(loadRegistry(writeConfig([{ name: "acme", urls: ["u"], allowedHosts: [] }])).entries.get("acme")?.allowedHosts).toEqual([]);
+    expect(loadRegistry(writeConfig([{ name: "acme", urls: ["u"] }])).entries.get("acme")?.allowedHosts).toBeUndefined();
+  });
+
+  it.each([
+    ["a string", "api.acme.com"],
+    ["a scheme", ["https://api.acme.com"]],
+    ["a path", ["api.acme.com/docs"]],
+    ["a port", ["api.acme.com:8443"]],
+    ["a bare wildcard", ["*"]],
+    ["a single-label wildcard", ["*.com"]],
+    ["a mid wildcard", ["api.*.com"]],
+    ["an IP literal", ["10.0.0.1"]],
+    ["localhost", ["localhost"]],
+    ["a .internal host", ["vault.internal"]],
+    ["a single label", ["intranet"]],
+    ["an empty element", [""]],
+    ["a non-string element", [1]],
+  ])("rejects allowedHosts that is %s, naming the entry", (_label, allowedHosts) => {
+    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: ["u"], allowedHosts }]))).toThrow(/config entry "acme": allowedHosts/);
+  });
+
+  it("strips a `resolved` marker from config entries (only the resolver may set it)", () => {
+    const reg = loadRegistry(writeConfig([{ name: "acme", urls: ["u"], resolved: { source: "npm", resolvedAt: "x", metadataUrl: "y" } }]));
+    expect(reg.entries.get("acme")?.resolved).toBeUndefined();
+  });
+});
+
+describe("loadRegistry merges persisted resolutions BELOW defaults and config (PAR-655)", () => {
+  const resolvedRecord = (name: string, url: string) => ({
+    name,
+    urls: [url],
+    description: `${name} (resolved)`,
+    resolved: { source: "npm", resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: `https://registry.npmjs.org/${name}/latest`, homepage: "https://example.com/" },
+  });
+  const writeResolved = (entries: unknown[]) =>
+    writeFileSync(join(dir, "resolved.json"), JSON.stringify({ schemaVersion: 1, entries }), "utf8");
+
+  it("adds a resolved entry the registry does not know, marked resolved with derived allowedHosts", () => {
+    writeResolved([resolvedRecord("elysia", "https://elysiajs.com/llms.txt")]);
+    const reg = loadRegistry();
+    expect(reg.entries.size).toBe(31);
+    const e = resolveLibrary(reg, "elysia");
+    expect(e?.urls).toEqual(["https://elysiajs.com/llms.txt"]);
+    expect(e?.resolved?.source).toBe("npm");
+    expect(e?.allowedHosts).toEqual(["example.com", "docs.example.com"]);
+    // Defaults first, resolved last.
+    expect([...reg.entries.keys()].at(-1)).toBe("elysia");
+  });
+
+  it("never overrides a default, a default alias, a config entry or a config alias", () => {
+    writeResolved([
+      resolvedRecord("react", "https://evil.example.com/react.txt"),
+      resolvedRecord("next", "https://evil.example.com/next.txt"), // default alias
+      resolvedRecord("mine", "https://evil.example.com/mine.txt"), // config entry
+      resolvedRecord("mine-alias", "https://evil.example.com/alias.txt"), // config alias
+      resolvedRecord("fresh", "https://fresh.example.com/llms.txt"),
+    ]);
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["https://mine.example.com/llms.txt"], aliases: ["mine-alias"] }]));
+    expect(resolveLibrary(reg, "react")?.urls[0]).toBe("https://react.dev/llms-full.txt");
+    expect(resolveLibrary(reg, "react")?.resolved).toBeUndefined();
+    expect(resolveLibrary(reg, "next")?.name).toBe("next.js");
+    expect(resolveLibrary(reg, "mine")?.urls).toEqual(["https://mine.example.com/llms.txt"]);
+    expect(resolveLibrary(reg, "mine-alias")?.name).toBe("mine");
+    expect(reg.entries.has("next")).toBe(false);
+    expect(reg.entries.has("mine-alias")).toBe(false);
+    expect(resolveLibrary(reg, "fresh")?.resolved?.source).toBe("npm");
+    expect(reg.entries.size).toBe(32);
+  });
+
+  it("ignores a corrupt or malformed resolved.json without failing the load", () => {
+    writeFileSync(join(dir, "resolved.json"), "{{{", "utf8");
+    expect(loadRegistry().entries.size).toBe(30);
+    writeResolved([{ name: "bad", urls: ["http://insecure.example.com/x"], resolved: { source: "npm", resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/bad/latest" } }]);
+    expect(loadRegistry().entries.size).toBe(30);
+  });
+
+  it("can be told to skip persisted resolutions", () => {
+    writeResolved([resolvedRecord("elysia", "https://elysiajs.com/llms.txt")]);
+    expect(loadRegistry(undefined, { includeResolved: false }).entries.size).toBe(30);
   });
 });
