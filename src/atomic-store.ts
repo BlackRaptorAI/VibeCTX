@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -36,10 +36,26 @@ export function writeAtomic(path: string, data: string): void {
   }
 }
 
+/** True only for a REGULAR file — `lstat`, so a symbolic link answers false rather than being
+ *  followed to whatever it points at. Any error (the entry vanished, the directory is
+ *  unreadable) answers false: the sweep skips what it cannot positively identify. */
+function isRegularFile(path: string): boolean {
+  try {
+    return lstatSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Remove orphan temp files directly inside `dir` (not recursive; only names matching
  * TEMP_FILE_PATTERN). Every error is swallowed — a missing directory, an unreadable one, a
  * file another process removed first — because this runs on the startup path.
+ *
+ * S-C symlink rule: the cache directory is a trust boundary, so a name is removed only when
+ * `lstat` says it is a REGULAR FILE. A symlink shaped like a temp file is left alone entirely
+ * — the sweep must never be the thing that deletes a path outside the cache, and leaving one
+ * dangling link is a smaller harm than the alternative being wrong once.
  */
 export function sweepTempFiles(dir: string): void {
   let names: string[];
@@ -50,8 +66,10 @@ export function sweepTempFiles(dir: string): void {
   }
   for (const name of names) {
     if (!TEMP_FILE_PATTERN.test(name)) continue;
+    const path = join(dir, name);
+    if (!isRegularFile(path)) continue; // a symlink or a directory is never ours to remove
     try {
-      rmSync(join(dir, name), { force: true });
+      rmSync(path, { force: true });
     } catch {
       /* best effort: another process may have swept it already */
     }
@@ -62,10 +80,22 @@ export function sweepTempFiles(dir: string): void {
  * Sweep every directory this tool writes temp files into: the cache root (resolved.json),
  * `projects/` (project records) and each per-library document directory, which is one level
  * under the root. Nothing deeper is walked and nothing outside the root is touched.
+ *
+ * S-C symlink rule: descent uses `lstat`, so a SYMLINKED child of the cache root is not a
+ * directory as far as this walk is concerned and is never entered — otherwise a link planted
+ * in the cache would aim the sweep at temp-shaped files anywhere on the filesystem.
  */
 export function sweepCacheTempFiles(root: string): void {
-  sweepTempFiles(root);
-  sweepTempFiles(join(root, "projects"));
+  const sweepRealDir = (path: string): void => {
+    try {
+      if (!lstatSync(path).isDirectory()) return; // a symlinked child is not descended
+    } catch {
+      return;
+    }
+    sweepTempFiles(path);
+  };
+  sweepTempFiles(root); // the root itself is the caller's, not a name found inside the cache
+  sweepRealDir(join(root, "projects"));
   let names: string[];
   try {
     names = readdirSync(root);
@@ -73,13 +103,8 @@ export function sweepCacheTempFiles(root: string): void {
     return;
   }
   for (const name of names) {
-    const child = join(root, name);
-    try {
-      if (!statSync(child).isDirectory()) continue;
-    } catch {
-      continue;
-    }
-    sweepTempFiles(child);
+    if (name === "projects") continue; // already swept above
+    sweepRealDir(join(root, name));
   }
 }
 

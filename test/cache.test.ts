@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { readCache, writeCache, touchCache, cacheRoot } from "../src/cache.js";
@@ -141,5 +141,31 @@ describe("S-C — orphan temp files are swept from the cache directories", () =>
     sweepCacheTempFiles(dir);
     expect(readdirSync(libDir).sort()).toEqual(before);
     expect(readCache("react", URL_, 168)?.content).toBe("# React");
+  });
+
+  it("S-C symlink safety: the sweep never descends a symlinked directory and never removes a symlink's target", () => {
+    // The cache directory is a trust boundary: anything that can write there could plant a
+    // symlink to have the startup sweep delete a file outside the cache. lstat, never stat.
+    const outside = mkdtempSync(join(tmpdir(), "docs-cache-outside-"));
+    try {
+      // (a) a symlinked SUBDIRECTORY of the cache root whose target holds a temp-shaped file
+      const outsideTemp = join(outside, "user.9.9.tmp");
+      writeFileSync(outsideTemp, "not the cache's to delete", "utf8");
+      symlinkSync(outside, join(dir, "linked-lib"));
+      // (b) a symlink inside the cache root NAMED like a temp file, pointing at a real file
+      const outsideVictim = join(outside, "victim.txt");
+      writeFileSync(outsideVictim, "precious", "utf8");
+      symlinkSync(outsideVictim, orphan(dir, "victim"));
+      // a genuine orphan beside them is still swept
+      writeFileSync(orphan(dir, "resolved.json"), "{}", "utf8");
+
+      sweepCacheTempFiles(dir);
+
+      expect(existsSync(outsideTemp)).toBe(true); // not descended
+      expect(readFileSync(outsideVictim, "utf8")).toBe("precious"); // not followed
+      expect(existsSync(orphan(dir, "resolved.json"))).toBe(false); // real orphan still gone
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 });
