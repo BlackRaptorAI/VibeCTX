@@ -42,8 +42,16 @@ const write = (dir: string, file: string, body: string): string => {
   return path;
 };
 /** discoverConfig with the machine's real environment fully replaced. */
-const discover = (opts: { cwd?: string; env?: NodeJS.ProcessEnv; flag?: string; home?: string } = {}) =>
-  discoverConfig({ cwd: opts.cwd ?? repo, env: opts.env ?? {}, flag: opts.flag, home: opts.home ?? home });
+const discover = (
+  opts: { cwd?: string; env?: NodeJS.ProcessEnv; flag?: string; home?: string; ownerUid?: (dir: string) => number | undefined } = {},
+) =>
+  discoverConfig({
+    cwd: opts.cwd ?? repo,
+    env: opts.env ?? {},
+    flag: opts.flag,
+    home: opts.home ?? home,
+    ownerUid: opts.ownerUid,
+  });
 
 const paths = (opts?: Parameters<typeof discover>[0]) => discover(opts).files.map((f) => `${f.scope}:${f.path}`);
 
@@ -144,6 +152,41 @@ describe("discoverConfig: the walk-up is confined to the repository (D-15)", () 
     expect(discover({ cwd: loose }).files).toEqual([]);
     const own = write(loose, CONFIG_FILENAME, CONFIG("own", "https://own.example.com/llms.txt"));
     expect(paths({ cwd: loose })).toEqual([`project:${own}`]);
+  });
+
+  it("D-20: stops at a directory the current user does not own, and reads no config from it", () => {
+    const p = write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
+    const mine = process.getuid?.() ?? 0;
+    // `repo` belongs to someone else (a /tmp-style shared parent); `repo/src` is ours.
+    const ownerUid = (dir: string) => (dir === repo ? mine + 1 : mine);
+    expect(discover({ cwd: join(repo, "src"), ownerUid }).files).toEqual([]);
+    // The same walk with the real owner does find it — the uid is what stopped it.
+    expect(paths({ cwd: join(repo, "src") })).toEqual([`project:${p}`]);
+    // A config in a directory we DO own, below the foreign one, is still read.
+    const own = write(join(repo, "src"), CONFIG_FILENAME, CONFIG("own", "https://own.example.com/llms.txt"));
+    expect(discover({ cwd: join(repo, "src"), ownerUid }).files.map((f) => f.path)).toEqual([own]);
+  });
+
+  it("D-20: a foreign-owned working directory yields no project config at all", () => {
+    write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
+    const uid = vi.spyOn(process, "getuid").mockReturnValue((process.getuid?.() ?? 0) + 1);
+    try {
+      expect(discover({ cwd: repo }).files).toEqual([]);
+    } finally {
+      uid.mockRestore();
+    }
+  });
+
+  it("D-20: the check is skipped where uids do not exist (Windows has no process.getuid)", () => {
+    const p = write(repo, CONFIG_FILENAME, CONFIG("x", "https://p.example.com/llms.txt"));
+    const real = process.getuid;
+    Object.defineProperty(process, "getuid", { value: undefined, configurable: true });
+    try {
+      // Every directory would look foreign if the check ran with no uid to compare against.
+      expect(paths({ cwd: join(repo, "src") })).toEqual([`project:${p}`]);
+    } finally {
+      Object.defineProperty(process, "getuid", { value: real, configurable: true });
+    }
   });
 
   it("takes the nearest project file and does NOT layer a second one above it", () => {

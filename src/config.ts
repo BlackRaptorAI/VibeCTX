@@ -58,6 +58,9 @@ export interface DiscoverConfigOptions {
   flag?: string;
   /** Home directory for the user-level file (default: os.homedir()). */
   home?: string;
+  /** D-20 seam: who owns a directory (default: `statSync(dir).uid`, undefined when it cannot
+   *  be read). Injectable so a test can plant a foreign owner without a second user. */
+  ownerUid?: (dir: string) => number | undefined;
 }
 
 /** Resolve the config sources for one process. Throws only when a candidate path exists but
@@ -76,7 +79,7 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   const userDir = userConfigDir(opts.env, home);
   const user = userDir === undefined ? undefined : pickInDirectory(userDir, "user", USER_CONFIG_FILENAME, notes, show);
   if (user) files.push(user); // lowest precedence first
-  for (const dir of projectDirs(opts.cwd)) {
+  for (const dir of projectDirs(opts.cwd, opts.ownerUid ?? directoryUid)) {
     const hit = pickInDirectory(dir, "project", CONFIG_FILENAME, notes, show);
     if (hit) {
       files.push(hit); // nearest wins; parents are NOT layered (monorepo layering is a follow-up)
@@ -106,20 +109,34 @@ function fromCwd(cwd: string, path?: string): string {
   return isAbsolute(path) ? normalize(path) : join(fromCwd(cwd), path);
 }
 
+/** Owner of a directory, or undefined when it cannot be stat'ed. */
+function directoryUid(dir: string): number | undefined {
+  return statSync(dir, { throwIfNoEntry: false })?.uid;
+}
+
 /**
  * D-15 — the directories the walk-up may look in: cwd, then each parent, stopping AFTER the
  * one that holds `.git` (a directory in a clone, a file in a worktree). With no `.git` above
  * cwd at all, only cwd is checked, so a stray config in `/tmp` or `$HOME` is never picked up.
+ *
+ * D-20 — and only directories the current user OWNS. The walk stops at the first directory
+ * with a different uid: its config is not read and no parent of it is looked at. This is
+ * git's `safe.directory` reasoning — on a shared machine anyone can create `/tmp/x/.git`
+ * beside a `/tmp/x/vibectx.config.json` and wait for someone to run a server under it.
+ * Where uids do not exist (Windows: no `process.getuid`) the check is skipped.
  */
-function projectDirs(cwd: string): string[] {
+function projectDirs(cwd: string, ownerUid: (dir: string) => number | undefined): string[] {
   const start = fromCwd(cwd);
+  const mine = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const trusted = (dir: string): boolean => mine === undefined || ownerUid(dir) === mine;
   const dirs: string[] = [];
   let cur = start;
   for (;;) {
+    if (!trusted(cur)) return dirs;
     dirs.push(cur);
     if (existsSync(join(cur, ".git"))) return dirs;
     const parent = dirname(cur);
-    if (parent === cur) return [start];
+    if (parent === cur) return [start]; // no repository anywhere above: cwd only
     cur = parent;
   }
 }
