@@ -374,6 +374,34 @@ describe("formatSearchResults · the guarantee outranks the accounting (PAR-659,
     expect(emittedLibraries(text)).toBe(1);
     expect(/(\d+) shown/.exec(text)?.[1] ?? "1").toBe("1");
   });
+
+  /**
+   * The one code path where SELECTED and EMITTED genuinely differ. `runSearch` selects under
+   * the same budget it renders under, so its own groups always fit; an outcome rendered under a
+   * SMALLER budget than the one it was built for — a `--json` result replayed, a stored outcome
+   * re-rendered — holds more libraries than the response can carry. That is where a `shown`
+   * taken from `outcome.groups.length` lies, and this case is what makes the count observable:
+   * every claim in the text is checked against the library blocks a reader can count.
+   */
+  it("an outcome rendered under a smaller budget than it was built for reports the libraries it emits, not the ones it holds", () => {
+    const reg = crowdedRegistry();
+    const roomy = runSearch(reg, { query: CROWDED_QUERY, maxTokens: 4000 });
+    expect(roomy.groups.length).toBeGreaterThanOrEqual(3);
+    let sawFewer = false;
+    for (let maxTokens = 40; maxTokens <= 400; maxTokens += 5) {
+      const text = formatSearchResults({ ...roomy, maxTokens });
+      const emitted = emittedLibraries(text);
+      const claim = /(\d+) shown/.exec(text);
+      if (claim) {
+        expect(emitted).toBe(Number(claim[1]));
+        if (emitted < roomy.groups.length) sawFewer = true;
+      }
+      // …and the guarantee holds in the replay exactly as it does in a fresh search.
+      expect(text).toContain(`Source: ${roomy.groups[0].url}`);
+      expect(text).toContain(roomy.groups[0].sections[0].body.slice(0, 40));
+    }
+    expect(sawFewer).toBe(true); // the case is actually reached on this fixture
+  });
 });
 
 /**
