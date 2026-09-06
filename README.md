@@ -265,15 +265,17 @@ small inverted index at `<cache>/index.json`. Three things are worth knowing abo
   | corpus | index file | warm `search` | one-off index build |
   | --- | --- | --- | --- |
   | 5.63 MB, 12 documents | 0.55 MB (10%) | **44 ms** | ~300 ms |
-  | 143 MB, 30 documents | 16.1 MB (11%) | **805–868 ms** | 6.1 s |
+  | 146 MB, 30 documents | 16.9 MB (12%) | **820–893 ms** | 6.3 s |
 
   The 300 ms target this feature was built to is the **first** row — a normal project's stack
-  of `llms.txt` files. Thirty five-megabyte `llms-full.txt` documents is 2.7–2.9× that target,
-  and the cost there is dominated by `JSON.parse` of a 16 MB index plus a SHA-256 over every
+  of `llms.txt` files. Thirty five-megabyte `llms-full.txt` documents is 2.7–3.0× that target,
+  and the cost there is dominated by `JSON.parse` of a 17 MB index plus a SHA-256 over every
   scanned document. The first row is printed by `test/search-perf.test.ts` on every run; the
-  second was measured with the probe described in the PAR-659 change record. A pathological
-  corpus in which every token is globally unique is the other extreme — 146% of the corpus
-  and 100 ms for 1.65 MB. Documents over 8 MiB are not indexed at all; they are tokenized at
+  second by `npm run build && node scripts/probe-search-scale.mjs`, which generates its own
+  corpus (no network, nothing to download) and prints the row it measured — the figures above
+  are one of its runs, and a re-run on your own machine is the only number worth trusting.
+  A pathological corpus in which every token is globally unique is the other extreme — 146%
+  of the corpus and 100 ms for 1.65 MB. Documents over 8 MiB are not indexed at all; they are tokenized at
   query time and the response says so for that library. The file itself is never written
   larger than the 64 MiB a read will accept: past that, the largest entries are left out and
   the response names them.
@@ -892,7 +894,7 @@ cache without touching the network (`unknown` until something is cached).
   document and groups the hits by library, for the common case where the agent does not
   know which library owns a concept. Cache-only and offline; backed by a derived,
   self-maintaining index that stores no document text. MEASURED: a warm search is 44 ms over
-  a 5.63 MB / 12-document corpus and 805–868 ms over 143 MB in 30 documents — see
+  a 5.63 MB / 12-document corpus and 820–893 ms over 146 MB in 30 documents — see
   [Don't know which library? `search`](#dont-know-which-library-search).
 - **Deterministic retrieval:** markdown heading-split + BM25 scoring over a camelCase-aware,
   lightly stemmed tokenizer — see [How ranking works](#how-ranking-works). No embeddings,
