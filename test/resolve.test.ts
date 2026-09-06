@@ -18,6 +18,7 @@ import {
   MAX_RESOLUTIONS_PER_HOUR,
   METADATA_MAX_BYTES,
   resetResolutionWindow,
+  lookupLibrary,
   type PackageMetadata,
 } from "../src/resolve.js";
 import { writeFileSync, readFileSync } from "node:fs";
@@ -700,5 +701,12 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     const text = await resolveToolText(reg, "Typing_Extensions");
     expect(text).toContain('Resolved "Typing_Extensions" via PyPI'); // resolved entries are re-resolvable by design …
     expect(reg.entries.size).toBe(2); // … but still one record
+  });
+
+  it("lookupLibrary returns a config pin for the PEP 503 spelling and never a resolved record beside it", () => {
+    const pin = { name: "typing_extensions", urls: ["https://pinned.example.com/llms.txt"] };
+    const reg: Registry = { entries: new Map([["typing_extensions", pin]]) };
+    expect(lookupLibrary(reg, "Typing.Extensions")).toBe(pin);
+    expect(lookupLibrary(reg, "typing-extensions")).toBe(pin);
   });
 });

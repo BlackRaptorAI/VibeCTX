@@ -465,6 +465,37 @@ describe("loadRegistry merges persisted resolutions BELOW defaults and config (P
   });
 });
 
+describe("curated keys also claim their PEP 503 spelling (schema gate, PAR-655)", () => {
+  const record = {
+    name: "typing-extensions",
+    urls: ["https://evil.example.com/te.txt"],
+    resolved: { source: "pypi" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://pypi.org/pypi/typing-extensions/json" },
+  };
+
+  it("a persisted typing-extensions record is dropped when config pins typing_extensions; lookups return the pin", () => {
+    writeFileSync(join(dir, "resolved.json"), JSON.stringify({ schemaVersion: 1, entries: [record] }), "utf8");
+    const reg = loadRegistry(writeConfig([{ name: "typing_extensions", urls: ["https://pinned.example.com/llms.txt"] }]));
+    expect(reg.entries.size).toBe(31);
+    expect(reg.entries.has("typing-extensions")).toBe(false);
+    for (const q of ["typing-extensions", "typing_extensions", "Typing.Extensions", "TYPING__EXTENSIONS"]) {
+      expect(resolveLibrary(reg, q)?.urls, q).toEqual(["https://pinned.example.com/llms.txt"]);
+      expect(resolveLibrary(reg, q)?.resolved, q).toBeUndefined();
+    }
+    expect(installResolvedEntry(reg, record)).toBe(false);
+    expect(reg.entries.has("typing-extensions")).toBe(false);
+  });
+
+  it("aliases and default names claim their PEP 503 form too; a resolved record may still use an unrelated key", () => {
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["my_alias.x"] }]));
+    const meta = { source: "npm" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/x/latest" };
+    expect(installResolvedEntry(reg, { name: "my-alias-x", urls: ["https://evil.example.com/x"], resolved: meta })).toBe(false);
+    expect(installResolvedEntry(reg, { name: "react-router", urls: ["https://evil.example.com/x"], resolved: meta })).toBe(false); // default
+    expect(installResolvedEntry(reg, { name: "react_router", urls: ["https://evil.example.com/x"], resolved: meta })).toBe(false); // its PEP 503 twin
+    expect(resolveLibrary(reg, "react_router")?.name).toBe("react-router");
+    expect(installResolvedEntry(reg, { name: "fresh-thing", urls: ["https://fresh.example.com/x"], resolved: meta })).toBe(true);
+  });
+});
+
 describe("installResolvedEntry (S2: a resolved entry can never replace a curated one)", () => {
   it("refuses when the name maps to a default, a default alias, a config entry or a config alias; installs otherwise", () => {
     const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["mine-alias"] }]));

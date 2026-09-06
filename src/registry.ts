@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { normaliseAllowedHost } from "./link-policy.js";
 import { readResolvedEntries } from "./resolved-store.js";
+import { normalisePyPiName } from "./package-names.js";
 
 /** Provenance of an entry synthesized by resolve_library (PAR-655). Set only by the
  *  resolver and the persisted store; stripped from config entries. */
@@ -516,11 +517,28 @@ export function loadRegistry(configPath?: string, opts: { includeResolved?: bool
   }
   validateAliases(entries, configNames);
   if (opts.includeResolved !== false) {
-    const taken = new Set<string>(entries.keys());
-    for (const e of entries.values()) for (const a of e.aliases ?? []) taken.add(a);
-    for (const r of readResolvedEntries()) if (!taken.has(r.name)) entries.set(r.name, r);
+    const taken = curatedKeys(entries);
+    for (const r of readResolvedEntries()) if (!isTaken(taken, r.name)) entries.set(r.name, r);
   }
   return { entries };
+}
+
+/** Every key a curated (non-resolved) entry claims: names, aliases, and each one's PEP 503
+ *  form — so a config pin `typing_extensions` also owns `typing-extensions` (schema gate, PAR-655). */
+function curatedKeys(entries: Map<string, LibraryEntry>): Set<string> {
+  const keys = new Set<string>();
+  for (const e of entries.values()) {
+    if (e.resolved) continue;
+    for (const k of [e.name, ...(e.aliases ?? [])]) {
+      keys.add(k);
+      keys.add(normalisePyPiName(k));
+    }
+  }
+  return keys;
+}
+
+function isTaken(keys: ReadonlySet<string>, candidate: string): boolean {
+  return keys.has(candidate) || keys.has(normalisePyPiName(candidate));
 }
 
 /**
@@ -531,6 +549,7 @@ export function loadRegistry(configPath?: string, opts: { includeResolved?: bool
  */
 export function installResolvedEntry(registry: Registry, entry: LibraryEntry): boolean {
   if (!entry.resolved) return false;
+  if (isTaken(curatedKeys(registry.entries), entry.name)) return false; // incl. the PEP 503 twin of a curated key
   const owner = resolveLibrary(registry, entry.name);
   if (owner && !owner.resolved) return false;
   if (owner && owner.name !== entry.name) registry.entries.delete(owner.name);
@@ -547,7 +566,10 @@ export function unknownLibraryMessage(registry: Registry, library: string): stri
 /**
  * The one lookup every tool uses (get_docs, refresh, doctor, list). Order:
  * exact canonical name → exact alias → the same two again on the trimmed,
- * lower-cased input (agents send "Next.js" and "Supabase"). Undefined when unknown.
+ * lower-cased input (agents send "Next.js" and "Supabase") → finally the PEP 503
+ * form of the input against the PEP 503 form of every curated name and alias, then of
+ * resolved entries (`Typing.Extensions` reaches a `typing_extensions` pin; a pin always
+ * beats a resolved record). Undefined when unknown.
  */
 export function resolveLibrary(registry: Registry, name: string): LibraryEntry | undefined {
   const lookup = (key: string): LibraryEntry | undefined => {
@@ -559,7 +581,20 @@ export function resolveLibrary(registry: Registry, name: string): LibraryEntry |
   const exact = lookup(name);
   if (exact) return exact;
   const folded = fold(name);
-  return folded !== name && folded.length > 0 ? lookup(folded) : undefined;
+  if (folded.length === 0) return undefined;
+  if (folded !== name) {
+    const hit = lookup(folded);
+    if (hit) return hit;
+  }
+  const pep = normalisePyPiName(folded);
+  let resolvedMatch: LibraryEntry | undefined;
+  for (const e of registry.entries.values()) {
+    if ([e.name, ...(e.aliases ?? [])].some((k) => normalisePyPiName(k) === pep)) {
+      if (!e.resolved) return e;
+      resolvedMatch ??= e;
+    }
+  }
+  return resolvedMatch;
 }
 
 function editDistance(a: string, b: string): number {

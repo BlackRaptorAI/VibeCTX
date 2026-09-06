@@ -442,10 +442,10 @@ export async function resolvePackage(
   return fail();
 }
 
-/** The one lookup the tools use before resolving: canonical / alias (folded), then the
- *  PEP 503 form so a PyPI-sourced record answers to `typing_extensions` (L3). */
+/** The lookup the tools use before resolving. `resolveLibrary` already tries the PEP 503
+ *  form (curated entries first), so this is a named alias kept for the call sites (L3). */
 export function lookupLibrary(registry: Registry, name: string): LibraryEntry | undefined {
-  return resolveLibrary(registry, name) ?? resolveLibrary(registry, normalisePyPiName(name));
+  return resolveLibrary(registry, name);
 }
 
 /**

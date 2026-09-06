@@ -475,6 +475,18 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("a config pin typing_extensions answers get_docs(\"Typing.Extensions\") without any resolution", async () => {
+    const PIN = "https://pinned.example.com/llms.txt";
+    writeCache("typing_extensions", PIN, "# Pinned\n\n## TypedDict\n\nFrom the pin.");
+    const spy = stubFetch({});
+    const reg: Registry = { entries: new Map([["typing_extensions", { name: "typing_extensions", urls: [PIN] }]]) };
+    const out = await getDocsToolText(reg, { library: "Typing.Extensions", topic: "TypedDict" });
+    expect(out).toContain("From the pin");
+    expect(out).not.toContain("Resolved ");
+    expect(spy).not.toHaveBeenCalled();
+    expect(reg.entries.size).toBe(1);
+  });
+
   it("offline: an unknown library returns the Unknown-library text listing canonical names, without fetching", async () => {
     const spy = stubFetch({});
     expect(await getDocsToolText(registry, { library: "nope", topic: "x", offline: true })).toBe(

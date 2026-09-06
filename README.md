@@ -229,6 +229,10 @@ overrides `next.js`. Precedence:
 - **An override keeps the default's aliases unless you say otherwise.** Overriding a default
   (same `name`) and omitting `aliases` inherits them; `"aliases": []` clears them; an
   explicit list replaces them.
+- **A pin also claims its PEP 503 spelling.** A config (or default) name or alias owns the
+  form with runs of `-`, `_`, `.` collapsed to `-` as well, so `{"name": "typing_extensions"}`
+  answers `typing-extensions` and `Typing.Extensions`, and no auto-resolved record can sit
+  beside it under that spelling.
 
 **Keep a private stack via committed config.** The default registry is what most teams
 share; what only *your* team uses belongs in a `vibectx.config.json` committed to your
