@@ -12,7 +12,7 @@ const registry = loadRegistry(
   configFlag !== -1 ? process.argv[configFlag + 1] : undefined,
 );
 
-const server = new McpServer({ name: "vibectx", version: "0.1.2" });
+const server = new McpServer({ name: "vibectx", version: "0.1.3" });
 
 function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };

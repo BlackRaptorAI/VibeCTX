@@ -65,7 +65,7 @@ async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> 
   try {
     const headers: Record<string, string> = {
       "user-agent":
-        "vibectx/0.1 (+https://github.com/BlackRaptorAI/VibeCTX)",
+        "vibectx/0.1.3 (+https://github.com/BlackRaptorAI/VibeCTX)",
     };
     if (opts.etag) headers["if-none-match"] = opts.etag;
     const res = await fetch(url, {
