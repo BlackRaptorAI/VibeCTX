@@ -61,6 +61,20 @@ export const SEARCH_SCHEMA_VERSION = 1;
 export const DEFAULT_SEARCH_BUDGET_TOKENS = 4000;
 
 /**
+ * D-41 — the longest query this path will look at. Everything downstream is linear in the
+ * query's length, but "linear" is not "bounded": a 200,000-term query builds a 200,000-entry
+ * term index and a 200,000-wide `tf` vector PER SECTION, which is quadratic in practice and
+ * MEASURED to exhaust a 2 GB heap — and an out-of-memory in the MCP server kills every tool,
+ * not one call. A real question is a handful of words; 1000 characters is far past any of
+ * them and far short of the failure. ASSUMED.
+ *
+ * Enforced in three places on purpose: the MCP schema (a client sees a schema error), the CLI
+ * (clipped with a note, because a shell can paste anything), and HERE — so no future caller
+ * can reach the ranking path unbounded.
+ */
+export const MAX_QUERY_CHARS = 1000;
+
+/**
  * Libraries whose sections may appear in one response. The point of `search` is to say WHICH
  * library owns a concept, and a reader cannot act on twenty candidates; capping also bounds
  * the render path, which re-reads and re-splits one cached document per rendered library.
@@ -279,10 +293,17 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     scope = scope.filter((e) => chosen.has(e.name));
   }
 
+  // D-41: bound the query before anything is built out of it. A clip, not an error — the
+  // first 1000 characters of a pasted essay are still a searchable question.
+  const query = opts.query.length > MAX_QUERY_CHARS ? opts.query.slice(0, MAX_QUERY_CHARS) : opts.query;
+  if (query.length < opts.query.length) {
+    notes.push(`the query was clipped to its first ${MAX_QUERY_CHARS} characters`);
+  }
+
   const base: SearchOutcome = {
     schemaVersion: SEARCH_SCHEMA_VERSION,
     generatedAt: now.toISOString(),
-    query: clipText(opts.query, 200),
+    query: clipText(query, 200),
     groups: [],
     configured: scope.length,
     searched: 0,
@@ -296,7 +317,7 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     notes,
   };
 
-  const { terms, index: termIndex } = queryIndex(opts.query);
+  const { terms, index: termIndex } = queryIndex(query);
   if (terms.length === 0) {
     notes.push("the query has no searchable terms");
     return base;

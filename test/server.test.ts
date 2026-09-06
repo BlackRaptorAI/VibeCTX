@@ -289,12 +289,16 @@ describe("search over the transport (PAR-659)", () => {
     await client.close();
   });
 
-  it("an empty query, a non-integer maxTokens and an over-long libraries list are schema errors", async () => {
+  it("D-41: an empty query, an OVER-LONG query, a non-integer maxTokens and an over-long libraries list are schema errors", async () => {
     seed();
     const { client, call } = await connect(searchRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
     // The SDK reports a schema violation as an error result, not a thrown transport error.
     for (const args of [
       { query: "" },
+      // D-41: a 200,000-term query exhausted a 2 GB heap and took the whole server with it.
+      // Over MCP that is a schema error the client is told about, never work this process does.
+      { query: "streaming ".repeat(20_000) },
+      { query: "x".repeat(1001) },
       { query: "streaming", maxTokens: 1.5 },
       { query: "streaming", maxTokens: 0 },
       { query: "streaming", maxTokens: -100 },

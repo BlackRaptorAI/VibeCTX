@@ -3,7 +3,7 @@ import { ConfigError } from "./config.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
-import { formatSearchResults, runSearch, searchExitCode } from "./search.js";
+import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS } from "./search.js";
 
 /**
  * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm` and `search`;
@@ -40,6 +40,8 @@ export interface SearchCliArgs {
   libraries: string[];
   maxTokens?: number;
   config?: string;
+  /** D-41: the query was longer than MAX_QUERY_CHARS and was cut to it. */
+  clipped?: true;
 }
 
 export interface CliIo {
@@ -187,6 +189,14 @@ export function parseSearchArgs(args: string[]): SearchCliArgs {
   }
   parsed.query = words.join(" ").trim();
   if (parsed.query.length === 0) throw new Error("search requires a query");
+  // D-41: a shell can paste a megabyte. Clip rather than refuse — the first MAX_QUERY_CHARS
+  // characters are still a searchable question — and say so, so nobody wonders why the tail
+  // of what they typed had no effect. (`runSearch` bounds it again; this is what tells the
+  // person at the terminal.)
+  if (parsed.query.length > MAX_QUERY_CHARS) {
+    parsed.query = parsed.query.slice(0, MAX_QUERY_CHARS);
+    parsed.clipped = true;
+  }
   return parsed;
 }
 
@@ -316,6 +326,7 @@ export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
     io.stderr(configError(e));
     return 2;
   }
+  if (parsed.clipped) io.stderr(`vibectx: the query was clipped to its first ${MAX_QUERY_CHARS} characters\n`);
   const outcome = runSearch(registry, {
     query: parsed.query,
     maxTokens: parsed.maxTokens,

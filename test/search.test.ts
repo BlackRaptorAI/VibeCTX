@@ -15,7 +15,14 @@ import {
   writeIndex,
   SEARCH_INDEX_SCHEMA_VERSION,
 } from "../src/search-index.js";
-import { formatSearchResults, runSearch, searchExitCode, searchToolText, SEARCH_SCHEMA_VERSION } from "../src/search.js";
+import {
+  formatSearchResults,
+  runSearch,
+  searchExitCode,
+  searchToolText,
+  MAX_QUERY_CHARS,
+  SEARCH_SCHEMA_VERSION,
+} from "../src/search.js";
 
 /**
  * PAR-659 · D-35 — cross-library `search`. Every case here runs against a real cache
@@ -232,6 +239,18 @@ describe("runSearch · what the response tells the agent (PAR-659, D-35)", () =>
     const out = search({ query: "streaming" });
     expect(out.searched).toBe(0);
     expect(formatSearchResults(out)).toContain("no library has a cached document to search");
+  });
+
+  it("D-41: an over-long query is bounded at the ranking path itself, whatever the caller did", () => {
+    warmAll();
+    // MEASURED before this bound: a 200,000-term query built a 200,000-wide `tf` vector per
+    // section and exhausted a 2 GB heap — which, in the MCP server, kills every tool at once.
+    const huge = Array.from({ length: 200_000 }, (_, i) => `term${i}`).join(" ");
+    const out = search({ query: `streaming ${huge}` });
+    expect(out.notes.join(" ")).toContain(`clipped to its first ${MAX_QUERY_CHARS} characters`);
+    expect(out.query.length).toBeLessThanOrEqual(200);
+    // Still a real search: the terms that survived the clip did their work.
+    expect(out.groups.length).toBeGreaterThanOrEqual(1);
   });
 
   it("a query with no searchable terms is a note, not a crash", () => {

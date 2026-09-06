@@ -3,7 +3,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { Registry } from "./registry.js";
 import { getDocsToolText } from "./get-docs.js";
-import { searchToolText } from "./search.js";
+import { searchToolText, MAX_QUERY_CHARS } from "./search.js";
 import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
@@ -69,8 +69,14 @@ export function buildServer(registry: Registry): McpServer {
         "Search ALL cached library docs at once and get the best sections grouped by library — use this when you do not know which library owns a concept (\"how do I stream a response to the client\" could be Next.js, the AI SDK or Hono), or to find out which of your dependencies documents something. Use get_docs instead when you already know the library. Cache-only and offline by design: it never fetches, so it searches exactly the libraries already cached (the response says which, and how to cache the rest with warm_project).",
       inputSchema: {
         // A non-empty query: an empty string is a schema error the client sees, not a search
-        // that quietly returns everything.
-        query: z.string().min(1).describe("What you are looking for, in plain words — e.g. \"server-sent events streaming\""),
+        // that quietly returns everything. Bounded above too (D-41): a 200,000-term query
+        // exhausts the heap, and an out-of-memory here takes down every tool on this server,
+        // not one call — so an over-long query is a schema error the client sees as well.
+        query: z
+          .string()
+          .min(1)
+          .max(MAX_QUERY_CHARS)
+          .describe("What you are looking for, in plain words — e.g. \"server-sent events streaming\""),
         maxTokens: z
           .number()
           .int()

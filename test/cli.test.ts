@@ -7,7 +7,7 @@ import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
 import { resetSearchIndexMemo } from "../src/search-index.js";
-import { SEARCH_SCHEMA_VERSION } from "../src/search.js";
+import { MAX_QUERY_CHARS, SEARCH_SCHEMA_VERSION } from "../src/search.js";
 
 let dir: string;
 /** A working directory with no `.git` and no config file (Q1). */
@@ -552,6 +552,16 @@ describe("parseSearchArgs (PAR-659)", () => {
   it("a bare word is query text, never a library — only --library names one", () => {
     expect(parseSearchArgs(["hono", "streaming"]).libraries).toEqual([]);
     expect(parseSearchArgs(["hono", "streaming"]).query).toBe("hono streaming");
+  });
+
+  it("D-41: an over-long query is clipped to MAX_QUERY_CHARS and flagged, not run at full length", () => {
+    const short = parseSearchArgs(["x".repeat(MAX_QUERY_CHARS)]);
+    expect(short.query).toHaveLength(MAX_QUERY_CHARS);
+    expect(short.clipped).toBeUndefined();
+    // The MEASURED failure this bounds: a 200,000-term query exhausts a 2 GB heap.
+    const huge = parseSearchArgs(Array.from({ length: 200_000 }, (_, i) => `term${i}`));
+    expect(huge.query).toHaveLength(MAX_QUERY_CHARS);
+    expect(huge.clipped).toBe(true);
   });
 });
 
