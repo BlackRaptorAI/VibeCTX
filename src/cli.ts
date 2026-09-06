@@ -1,8 +1,9 @@
 import { loadRegistry } from "./registry.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
+import { resolveToolText, type Ecosystem } from "./resolve.js";
 
 /**
- * Subcommand dispatch for the `vibectx` binary. Only `doctor` exists; anything
+ * Subcommand dispatch for the `vibectx` binary: `doctor` and `resolve`; anything
  * else falls through to the MCP stdio server in index.ts. Kept transport- and
  * process-free so the dispatcher is unit-testable.
  */
@@ -14,12 +15,19 @@ export interface DoctorCliArgs {
   config?: string;
 }
 
+export interface ResolveCliArgs {
+  name: string;
+  ecosystem?: Ecosystem;
+  config?: string;
+}
+
 export interface CliIo {
   stdout(s: string): void;
   stderr(s: string): void;
 }
 
 export const DOCTOR_USAGE = "usage: vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]";
+export const RESOLVE_USAGE = "usage: vibectx resolve <package> [--npm | --pypi] [--config <path>]";
 
 /** Parse the arguments after `doctor`. Throws on anything not in DOCTOR_USAGE. */
 export function parseDoctorArgs(args: string[]): DoctorCliArgs {
@@ -47,6 +55,41 @@ export function parseDoctorArgs(args: string[]): DoctorCliArgs {
         throw new Error(`Unexpected argument "${arg}"`);
     }
   }
+  return parsed;
+}
+
+/** Parse the arguments after `resolve`: one package name, `--npm` or `--pypi`, `--config`. */
+export function parseResolveArgs(args: string[]): ResolveCliArgs {
+  let name: string | undefined;
+  let ecosystem: Ecosystem | undefined;
+  let config: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    switch (arg) {
+      case "--npm":
+      case "--pypi": {
+        const eco: Ecosystem = arg === "--npm" ? "npm" : "pypi";
+        if (ecosystem !== undefined && ecosystem !== eco) throw new Error("--npm and --pypi are mutually exclusive");
+        ecosystem = eco;
+        break;
+      }
+      case "--config": {
+        const value = args[i + 1];
+        if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+        config = value;
+        i += 1;
+        break;
+      }
+      default:
+        if (arg.startsWith("-")) throw new Error(`Unknown option "${arg}"`);
+        if (name !== undefined) throw new Error(`Unexpected argument "${arg}"`);
+        name = arg;
+    }
+  }
+  if (name === undefined) throw new Error("resolve requires a package name");
+  const parsed: ResolveCliArgs = { name };
+  if (ecosystem !== undefined) parsed.ecosystem = ecosystem;
+  if (config !== undefined) parsed.config = config;
   return parsed;
 }
 
@@ -82,26 +125,51 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   return doctorExitCode(report);
 }
 
-/** Index of the `doctor` subcommand token in argv, skipping option VALUES so a
- *  library or config path named "doctor" is not mistaken for it; -1 when absent. */
-function findDoctorToken(argv: string[]): number {
+/** Run `vibectx resolve <package>`; prints the same report the MCP tool returns.
+ *  Exit 0 resolved (or already in the registry) · 1 could not resolve · 2 usage / config error. */
+export async function runResolveCli(args: string[], io: CliIo): Promise<number> {
+  let parsed: ResolveCliArgs;
+  try {
+    parsed = parseResolveArgs(args);
+  } catch (e) {
+    io.stderr(`${message(e)}\n${RESOLVE_USAGE}\n`);
+    return 2;
+  }
+  let registry;
+  try {
+    registry = loadRegistry(parsed.config);
+  } catch (e) {
+    io.stderr(`Could not load config ${parsed.config}: ${message(e)}\n`);
+    return 2;
+  }
+  const text = await resolveToolText(registry, parsed.name, parsed.ecosystem);
+  io.stdout(`${text}\n`);
+  return text.startsWith("Could not resolve") ? 1 : 0;
+}
+
+const SUBCOMMANDS = new Set(["doctor", "resolve"]);
+
+/** Index of the first subcommand token in argv, skipping option VALUES so a library,
+ *  package or config path named "doctor" / "resolve" is not mistaken for it; -1 when absent. */
+function findSubcommand(argv: string[]): number {
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--config" || arg === "--library") {
       i += 1;
       continue;
     }
-    if (arg === "doctor") return i;
+    if (SUBCOMMANDS.has(arg)) return i;
   }
   return -1;
 }
 
 /** `argv` is process.argv. Returns an exit code when a subcommand ran, or
- *  undefined when the caller should start the MCP server as before. The `doctor`
+ *  undefined when the caller should start the MCP server as before. The subcommand
  *  token may come before or after `--config <path>` (the README shows `--config`
- *  leading); without a `doctor` token anywhere, argv is left to the server path. */
+ *  leading); without one anywhere, argv is left to the server path. */
 export async function dispatchCli(argv: string[], io: CliIo): Promise<number | undefined> {
-  const at = findDoctorToken(argv);
+  const at = findSubcommand(argv);
   if (at === -1) return undefined;
-  return runDoctorCli([...argv.slice(2, at), ...argv.slice(at + 1)], io);
+  const rest = [...argv.slice(2, at), ...argv.slice(at + 1)];
+  return argv[at] === "doctor" ? runDoctorCli(rest, io) : runResolveCli(rest, io);
 }

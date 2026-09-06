@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
 import { DEFAULT_REGISTRY } from "../src/registry.js";
-import { parseDoctorArgs, dispatchCli, type CliIo } from "../src/cli.js";
+import { parseDoctorArgs, parseResolveArgs, dispatchCli, RESOLVE_USAGE, type CliIo } from "../src/cli.js";
 
 let dir: string;
 
@@ -57,7 +57,7 @@ describe("parseDoctorArgs", () => {
 });
 
 describe("dispatchCli", () => {
-  it("returns undefined (start the MCP server) when argv[2] is not 'doctor'", async () => {
+  it("returns undefined (start the MCP server) when no subcommand token is present", async () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);
     const a = io();
@@ -169,5 +169,93 @@ describe("dispatchCli", () => {
     const bad = writeConfig([{ name: "x", urls: ["https://x.example/llms.txt"], probeQueries: [""] }]);
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", bad, "--offline"], a)).toBe(2);
     expect(a.err.join("")).toMatch(/probeQueries/);
+  });
+});
+
+function stubFetch(routes: Record<string, string>) {
+  const spy = vi.fn(async (url: unknown) => {
+    const body = routes[String(url)];
+    if (body === undefined) return new Response("not found", { status: 404 });
+    const json = body.startsWith("{");
+    return new Response(body, { status: 200, headers: { "content-type": json ? "application/json" : "text/plain" } });
+  });
+  vi.stubGlobal("fetch", spy);
+  return spy;
+}
+
+describe("parseResolveArgs (PAR-655)", () => {
+  it("takes one positional name plus optional --npm / --pypi / --config", () => {
+    expect(parseResolveArgs(["hono"])).toEqual({ name: "hono" });
+    expect(parseResolveArgs(["httpx", "--pypi"])).toEqual({ name: "httpx", ecosystem: "pypi" });
+    expect(parseResolveArgs(["--npm", "httpx", "--config", "c.json"])).toEqual({ name: "httpx", ecosystem: "npm", config: "c.json" });
+  });
+
+  it("rejects a missing name, two names, both ecosystems, unknown flags and a flag missing its value", () => {
+    expect(() => parseResolveArgs([])).toThrow(/resolve requires a package name/);
+    expect(() => parseResolveArgs(["a", "b"])).toThrow(/Unexpected argument "b"/);
+    expect(() => parseResolveArgs(["a", "--npm", "--pypi"])).toThrow(/--npm and --pypi are mutually exclusive/);
+    expect(() => parseResolveArgs(["a", "--bogus"])).toThrow(/Unknown option "--bogus"/);
+    expect(() => parseResolveArgs(["a", "--config"])).toThrow(/--config requires a value/);
+  });
+});
+
+describe("dispatchCli resolve (PAR-655)", () => {
+  it("resolves a name, prints the report on stdout and exits 0", async () => {
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      "https://raw.githubusercontent.com/elysiajs/elysia/main/README.md": "# Elysia",
+    });
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "elysia"], a)).toBe(0);
+    const text = a.out.join("");
+    expect(text).toMatch(/^Resolved "elysia" via npm/);
+    expect(text).toContain("chosen: https://raw.githubusercontent.com/elysiajs/elysia/main/README.md (readme, 8 chars)");
+    expect(a.err).toEqual([]);
+    expect(JSON.parse(readFileSync(join(dir, "resolved.json"), "utf8")).entries[0].name).toBe("elysia");
+  });
+
+  it("a name the registry already knows is reported without fetching, exit 0", async () => {
+    const spy = stubFetch({});
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "next"], a)).toBe(0);
+    expect(a.out.join("")).toContain('"next" is already in the registry as "next.js"');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("an unresolvable name prints the could-not-resolve line on stdout and exits 1", async () => {
+    stubFetch({});
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "zz-nothing"], a)).toBe(1);
+    expect(a.out.join("")).toMatch(/^Could not resolve "zz-nothing": npm: no metadata/);
+  });
+
+  it("--pypi forces PyPI; --config loads the config first", async () => {
+    const spy = stubFetch({
+      "https://pypi.org/pypi/httpx/json": JSON.stringify({ info: { project_urls: { Documentation: "https://www.python-httpx.org" } } }),
+      "https://www.python-httpx.org/llms.txt": "# HTTPX",
+    });
+    const config = writeConfig([{ name: "react", urls: [REACT_URL] }]);
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "--config", config, "resolve", "httpx", "--pypi"], a)).toBe(0);
+    expect(a.out.join("")).toMatch(/^Resolved "httpx" via PyPI/);
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://registry.npmjs.org/httpx/latest");
+  });
+
+  it("exits 2 with usage on a bad flag or missing name, and on a bad config", async () => {
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "resolve"], a)).toBe(2);
+    expect(a.err.join("")).toContain(RESOLVE_USAGE);
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "x", "--bogus"], a)).toBe(2);
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "x", "--config", "/nonexistent.json"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+  });
+
+  it("does not mistake a --library / --config VALUE named 'resolve' for the subcommand, and a package named 'doctor' can be resolved", async () => {
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "--config", "resolve"], a)).toBeUndefined();
+    const spy = stubFetch({});
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "doctor"], a)).toBe(1);
+    expect(a.out.join("")).toMatch(/^Could not resolve "doctor"/);
+    expect(spy).toHaveBeenCalledTimes(2);
   });
 });

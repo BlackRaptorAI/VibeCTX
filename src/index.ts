@@ -7,6 +7,7 @@ import { getDocsToolText } from "./get-docs.js";
 import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
+import { resolveToolText } from "./resolve.js";
 import { dispatchCli } from "./cli.js";
 
 function text(s: string) {
@@ -25,7 +26,7 @@ async function startServer(): Promise<void> {
     "list_libraries",
     {
       description:
-        "List the libraries this server can fetch docs for, with cache status and source kind (full-text / index-only / readme; unknown until cached). Use get_docs to retrieve content.",
+        "List the libraries this server can fetch docs for, with cache status and source kind (full-text / index-only / readme; unknown until cached); [resolved] marks entries auto-resolved from npm/PyPI. Use get_docs to retrieve content.",
       inputSchema: {},
     },
     async () => text(listLibrariesText(registry)),
@@ -35,9 +36,9 @@ async function startServer(): Promise<void> {
     "get_docs",
     {
       description:
-        "Get official documentation for a library. With a topic, returns the best-matching sections (following index links when the source is an llms.txt index); without one, returns the document head and section list.",
+        "Get official documentation for a library. With a topic, returns the best-matching sections (following index links when the source is an llms.txt index); without one, returns the document head and section list. An unknown name is resolved automatically from npm / PyPI metadata (llms.txt, then the GitHub README) — any package name works.",
       inputSchema: {
-        library: z.string().describe("Library name (or alias) from list_libraries"),
+        library: z.string().describe("Library name (or alias) from list_libraries, or any npm / PyPI package name"),
         topic: z.string().optional().describe("What you need docs about"),
         maxTokens: z
           .number()
@@ -72,11 +73,27 @@ async function startServer(): Promise<void> {
     async ({ library }) => text(await doctorToolText(registry, library)),
   );
 
+  server.registerTool(
+    "resolve_library",
+    {
+      description:
+        "Resolve any npm or PyPI package name to a docs source without configuration: registry metadata → llms-full.txt / llms.txt on its homepage or docs site → its GitHub README. Reports what was found (source, homepage, candidates tried, chosen URL, kind) and saves the result so get_docs works for that name. get_docs does this implicitly for unknown names; call this to see the details or to pick the ecosystem.",
+      inputSchema: {
+        name: z.string().describe("Package name, e.g. hono, httpx, @tanstack/react-query"),
+        ecosystem: z
+          .enum(["npm", "pypi"])
+          .optional()
+          .describe("Only look in this registry (default: npm first, then PyPI)"),
+      },
+    },
+    async ({ name, ecosystem }) => text(await resolveToolText(registry, name, ecosystem)),
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-// `vibectx doctor [...]` runs the coverage check and exits with its code;
+// `vibectx doctor [...]` / `vibectx resolve <name>` run and exit with their code;
 // anything else starts the MCP stdio server exactly as before.
 const cliExit = await dispatchCli(process.argv, {
   stdout: (s) => process.stdout.write(s),
