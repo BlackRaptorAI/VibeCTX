@@ -12,6 +12,7 @@ import {
   parsePnpmLockDeps,
   requirementName,
   discoverProjectDependencies,
+  MANIFEST_MAX_BYTES,
 } from "../src/project-deps.js";
 
 let dir: string;
@@ -386,5 +387,27 @@ describe("discoverProjectDependencies", () => {
     expect(() => discoverProjectDependencies(join(dir, "nope"))).toThrow(/not a directory/);
     write("f.txt", "x");
     expect(() => discoverProjectDependencies(join(dir, "f.txt"))).toThrow(/not a directory/);
+  });
+});
+
+describe("discoverProjectDependencies — hostile or oversized input", () => {
+  it("drops names that are not valid package names (counted in a note, never echoed) so nothing from a manifest reaches the terminal unvalidated", () => {
+    write("package.json", JSON.stringify({ dependencies: { next: "15", "[31mEVIL[0m": "1", "Not Valid": "1", "": "1" } }));
+    write("requirements.txt", "flask\n]0;pwnedbad name\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["next", "flask"]);
+    // requirements lines that do not parse as a PEP 508 name never become names at all (no note);
+    // package.json keys are free-form, so those are validated and counted.
+    expect(out.notes).toEqual(["package.json: skipped 2 names that are not valid npm package names"]);
+    expect(JSON.stringify(out)).not.toContain("EVIL");
+    expect(JSON.stringify(out)).not.toContain("");
+  });
+
+  it("a manifest over MANIFEST_MAX_BYTES is not read; a note says so", () => {
+    write("package.json", JSON.stringify({ dependencies: { next: "15" } }));
+    write("requirements.txt", `flask\n${"#".repeat(MANIFEST_MAX_BYTES)}\n`);
+    const out = discoverProjectDependencies(dir);
+    expect(out.manifests).toEqual(["package.json"]);
+    expect(out.notes).toEqual([`requirements.txt: larger than ${MANIFEST_MAX_BYTES / (1024 * 1024)} MiB; not read`]);
   });
 });

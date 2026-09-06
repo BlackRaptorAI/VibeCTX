@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
-import { normalisePyPiName } from "./package-names.js";
+import { normalisePyPiName, npmNameError, pypiNameError } from "./package-names.js";
 
 /**
  * Dependency discovery for `vibectx warm` (PAR-656): read a project directory's
@@ -37,9 +37,15 @@ import { normalisePyPiName } from "./package-names.js";
  * entries, which are skipped.
  *
  * PyPI names are returned in their PEP 503 form (`Typing_Extensions` → `typing-extensions`);
- * npm names as written (npm names are already lowercase). Nothing here validates names —
- * the resolver refuses anything that is not a package name before any network call.
+ * npm names as written (npm names are already lowercase). Discovery keeps only names that
+ * pass the package-name rules (npm grammar / PEP 508) — a manifest is a file anyone in the
+ * repo can edit, and its names end up in a terminal table and in URLs — and counts the rest
+ * in a note without echoing them. Manifests over MANIFEST_MAX_BYTES are not read.
  */
+
+/** Largest manifest or lockfile read. pnpm-lock.yaml of a large monorepo runs to a few MB;
+ *  ASSUMED headroom. */
+export const MANIFEST_MAX_BYTES = 32 * 1024 * 1024;
 
 export type DependencyEcosystem = "npm" | "pypi";
 
@@ -387,15 +393,29 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
   const seen = { npm: new Set<string>(), pypi: new Set<string>() };
 
   const addAll = (names: string[], ecosystem: DependencyEcosystem, source: string) => {
+    let invalid = 0;
     for (const raw of names) {
       const name = ecosystem === "pypi" ? normalisePyPiName(raw) : raw;
-      if (name.length === 0 || seen[ecosystem].has(name)) continue;
+      const bad = ecosystem === "pypi" ? pypiNameError(name) : npmNameError(name);
+      if (bad !== undefined) {
+        invalid += 1;
+        continue;
+      }
+      if (seen[ecosystem].has(name)) continue;
       seen[ecosystem].add(name);
       dependencies.push({ name, ecosystem, source });
+    }
+    if (invalid > 0) {
+      const label = ecosystem === "pypi" ? "PyPI project" : "npm package";
+      notes.push(`${source}: skipped ${invalid} ${invalid === 1 ? `name that is not a valid ${label} name` : `names that are not valid ${label} names`}`);
     }
   };
   const read = (rel: string): string | undefined => {
     try {
+      if (statSync(join(root, rel)).size > MANIFEST_MAX_BYTES) {
+        notes.push(`${rel}: larger than ${MANIFEST_MAX_BYTES / (1024 * 1024)} MiB; not read`);
+        return undefined;
+      }
       return readFileSync(join(root, rel), "utf8");
     } catch (e) {
       notes.push(`${rel}: could not read (${e instanceof Error ? e.message : String(e)})`);
@@ -504,10 +524,3 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
 
 /** Exported for the CLI's usage text and the README: the files discovery looks at. */
 export const MANIFEST_FILES = ["package.json", "pyproject.toml", "requirements*.txt", "package-lock.json", "pnpm-lock.yaml"] as const;
-
-/** True when `dir` exists and holds at least one file discovery would read or report. */
-export function hasAnyManifest(dir: string): boolean {
-  if (!isDirectory(dir)) return false;
-  if (["package.json", "pyproject.toml", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "uv.lock", "poetry.lock"].some((f) => existsSync(join(dir, f)))) return true;
-  return readdirSync(dir).some((f) => /^requirements.*\.txt$/i.test(f));
-}
