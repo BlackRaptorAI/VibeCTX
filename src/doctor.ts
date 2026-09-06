@@ -1,4 +1,4 @@
-import { resolveLibrary, type LibraryEntry, type Registry } from "./registry.js";
+import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { looksLikeIndex } from "./retrieval.js";
@@ -244,10 +244,6 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
-}
-
-function unknownLibraryMessage(registry: Registry, library: string): string {
-  return `Unknown library "${library}". Known: ${[...registry.entries.keys()].join(", ")}`;
 }
 
 /** Run the doctor over the registry (or one library). Up to DOCTOR_CONCURRENCY

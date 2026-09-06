@@ -2,9 +2,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { loadRegistry, resolveLibrary } from "./registry.js";
-import { getLibraryDoc } from "./fetcher.js";
-import { getDocs } from "./get-docs.js";
+import { loadRegistry } from "./registry.js";
+import { getDocsToolText } from "./get-docs.js";
+import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
 import { dispatchCli } from "./cli.js";
@@ -45,14 +45,7 @@ async function startServer(): Promise<void> {
           .describe("Approximate response budget (default 4000)"),
       },
     },
-    async ({ library, topic, maxTokens }) => {
-      const entry = resolveLibrary(registry, library);
-      if (!entry) {
-        const known = [...registry.entries.keys()].join(", ");
-        return text(`Unknown library "${library}". Known: ${known}`);
-      }
-      return text(await getDocs(entry, { topic, maxTokens }));
-    },
+    async ({ library, topic, maxTokens }) => text(await getDocsToolText(registry, { library, topic, maxTokens })),
   );
 
   server.registerTool(
@@ -64,22 +57,7 @@ async function startServer(): Promise<void> {
         library: z.string().optional(),
       },
     },
-    async ({ library }) => {
-      const targets = library
-        ? [resolveLibrary(registry, library)].filter((e) => e !== undefined)
-        : [...registry.entries.values()];
-      if (targets.length === 0) return text(`Unknown library "${library}".`);
-      const results: string[] = [];
-      for (const entry of targets) {
-        const doc = await getLibraryDoc(entry, { forceRefresh: true });
-        results.push(
-          doc
-            ? `${entry.name}: refreshed from ${doc.url} (${doc.content.length.toLocaleString()} chars)`
-            : `${entry.name}: FAILED — all candidate URLs unreachable`,
-        );
-      }
-      return text(results.join("\n"));
-    },
+    async ({ library }) => text(await refreshToolText(registry, library)),
   );
 
   server.registerTool(

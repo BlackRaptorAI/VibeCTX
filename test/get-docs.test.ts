@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDocs, getDocsDetailed } from "../src/get-docs.js";
+import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
 import { writeCache } from "../src/cache.js";
+import type { Registry } from "../src/registry.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
 
@@ -317,5 +318,41 @@ describe("getDocs index following", () => {
     const out = await getDocs(entry, { topic: "request" });
     expect(spy).not.toHaveBeenCalled();
     expect(out).toContain("Source: https://fastify.dev/llms.txt");
+  });
+});
+
+describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-library text, PAR-654)", () => {
+  const REACT_URL = "https://react.dev/llms-full.txt";
+  const registry: Registry = {
+    entries: new Map([
+      ["react", { name: "react", urls: [REACT_URL], aliases: ["reactjs"] }],
+      ["hono", { name: "hono", urls: ["https://hono.dev/llms.txt"] }],
+    ]),
+  };
+
+  it("an alias returns the canonical entry's docs (served from the seeded cache, no fetch)", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+    const spy = stubFetch({});
+    const out = await getDocsToolText(registry, { library: "reactjs", topic: "useEffect cleanup" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(out).toContain(`Source: ${REACT_URL}`);
+    expect(out).toContain("Return a function from useEffect");
+    // Case-folded input takes the same path.
+    expect(await getDocsToolText(registry, { library: "React" })).toContain(`Source: ${REACT_URL}`);
+  });
+
+  it("an unknown library returns the Unknown-library text listing canonical names only, without fetching", async () => {
+    const spy = stubFetch({});
+    expect(await getDocsToolText(registry, { library: "nope", topic: "x" })).toBe(
+      'Unknown library "nope". Known: react, hono',
+    );
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("passes topic and maxTokens through to getDocs", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+    stubFetch({});
+    const out = await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched", maxTokens: 10 });
+    expect(out).toMatch(/No sections matched "zzz-unmatched" in react docs/);
   });
 });

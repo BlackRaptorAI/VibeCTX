@@ -1,4 +1,4 @@
-import type { LibraryEntry } from "./registry.js";
+import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import {
   getLibraryDoc,
   fetchLinkedPage,
@@ -55,6 +55,18 @@ const sectionKey = (s: { heading: string; body: string }) => `${s.heading}\n${s.
  */
 export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<string> {
   return (await getDocsDetailed(entry, args)).text;
+}
+
+/** The MCP `get_docs` tool body: resolve `library` (canonical name or alias) and run
+ *  getDocs, or return the unknown-library text without touching the network. */
+export async function getDocsToolText(
+  registry: Registry,
+  args: GetDocsArgs & { library: string },
+): Promise<string> {
+  const { library, ...rest } = args;
+  const entry = resolveLibrary(registry, library);
+  if (!entry) return unknownLibraryMessage(registry, library);
+  return getDocs(entry, rest);
 }
 
 /** getDocs with its structured outcome (see GetDocsOutcome). */
