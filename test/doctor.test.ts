@@ -588,4 +588,22 @@ describe("doctorToolText (MCP doctor tool body)", () => {
     expect(out).toContain("1/1 libraries healthy");
     expect(out).toMatch(/\nreact\s+full-text/);
   });
+
+  it("treats a resolved entry like any other (PAR-655): classified, probed, cached, marked", async () => {
+    const README = "https://raw.githubusercontent.com/elysiajs/elysia/main/README.md";
+    writeCache("elysia", README, "# Elysia\n\nAn ergonomic framework for humans.\n\n## Middleware\n\nUse .onBeforeHandle().");
+    stubFetch({});
+    const out = await doctorToolText(
+      reg({
+        name: "elysia",
+        urls: ["https://elysiajs.com/llms.txt", README],
+        description: "Ergonomic framework",
+        allowedHosts: ["elysiajs.com"],
+        resolved: { source: "npm", resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest", homepage: "https://elysiajs.com/" },
+      }),
+      "elysia",
+    );
+    expect(out).toMatch(/\nelysia\s+readme\s+0\.0h\s+"ergonomic framework" \(derived\) → answered/);
+    expect(out).toContain("1/1 libraries healthy");
+  });
 });

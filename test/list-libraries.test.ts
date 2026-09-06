@@ -69,4 +69,24 @@ describe("listLibrariesText (PAR-707: kind bracket)", () => {
     writeCache("fastify", "https://fastify.dev/llms.txt", "# Fastify\n- [A](/docs/A.md)\n- [B](/docs/B.md)\n- [C](/docs/C.md)");
     expect(listLibrariesText(registry)).toMatch(/\*\*fastify\*\*.*\[full-text\]/);
   });
+
+  it("marks resolved entries with [resolved] after the kind bracket (PAR-655)", () => {
+    const withResolved: Registry = {
+      entries: new Map([
+        ["zod", { name: "zod", urls: ["https://zod.dev/llms.txt"], description: "Zod" }],
+        [
+          "elysia",
+          {
+            name: "elysia",
+            urls: ["https://elysiajs.com/llms.txt"],
+            description: "Ergonomic framework",
+            resolved: { source: "npm", resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest" },
+          },
+        ],
+      ]),
+    };
+    const text = listLibrariesText(withResolved);
+    expect(text).toMatch(/- \*\*zod\*\* — Zod \[not cached\] \[unknown\]$/m);
+    expect(text).toMatch(/- \*\*elysia\*\* — Ergonomic framework \[not cached\] \[unknown\] \[resolved\]$/m);
+  });
 });

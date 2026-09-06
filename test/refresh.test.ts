@@ -58,9 +58,41 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     ]);
   });
 
-  it("an unknown library returns the Unknown-library text listing canonical names, without fetching", async () => {
+  it("an unknown library returns the Unknown-library text listing canonical names, without fetching (refresh never resolves)", async () => {
     const spy = stubFetch({});
     expect(await refreshToolText(registry, "nope")).toBe('Unknown library "nope". Known: react, hono');
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("re-resolves a resolved entry through its ecosystem instead of only refetching its urls (PAR-655)", async () => {
+    const resolvedHono = {
+      name: "hono",
+      urls: ["https://hono.dev/llms.txt", "https://raw.githubusercontent.com/honojs/hono/main/README.md"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest", homepage: "https://hono.dev/" },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    const spy = stubFetch({
+      "https://registry.npmjs.org/hono/latest": JSON.stringify({ homepage: "https://hono.dev", repository: "https://github.com/honojs/hono" }),
+      "https://hono.dev/llms-full.txt": "# Hono full",
+    });
+    const out = await refreshToolText(reg, "hono");
+    expect(spy.mock.calls[0][0]).toBe("https://registry.npmjs.org/hono/latest");
+    expect(out).toBe("hono: re-resolved via npm — refreshed from https://hono.dev/llms-full.txt (11 chars)");
+    // The live registry now carries the new candidate list (llms-full.txt was learned).
+    expect(reg.entries.get("hono")?.urls[0]).toBe("https://hono.dev/llms-full.txt");
+    expect(readCache("hono", "https://hono.dev/llms-full.txt", 168)?.content).toBe("# Hono full");
+  });
+
+  it("reports a resolved entry whose re-resolution fails, keeping the old entry", async () => {
+    const resolvedHono = {
+      name: "hono",
+      urls: ["https://hono.dev/llms.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    stubFetch({});
+    const out = await refreshToolText(reg, "hono");
+    expect(out).toMatch(/^hono: FAILED — Could not resolve "hono": npm: no metadata/);
+    expect(reg.entries.get("hono")).toBe(resolvedHono);
   });
 });
