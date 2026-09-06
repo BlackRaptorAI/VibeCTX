@@ -13,6 +13,7 @@ import {
   resetSearchIndexMemo,
   searchIndexPath,
   writeIndex,
+  MAX_LAZY_INDEX_DOCS,
   SEARCH_INDEX_SCHEMA_VERSION,
 } from "../src/search-index.js";
 import {
@@ -21,6 +22,7 @@ import {
   searchExitCode,
   searchToolText,
   MAX_QUERY_CHARS,
+  MAX_RENDERED_LIBRARIES,
   SEARCH_SCHEMA_VERSION,
 } from "../src/search.js";
 
@@ -148,22 +150,102 @@ describe("runSearch · grouping and ordering (PAR-659, D-35)", () => {
   });
 });
 
-describe("runSearch · the budget (PAR-659, D-35)", () => {
+/**
+ * PAR-659 · D-39 — THE BUDGET IS PRICED ON WHAT IS ACTUALLY RETURNED.
+ *
+ * The fixture matters more than the assertions here, and the quality gate's finding is why.
+ * The previous "spends the budget ACROSS libraries" case ran on a corpus where EVERY library
+ * had exactly one matching section, so `groups.length >= 2` and `sections.length === 1` were
+ * arithmetic rather than behaviour: depth-first selection passed it unchanged. This corpus is
+ * built so the two strategies give visibly different answers — one library owns FOUR matching
+ * sections, and the budget has room for about three sections in total. Round-robin spreads
+ * them across three libraries; depth-first would spend them all inside the first.
+ *
+ * Sections are long on purpose (~1 KB each), because the budget defect the review and schema
+ * gates MEASURED — 9.9× at the default, 97× at `maxTokens: 200`, 322× on their fixture — only
+ * shows on a corpus whose bodies are big enough to overrun it.
+ */
+const WIDE_URL = (n: string) => `https://${n}.example.com/llms-full.txt`;
+const PARAGRAPH =
+  "Open a streaming response and write each event as it is produced, flushing between writes so " +
+  "the client sees them as they arrive rather than at the end. The helper takes care of the " +
+  "framing, the keep-alive comments and the retry hint, and closes the stream when the handler " +
+  "returns or the request is aborted. Everything here is ordinary streaming: no polling, no " +
+  "second connection, and no buffering in front of the client. ";
+
+/** `sections` sections of streaming prose, each ~1 KB, under a library's own heading. */
+function wideDoc(library: string, sections: number): string {
+  const lines = [`# ${library}`, "", `Documentation for ${library}.`, ""];
+  for (let s = 0; s < sections; s++) {
+    lines.push(`## Streaming events ${s}`, "", `${PARAGRAPH}${PARAGRAPH}Section ${s} of ${library}.`, "");
+  }
+  return lines.join("\n");
+}
+
+/** Four libraries; the first has four matching sections, the rest have one each. */
+function wideCorpus(counts = [4, 1, 1, 1]): Registry {
+  const entries = new Map<string, { name: string; urls: string[] }>();
+  counts.forEach((n, i) => {
+    const name = `wide-${i}`;
+    writeCache(name, WIDE_URL(name), wideDoc(name, n));
+    entries.set(name, { name, urls: [WIDE_URL(name)] });
+  });
+  return { entries };
+}
+
+describe("runSearch · the budget (PAR-659, D-35, D-39)", () => {
   it("always returns at least one section from the best-scoring library, however small the budget", () => {
     warmAll();
+    const best = search({ query: "server-sent events streaming" }).groups[0].library;
     const out = search({ query: "server-sent events streaming", maxTokens: 1 });
     expect(out.groups).toHaveLength(1);
+    expect(out.groups[0].library).toBe(best);
     expect(out.groups[0].sections).toHaveLength(1);
-    expect(out.groups[0].sections[0].body.length).toBeGreaterThan(0);
+    // D-39/D-29: at four characters of budget the CAP wins over the body, exactly as it does
+    // for an over-budget snippet. Give the section room and the body is there.
+    const roomy = search({ query: "server-sent events streaming", maxTokens: 200 });
+    expect(roomy.groups[0].library).toBe(best);
+    expect(roomy.groups[0].sections[0].body.length).toBeGreaterThan(0);
   });
 
-  it("spends the budget ACROSS libraries, not depth-first into the first one", () => {
-    warmAll();
-    // A budget with room for a few sections: the second library must get one before the first
-    // library gets its second.
-    const out = search({ query: "server-sent events streaming", maxTokens: 60 });
-    expect(out.groups.length).toBeGreaterThanOrEqual(2);
+  it("spends the budget ACROSS libraries where depth-first would spend it inside one", () => {
+    const reg = wideCorpus();
+    // The first library HAS four matching sections — so this fixture can tell the strategies
+    // apart, which the case it replaces could not.
+    const all = runSearch(reg, { query: "streaming events flushing", maxTokens: 100_000 });
+    expect(all.groups[0].matched).toBeGreaterThanOrEqual(4);
+
+    // Room for roughly three sections. Round-robin: one from each of three libraries.
+    const out = runSearch(reg, { query: "streaming events flushing", maxTokens: 900 });
+    expect(out.groups.length).toBeGreaterThanOrEqual(3);
+    for (const g of out.groups) expect(g.sections).toHaveLength(1);
+    // Depth-first on this fixture would return ONE group holding several sections.
+    expect(out.groups.reduce((n, g) => n + g.sections.length, 0)).toBe(out.groups.length);
+  });
+
+  it("D-39: the rendered response stays inside maxTokens*4 at the default budget and at 200", () => {
+    const reg = wideCorpus([6, 6, 6, 6]);
+    for (const maxTokens of [4000, 200]) {
+      const out = runSearch(reg, { query: "streaming events flushing", maxTokens });
+      const rendered = formatSearchResults(out);
+      // MEASURED before D-39: 9.9× at the default budget, 97× at 200.
+      expect(rendered.length).toBeLessThanOrEqual(maxTokens * 4);
+      // …and `--json` obeys the same rule, which is the half that had no bound at all.
+      const bodies = out.groups.reduce((n, g) => n + g.sections.reduce((m, s) => m + s.body.length, 0), 0);
+      expect(bodies).toBeLessThanOrEqual(maxTokens * 4);
+      expect(out.groups.length).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it("D-39: a section far larger than the whole budget is clipped, not emitted whole", () => {
+    const name = "one-huge";
+    const url = WIDE_URL(name);
+    writeCache(name, url, `# ${name}\n\n## Streaming events\n\n${PARAGRAPH.repeat(200)}`);
+    const reg: Registry = { entries: new Map([[name, { name, urls: [url] }]]) };
+    const out = runSearch(reg, { query: "streaming events flushing", maxTokens: 200 });
     expect(out.groups[0].sections).toHaveLength(1);
+    expect(formatSearchResults(out).length).toBeLessThanOrEqual(800);
+    expect(out.groups[0].sections[0].body.length).toBeLessThanOrEqual(800);
   });
 
   it("a generous budget returns every matching section, each with its body", () => {
@@ -176,12 +258,54 @@ describe("runSearch · the budget (PAR-659, D-35)", () => {
   });
 });
 
+/**
+ * PAR-659 · D-36 — the two per-call bounds, each with a case that FAILS if the bound is
+ * removed. The quality gate found both surviving mutation (raising MAX_LAZY_INDEX_DOCS to
+ * infinity, deleting MAX_RENDERED_LIBRARIES) because nothing exercised the boundary at all.
+ */
+describe("runSearch · the per-call bounds (PAR-659, D-36)", () => {
+  /** `count` tiny cached libraries, all matching the same query. */
+  function manyLibraries(count: number): Registry {
+    const entries = new Map<string, { name: string; urls: string[] }>();
+    for (let i = 0; i < count; i++) {
+      const name = `many-${String(i).padStart(3, "0")}`;
+      const url = `https://${name}.example.com/llms.txt`;
+      writeCache(name, url, `# ${name}\n\n## Streaming events\n\nStream events to the client from ${name}.`);
+      entries.set(name, { name, urls: [url] });
+    }
+    return { entries };
+  }
+
+  it("MAX_LAZY_INDEX_DOCS bounds the tokenizing ONE cold call does, and says which libraries were left", () => {
+    const reg = manyLibraries(MAX_LAZY_INDEX_DOCS + 5);
+    const cold = runSearch(reg, { query: "streaming events" });
+    expect(cold.tokenized).toBe(MAX_LAZY_INDEX_DOCS); // not all 45 — the bound is what stops it
+    expect(cold.searched).toBe(MAX_LAZY_INDEX_DOCS);
+    expect(cold.notes.join(" ")).toContain(`at most ${MAX_LAZY_INDEX_DOCS} documents are indexed per call`);
+    // Run it again and the rest are taken in, as the note promises.
+    const second = runSearch(reg, { query: "streaming events" });
+    expect(second.fromIndex).toBe(MAX_LAZY_INDEX_DOCS);
+    expect(second.tokenized).toBe(5);
+    expect(runSearch(reg, { query: "streaming events" }).fromIndex).toBe(MAX_LAZY_INDEX_DOCS + 5);
+  });
+
+  it("MAX_RENDERED_LIBRARIES caps how many libraries one response can name, however large the budget", () => {
+    const reg = manyLibraries(MAX_RENDERED_LIBRARIES + 4);
+    const out = runSearch(reg, { query: "streaming events", maxTokens: 1_000_000 });
+    expect(out.matchedLibraries).toBe(MAX_RENDERED_LIBRARIES + 4);
+    expect(out.groups).toHaveLength(MAX_RENDERED_LIBRARIES); // not all twelve
+    expect(out.notes.join(" ")).toContain(`libraries matched; the ${MAX_RENDERED_LIBRARIES} best are shown`);
+  });
+});
+
 describe("runSearch · the libraries filter (PAR-659, D-35)", () => {
   it("filters by canonical name", () => {
     warmAll();
     const out = search({ query: "streaming", libraries: ["hono"] });
-    expect(out.configured).toBe(1);
+    expect(out.requested).toBe(1);
+    expect(out.configured).toBe(3); // N1: the REGISTRY's size, not the filter's
     expect(out.groups.map((g) => g.library)).toEqual(["hono"]);
+    expect(formatSearchResults(out)).toContain("Searched 1 of 1 requested library (3 configured)");
   });
 
   it("filters by alias", () => {

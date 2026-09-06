@@ -90,6 +90,18 @@ const MAX_LIBRARY_CHARS = 214;
 const MAX_URL_CHARS = 300;
 /** Libraries named individually in the "not cached" line before it switches to a count. ASSUMED. */
 const MAX_NAMED_UNCACHED = 8;
+/** Longest heading, and longest single ancestor heading, carried on a returned section.
+ *  Matches `retrieval.ts`'s MAX_PATH_CHARS, which is what the RENDERED path is clipped to
+ *  (S1: the outcome must obey the same rule the rendered text does, because `--json` hands the
+ *  outcome to the agent directly). ASSUMED. */
+const MAX_HEADING_CHARS = 200;
+/** Longest note carried into the footer. Notes quote file paths and parser positions. ASSUMED. */
+const MAX_NOTE_CHARS = 300;
+
+/** How `formatSearchResults` joins what it renders. Named because `selectAcrossLibraries`
+ *  prices them: a budget that ignores its own separators is not a budget. */
+const BLOCK_JOIN = "\n\n";
+const SECTION_JOIN = "\n\n---\n\n";
 
 const DEFAULT_TTL_HOURS = 168;
 
@@ -123,10 +135,17 @@ export interface SearchOutcome {
   schemaVersion: typeof SEARCH_SCHEMA_VERSION;
   generatedAt: string;
   query: string;
+  /** The budget this outcome was built under — `maxTokens`, defaulted. Carried because the
+   *  budget is what bounds the rendering, and `formatSearchResults` must divide it exactly as
+   *  `runSearch` did (D-39). */
+  maxTokens: number;
   /** Groups with at least one returned section, best library first. */
   groups: SearchGroup[];
-  /** Registry entries in scope (all of them, or the `libraries` filter's). */
+  /** Libraries the REGISTRY holds — always, filter or no filter. N1: a filtered search that
+   *  reported "1 of 1 configured" told the reader nothing about the other twenty-nine. */
   configured: number;
+  /** Of those, the ones in scope for this call: all of them, or the `libraries` filter's. */
+  requested: number;
   /** Of those, the ones with a cached primary document — the ones actually searched. */
   searched: number;
   /** Their names, registry order. Named in the zero-match message so "nothing matched" is
@@ -134,7 +153,13 @@ export interface SearchOutcome {
   searchedLibraries: string[];
   /** Of those, how many had at least one matching section — BEFORE the budget was applied.
    *  `groups.length` can be smaller (a small budget, or MAX_RENDERED_LIBRARIES), and reporting
-   *  the rendered count as the matched count would understate what the cache actually holds. */
+   *  the rendered count as the matched count would understate what the cache actually holds.
+   *
+   *  K1, stated exactly: for the libraries whose document was re-read to render (at most
+   *  MAX_RENDERED_LIBRARIES), this counts only sections the DOCUMENT has, so a planted index
+   *  claiming sections that do not exist cannot inflate it. For libraries past that cap the
+   *  count is the index's, unverified — checking it would mean splitting every cached document
+   *  on every search, which is the cost the index exists to avoid. */
   matchedLibraries: number;
   /** Library names in `libraries` that resolved to nothing. */
   unknown: string[];
@@ -230,11 +255,23 @@ function corpusIdfs(candidates: Candidate[], termCount: number): { idfs: number[
  * the failure `search` exists to avoid: the question is *which library*, so breadth is the
  * answer's substance, not a nicety.
  *
- * A group header costs budget too (a library's name and URL are part of what is returned).
- * The first section is always taken, whatever it costs, mirroring `selectSections`.
+ * D-39 — THE BUDGET IS PRICED ON WHAT IS ACTUALLY RETURNED. Every section reaching this
+ * function already carries its real heading path and its real body, because they were attached
+ * from the cached document BEFORE anything was priced. The earlier order — select, then fetch
+ * bodies — priced empty strings: MEASURED, the rendered response ran 9.9× the default budget,
+ * 97× at `maxTokens: 200` and 322× on the schema gate's fixture. A budget computed from
+ * placeholders is not a budget, it is a decoration.
+ *
+ * What each section costs is exactly what `formatSearchResults` will emit for it: the rendered
+ * block, plus its group's header the first time that group is opened, plus the separator that
+ * joins it to what came before. Nothing is estimated.
+ *
+ * The first section is taken whatever it costs, because D-35 requires at least one section
+ * from the best-scoring library; its body was already clipped to the budget, and
+ * `formatSearchResults` clips the assembled text as well. That is the same order D-29 settled
+ * for snippets: when the budget cannot hold even one block, THE CAP WINS.
  */
-function selectAcrossLibraries(groups: SearchGroup[], maxTokens: number): SearchGroup[] {
-  const budget = maxTokens * 4;
+function selectAcrossLibraries(groups: SearchGroup[], budget: number): SearchGroup[] {
   const taken = groups.map(() => [] as SearchSection[]);
   const opened = groups.map(() => false);
   let used = 0;
@@ -245,7 +282,9 @@ function selectAcrossLibraries(groups: SearchGroup[], maxTokens: number): Search
       const section = groups[g].sections[round];
       if (section === undefined) continue;
       placed = true;
-      const cost = renderSection(section).length + (opened[g] ? 0 : groupHeader(groups[g]).length);
+      const cost = opened[g]
+        ? SECTION_JOIN.length + renderSection(section).length
+        : (any ? BLOCK_JOIN.length : 0) + groupHeader(groups[g]).length + renderSection(section).length;
       if (any && used + cost > budget) continue;
       taken[g].push(section);
       opened[g] = true;
@@ -305,8 +344,13 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     schemaVersion: SEARCH_SCHEMA_VERSION,
     generatedAt: now.toISOString(),
     query: clipText(query, 200),
+    maxTokens: opts.maxTokens ?? DEFAULT_SEARCH_BUDGET_TOKENS,
     groups: [],
-    configured: scope.length,
+    // N1: `configured` is the REGISTRY's size, whether or not a filter narrowed this call.
+    // "Searched 1 of 1 configured library" after naming two libraries was true of the filter
+    // and false of the reader's question.
+    configured: registry.entries.size,
+    requested: scope.length,
     searched: 0,
     searchedLibraries: [],
     matchedLibraries: 0,
@@ -435,18 +479,25 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   }
 
   // Bodies come from the CACHED DOCUMENT, re-read and re-split here — never from the index,
-  // which holds no text.
+  // which holds no text. D-39: this happens BEFORE the budget is spent, so what the budget
+  // prices is what the reader will actually be handed.
   //
-  // Two things this must survive. A section id the document no longer has is DROPPED rather
+  // Three things this must survive. A section id the document no longer has is DROPPED rather
   // than guessed at: between the scan above and this read, another process (a `refresh`, a
-  // get_docs fetch) may have replaced the document, and the honest answer is fewer sections,
-  // never a section chosen by position out of a document nobody scored. And the cache is
-  // re-read through the CANDIDATE's own entry, not by looking the library name up in the
-  // registry map — a registry whose map KEY differs from its entry's `name` (which the S2
-  // cases in refresh.test.ts construct) would otherwise silently render no sections at all.
+  // get_docs fetch) may have replaced the document — or a planted index may be claiming
+  // sections that never existed (K1) — and the honest answer is fewer sections, never a
+  // section chosen by position out of a document nobody scored. The cache is re-read through
+  // the CANDIDATE's own entry, not by looking the library name up in the registry map — a
+  // registry whose map KEY differs from its entry's `name` (which the S2 cases in
+  // refresh.test.ts construct) would otherwise silently render no sections at all. And every
+  // heading and ancestor heading is cleaned and clipped HERE (S1), so `--json` obeys the same
+  // D-30 rule the rendered text does; bodies are clipped but never cleaned, because the body
+  // IS the document and laundering a control character inside a code sample would corrupt the
+  // answer the agent asked for.
+  const budget = sectionBudgetChars(base);
   const byLibrary = new Map(candidates.map((c) => [c.entry.name, c]));
   const withBodies: SearchGroup[] = [];
-  for (const group of selectAcrossLibraries(groups, opts.maxTokens ?? DEFAULT_SEARCH_BUDGET_TOKENS)) {
+  for (const group of groups) {
     const candidate = byLibrary.get(group.library);
     let split: SplitSection[] = [];
     try {
@@ -457,10 +508,23 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     }
     const sections = group.sections
       .filter((s) => split[s.sectionIndex] !== undefined)
-      .map((s) => ({ ...s, ...split[s.sectionIndex] }));
-    if (sections.length > 0) withBodies.push({ ...group, sections });
+      .map((s) => {
+        const real = split[s.sectionIndex];
+        return {
+          ...s,
+          heading: clipText(real.heading, MAX_HEADING_CHARS),
+          path: real.path.map((p) => clipText(p, MAX_HEADING_CHARS)),
+          level: real.level,
+          body: real.body.length > budget ? real.body.slice(0, budget) : real.body,
+        };
+      });
+    // K1: `matched` is now a count of sections the DOCUMENT has, not of postings the index
+    // claims. MEASURED before this: a hash-matching index carrying 50 `lengths` on a
+    // two-section document reported `matched: 50`.
+    if (sections.length > 0) withBodies.push({ ...group, matched: sections.length, sections });
   }
-  base.groups = withBodies;
+  base.matchedLibraries -= groups.length - withBodies.length;
+  base.groups = selectAcrossLibraries(withBodies, budget);
   return base;
 }
 
@@ -469,12 +533,23 @@ export function searchExitCode(outcome: SearchOutcome): 0 | 1 {
   return outcome.groups.length > 0 ? 0 : 1;
 }
 
-/** The closing accounting D-35 asks for: how many libraries were searched out of how many are
- *  configured, and — when fewer than all are cached — how to cache the rest. */
-function footer(outcome: SearchOutcome): string[] {
-  const shown = outcome.groups.length;
+/**
+ * The closing accounting D-35 asks for: how many libraries were searched out of how many are
+ * configured, and — when fewer than all are cached — how to cache the rest.
+ *
+ * `shown` is a parameter rather than `outcome.groups.length` so the budget arithmetic can price
+ * this block BEFORE selection has decided what is shown; see `footerReserve`.
+ *
+ * N1: with a filter in play the line reports against BOTH numbers. "Searched 1 of 1 configured
+ * library" was arithmetic about the filter, not information about the cache.
+ */
+function footerLines(outcome: SearchOutcome, shown: number): string[] {
+  const filtered = outcome.requested !== outcome.configured;
+  const scope = filtered
+    ? `Searched ${outcome.searched} of ${outcome.requested} requested librar${outcome.requested === 1 ? "y" : "ies"} (${outcome.configured} configured)`
+    : `Searched ${outcome.searched} of ${outcome.configured} configured librar${outcome.configured === 1 ? "y" : "ies"}`;
   const lines = [
-    `Searched ${outcome.searched} of ${outcome.configured} configured librar${outcome.configured === 1 ? "y" : "ies"}` +
+    scope +
       `${outcome.matchedLibraries > 0 ? `; ${outcome.matchedLibraries} matched` : ""}` +
       `${shown > 0 && shown < outcome.matchedLibraries ? `, ${shown} shown within the budget` : ""}.`,
   ];
@@ -488,14 +563,35 @@ function footer(outcome: SearchOutcome): string[] {
     );
   }
   for (const name of outcome.unknown) lines.push(`Unknown library "${name}" in the filter — ignored.`);
-  for (const note of outcome.notes) lines.push(`note: ${cleanText(note)}`);
+  for (const note of outcome.notes) lines.push(`note: ${clipText(note, MAX_NOTE_CHARS)}`);
   return lines;
+}
+
+/**
+ * D-39 — how much of the budget the SECTIONS get. The accounting footer is not optional (it is
+ * what stops "nothing matched" being read as "nothing was looked at"), so it is reserved out of
+ * the budget rather than added on top of it, and the same reservation is computed in
+ * `runSearch` and in `formatSearchResults` from the same fields — otherwise the two would
+ * divide the budget differently and the guarantee would be a coincidence.
+ *
+ * `matchedLibraries - 1` is the largest `shown` the footer's optional clause can ever carry
+ * (the clause only appears when `shown < matchedLibraries`), so this is an upper bound, never
+ * an under-estimate.
+ */
+function footerReserve(outcome: SearchOutcome): number {
+  return footerLines(outcome, Math.max(1, outcome.matchedLibraries - 1)).join("\n").length + BLOCK_JOIN.length;
+}
+
+/** The characters the rendered library blocks may occupy. Zero when the budget cannot even
+ *  hold the accounting line — there the accounting wins and the sections are what shrink. */
+function sectionBudgetChars(outcome: SearchOutcome): number {
+  return Math.max(0, outcome.maxTokens * 4 - footerReserve(outcome));
 }
 
 /** Human-readable result; the same text the CLI prints and the MCP `search` tool returns. */
 export function formatSearchResults(outcome: SearchOutcome): string {
   const blocks = outcome.groups.map(
-    (group) => groupHeader(group) + group.sections.map((s) => renderSection(s)).join("\n\n---\n\n"),
+    (group) => groupHeader(group) + group.sections.map((s) => renderSection(s)).join(SECTION_JOIN),
   );
   if (blocks.length === 0) {
     // D-35: an honest zero-match message NAMES what was searched, so "nothing matched" can
@@ -507,9 +603,20 @@ export function formatSearchResults(outcome: SearchOutcome): string {
         : `searched ${named.length} cached librar${named.length === 1 ? "y" : "ies"}: ${
             named.length <= MAX_NAMED_UNCACHED ? named.join(", ") : `${named.slice(0, MAX_NAMED_UNCACHED).join(", ")} and ${named.length - MAX_NAMED_UNCACHED} more`
           }`;
-    return [`No sections matched "${outcome.query}" — ${where}.`, "Try broader terms, or get_docs for one library.", "", ...footer(outcome)].join("\n");
+    return [
+      `No sections matched "${outcome.query}" — ${where}.`,
+      "Try broader terms, or get_docs for one library.",
+      "",
+      ...footerLines(outcome, 0),
+    ].join("\n");
   }
-  return `${blocks.join("\n\n")}\n\n${footer(outcome).join("\n")}`;
+  // D-39's guarantee, not its estimate. `selectAcrossLibraries` priced every block exactly, so
+  // this only ever bites for the one section D-35 forces us to return whatever it costs —
+  // the same order `assemble` and `clipSnippet` already settled: the cap wins.
+  const body = blocks.join(BLOCK_JOIN);
+  const budget = sectionBudgetChars(outcome);
+  const capped = body.length > budget ? body.slice(0, budget) : body;
+  return `${capped}${BLOCK_JOIN}${footerLines(outcome, outcome.groups.length).join("\n")}`;
 }
 
 /** The MCP `search` tool body: the formatted results for `query`. Never throws. */

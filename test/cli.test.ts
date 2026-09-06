@@ -614,7 +614,9 @@ describe("dispatchCli search (PAR-659)", () => {
     expect(await dispatchCli(["node", "vibectx", "search", "streaming cleanup", "--library", "hono", "--config", config()], o)).toBe(0);
     expect(o.out.join("")).toContain("# hono");
     expect(o.out.join("")).not.toContain("# react");
-    expect(o.out.join("")).toContain("Searched 1 of 1 configured library");
+    // N1: a filtered search reports against the REGISTRY as well as the filter, so "1 of 1"
+    // can never read as "you only have one library configured".
+    expect(o.out.join("")).toContain("Searched 1 of 1 requested library (");
   });
 
   it("--json prints the outcome with a stable key order", async () => {
@@ -626,8 +628,10 @@ describe("dispatchCli search (PAR-659)", () => {
       "schemaVersion",
       "generatedAt",
       "query",
+      "maxTokens",
       "groups",
       "configured",
+      "requested",
       "searched",
       "searchedLibraries",
       "matchedLibraries",

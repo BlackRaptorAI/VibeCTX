@@ -285,7 +285,9 @@ describe("search over the transport (PAR-659)", () => {
     const out = await call("search", { query: "streaming", libraries: ["ai"], maxTokens: 500 });
     expect(out).toContain("# ai-sdk");
     expect(out).not.toContain("# hono");
-    expect(out).toContain("Searched 1 of 1 configured library");
+    // N1: the count is reported against the registry too, so a filter cannot make the cache
+    // look emptier than it is.
+    expect(out).toContain("Searched 1 of 1 requested library (2 configured)");
     await client.close();
   });
 
