@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, symlinkSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import {
   DEPENDENCY_DENYLIST,
   isDeniedDependency,
@@ -13,6 +13,7 @@ import {
   requirementName,
   discoverProjectDependencies,
   MANIFEST_MAX_BYTES,
+  cleanText,
 } from "../src/project-deps.js";
 
 let dir: string;
@@ -409,5 +410,165 @@ describe("discoverProjectDependencies — hostile or oversized input", () => {
     const out = discoverProjectDependencies(dir);
     expect(out.manifests).toEqual(["package.json"]);
     expect(out.notes).toEqual([`requirements.txt: larger than ${MANIFEST_MAX_BYTES / (1024 * 1024)} MiB; not read`]);
+  });
+});
+
+describe("S1 — no super-linear parsing: 1 MiB pathological lines finish in < 1 s", () => {
+  const MiB = 1024 * 1024;
+  const took = (fn: () => unknown) => {
+    const t = performance.now();
+    fn();
+    return performance.now() - t;
+  };
+  it("TOML table header `[` + spaces + `x` (was 11.3 s at 3000 spaces)", () => {
+    expect(took(() => parsePyprojectDeps("[" + " ".repeat(MiB) + "x"))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps("[[" + " ".repeat(MiB) + "]"))).toBeLessThan(1000);
+  });
+  it("pnpm key: indentation + `x` without a colon (was 31.8 s at 4000 spaces)", () => {
+    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n" + " ".repeat(MiB) + "x"))).toBeLessThan(1000);
+    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n      '" + "a".repeat(MiB)))).toBeLessThan(1000);
+    expect(took(() => parsePnpmLockDeps(" ".repeat(MiB) + "dependencies :"))).toBeLessThan(1000);
+  });
+  it("requirements: long names, long runs of spaces, long -r lines, long markers and extras", () => {
+    expect(took(() => parseRequirementsTxt("a" + " ".repeat(MiB) + "="))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("a".repeat(MiB) + "!"))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("-r" + " ".repeat(MiB)))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("--requirement=" + "x".repeat(MiB)))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("x[" + "e,".repeat(MiB / 2) + "]; " + "python_version > '3' and ".repeat(MiB / 25)))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("a\\\n" + " ".repeat(MiB) + "\\\nb"))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("git+" + "a".repeat(MiB) + "://x"))).toBeLessThan(1000);
+  });
+  it("pyproject: long array values, long inline tables, long keys", () => {
+    expect(took(() => parsePyprojectDeps('[project]\ndependencies = ["' + "a".repeat(MiB) + '"]'))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps("[project]\ndependencies = [" + '"a",'.repeat(MiB / 4) + "]"))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\n" + "k".repeat(MiB) + " = { version = '*' }"))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\nx = {" + " ".repeat(MiB) + "path = 'a' }"))).toBeLessThan(1000);
+  });
+  it("package.json: a long npm: alias spec", () => {
+    expect(took(() => parsePackageJsonDeps(JSON.stringify({ dependencies: { x: "npm:" + "a".repeat(MiB), y: "npm:@" + "a".repeat(MiB) } })))).toBeLessThan(1000);
+  });
+  it("tripwire: the module's remaining regex literals are exactly the allow-listed linear ones", () => {
+    const src = readFileSync(new URL("../src/project-deps.ts", import.meta.url), "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
+      .replace(/\/\/.*$/gm, ""); // line comments
+    const literals = [...src.matchAll(/(?:^|[=(,:\s])\/((?:\\.|\[(?:\\.|[^\]\n])*\]|[^/\n\\[])+)\/[gimsuy]*/g)].map((m) => m[1]);
+    expect(new Set(literals)).toEqual(
+      new Set([
+        "[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", // one class, /g
+        "\\r\\n?", // fixed width
+        "\\\\\\n\\s*", // anchored on a literal backslash-newline
+      ]),
+    );
+  });
+});
+
+describe("R2 — poetry inline tables with path / git / url are local or VCS sources, skipped", () => {
+  it("skips them and keeps version-only inline tables", () => {
+    expect(
+      parsePyprojectDeps(`
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31"
+local-lib = { path = "../local-lib", develop = true }
+from-git = { git = "https://github.com/o/r.git", branch = "main" }
+from-url = { url = "https://example.com/x.whl" }
+pinned = { version = "1.0", extras = ["s3"] }
+`),
+    ).toEqual(["requests", "pinned"]);
+  });
+});
+
+describe("S2 / D-09 — symlinks are refused, and nothing outside the project is ever read", () => {
+  const CANARY = "zz-canary-outside-project";
+  let outside: string;
+  beforeEach(() => {
+    outside = mkdtempSync(join(tmpdir(), "vibectx-outside-"));
+    writeFileSync(join(outside, "requirements.txt"), `${CANARY}\n`, "utf8");
+  });
+  afterEach(() => {
+    rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("a symlinked requirements-x.txt is skipped (symlink), the target never read", () => {
+    symlinkSync(join(outside, "requirements.txt"), join(dir, "requirements-x.txt"));
+    write("requirements.txt", "flask\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.manifests).toEqual(["requirements.txt"]);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["flask"]);
+    expect(out.notes).toEqual(["requirements-x.txt: skipped (symlink)"]);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("a symlinked package.json / pyproject.toml is skipped (symlink)", () => {
+    writeFileSync(join(outside, "package.json"), JSON.stringify({ dependencies: { [CANARY]: "1" } }), "utf8");
+    symlinkSync(join(outside, "package.json"), join(dir, "package.json"));
+    symlinkSync(join(outside, "requirements.txt"), join(dir, "pyproject.toml"));
+    const out = discoverProjectDependencies(dir);
+    expect(out.manifests).toEqual([]);
+    expect(out.notes).toEqual(["package.json: skipped (symlink)", "pyproject.toml: skipped (symlink)"]);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("a symlinked lockfile is skipped (symlink) too", () => {
+    writeFileSync(join(outside, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { [CANARY]: "1" } } } }), "utf8");
+    symlinkSync(join(outside, "package-lock.json"), join(dir, "package-lock.json"));
+    const out = discoverProjectDependencies(dir);
+    expect(out.notes).toEqual(["package-lock.json: skipped (symlink)"]);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("-r to a symlinked file, or through a symlinked directory, is skipped (symlink)", () => {
+    symlinkSync(join(outside, "requirements.txt"), join(dir, "linked.txt"));
+    symlinkSync(outside, join(dir, "linkdir"));
+    mkdirSync(join(dir, "real"));
+    writeFileSync(join(dir, "real", "base.txt"), "httpx\n", "utf8");
+    write("requirements.txt", "-r linked.txt\n-r linkdir/requirements.txt\n-r real/base.txt\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.manifests).toEqual(["requirements.txt", "real/base.txt"]);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["httpx"]);
+    expect(out.notes).toEqual(["requirements.txt: -r linked.txt skipped (symlink)", "requirements.txt: -r linkdir/requirements.txt skipped (symlink)"]);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("an absolute -r path, and a relative one that escapes, are outside the project directory and skipped", () => {
+    write("requirements.txt", `-r ${join(outside, "requirements.txt")}\n-r ../${basename(outside)}/requirements.txt\n`);
+    const out = discoverProjectDependencies(dir);
+    expect(out.dependencies).toEqual([]);
+    expect(out.notes).toHaveLength(2);
+    for (const n of out.notes) expect(n).toMatch(/is outside the project directory; skipped$/);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("the project directory itself may sit behind a symlink (realpath containment compares real paths on both sides)", () => {
+    const link = join(outside, "proj-link");
+    symlinkSync(dir, link);
+    write("requirements.txt", "-r sub/base.txt\n");
+    mkdirSync(join(dir, "sub"));
+    writeFileSync(join(dir, "sub", "base.txt"), "httpx\n", "utf8");
+    const out = discoverProjectDependencies(link);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["httpx"]);
+    expect(out.notes).toEqual([]);
+  });
+});
+
+describe("S3 — control, bidi and zero-width characters never reach a note or a manifest name", () => {
+  const ESC = "\u001b";
+  const BEL = "\u0007";
+  it("an escape sequence in a file name and an OSC-8 sequence in an include are stripped from the notes", () => {
+    writeFileSync(join(dir, `requirements-${ESC}[31mred${ESC}[0m.txt`), "flask\n", "utf8");
+    write("requirements.txt", `-r ${ESC}]8;;https://evil.example${BEL}missing${ESC}]8;;${BEL}.txt\n-r \u202eevil\u200b.txt\n`);
+    const out = discoverProjectDependencies(dir);
+    const all = JSON.stringify(out);
+    expect(all).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/);
+    expect(out.manifests).toEqual(["requirements.txt", "requirements-[31mred[0m.txt"]);
+    expect(out.notes).toEqual([
+      "requirements.txt: -r ]8;;https://evil.examplemissing]8;;.txt not found; skipped",
+      "requirements.txt: -r evil.txt not found; skipped",
+    ]);
+  });
+
+  it("cleanText is exported for the renderers: strips C0/C1, bidi and zero-width; leaves other text intact", () => {
+    expect(cleanText(`a${ESC}b\u0000c\u009fd\u200be\u202ef\u2066g\ufeffh`)).toBe("abcdefgh");
+    expect(cleanText("plain — ünïcode ✓ ok")).toBe("plain — ünïcode ✓ ok");
   });
 });
