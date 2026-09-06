@@ -43,6 +43,27 @@ describe("cache", () => {
   });
 });
 
+describe("N-6 — an unparsable fetchedAt reads as stale, not as fresh forever", () => {
+  const URL_ = "https://react.dev/llms.txt";
+  const metaPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+
+  it.each(["yesterday", "", "not-a-date"])("fetchedAt %j → stale (content still served)", (bad) => {
+    writeCache("react", URL_, "# React");
+    writeFileSync(metaPath(), JSON.stringify({ url: URL_, fetchedAt: bad }), "utf8");
+    const hit = readCache("react", URL_, 168);
+    expect(hit?.content).toBe("# React");
+    expect(hit?.stale).toBe(true);
+  });
+
+  it("a missing fetchedAt is stale too, and a good one is still fresh", () => {
+    writeCache("react", URL_, "# React");
+    writeFileSync(metaPath(), JSON.stringify({ url: URL_ }), "utf8");
+    expect(readCache("react", URL_, 168)?.stale).toBe(true);
+    writeCache("react", URL_, "# React");
+    expect(readCache("react", URL_, 168)?.stale).toBe(false);
+  });
+});
+
 describe("cache — atomic writes (PAR-656 S4)", () => {
   const URL_ = "https://react.dev/llms.txt";
   const paths = () => {

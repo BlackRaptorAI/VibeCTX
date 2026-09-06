@@ -40,12 +40,15 @@ export function readCache(
   if (!existsSync(contentPath) || !existsSync(metaPath)) return undefined;
   const meta = JSON.parse(readFileSync(metaPath, "utf8")) as CacheMeta;
   const ageMs = Date.now() - new Date(meta.fetchedAt).getTime();
-  // >= so a TTL of 0 means "expire immediately" even when written and read
-  // within the same millisecond.
+  // Negated `<` rather than `>=` (N-6): an unparsable or missing `fetchedAt` makes ageMs NaN,
+  // and every comparison with NaN is false — under `>=` that read as FRESH FOREVER, so a
+  // corrupt meta file pinned a document in the cache with no way to age out. Now it reads as
+  // stale and the next fetch revalidates it. `>=` semantics otherwise: a TTL of 0 means
+  // "expire immediately", even when written and read within the same millisecond.
   return {
     content: readFileSync(contentPath, "utf8"),
     meta,
-    stale: ageMs >= ttlHours * 3600_000,
+    stale: !(ageMs < ttlHours * 3600_000),
   };
 }
 

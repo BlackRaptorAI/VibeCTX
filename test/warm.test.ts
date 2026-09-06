@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
-import { loadRegistry, type Registry } from "../src/registry.js";
+import { loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 import { runWarm, formatWarmTable, warmExitCode, warmToolText, WARM_CONCURRENCY, WARM_SCHEMA_VERSION, type WarmReport } from "../src/warm.js";
@@ -535,6 +535,30 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     expect(json).not.toMatch(/\\u00(1b|9f)/); // a control character would appear escaped
     expect(json).toContain(CLEAN);
     expect(json).toContain("requirements-[31mred.txt");
+  });
+
+  it("N-4: evidentEcosystem's array-identity contract — a shipped default (and its D-06 alias-trimmed copy) keeps DEFAULT_REGISTRY's `urls` array; a config entry brings its own", () => {
+    // evidentEcosystem calls a registry entry "the npm package by the NAMING RULE" only when
+    // its `urls` array IS a DEFAULT_REGISTRY entry's array (===, not deep equality). Two things
+    // must therefore stay true, and nothing else in the suite pins them:
+    //   1. loadRegistry copies default entries with a spread, so `urls` is shared, not cloned;
+    //   2. a config entry overriding a default name replaces `urls` with its own array.
+    // Break either and warm silently stops emitting (or starts wrongly emitting) the D-11 note.
+    const byUrls = new Map(DEFAULT_REGISTRY.map((d) => [d.name, d.urls]));
+    const plain = loadRegistry(undefined, { includeResolved: false });
+    for (const d of DEFAULT_REGISTRY) expect(plain.entries.get(d.name)?.urls, d.name).toBe(byUrls.get(d.name));
+
+    // D-06: a config entry claiming a DEFAULT alias makes loadRegistry rewrite that default's
+    // `aliases`; the copy must still share the same `urls` array.
+    const cfg = join(project, "vibectx.config.json");
+    writeFileSync(cfg, JSON.stringify({ libraries: [{ name: "next", urls: ["https://example.com/llms.txt"] }] }), "utf8");
+    const trimmed = loadRegistry(cfg, { includeResolved: false });
+    expect(trimmed.entries.get("next.js")?.aliases).not.toContain("next");
+    expect(trimmed.entries.get("next.js")?.urls).toBe(byUrls.get("next.js"));
+
+    // A config entry overriding a default BY NAME brings its own urls: no evident ecosystem.
+    writeFileSync(cfg, JSON.stringify({ libraries: [{ name: "next.js", urls: ["https://example.com/llms.txt"] }] }), "utf8");
+    expect(loadRegistry(cfg, { includeResolved: false }).entries.get("next.js")?.urls).not.toBe(byUrls.get("next.js"));
   });
 
   it("D-10: warmToolText (the MCP tool) accepts only the server's working directory or a directory beneath it", async () => {
