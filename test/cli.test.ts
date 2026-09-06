@@ -103,7 +103,8 @@ describe("dispatchCli", () => {
     expect(code).toBe(1);
     expect(spy).not.toHaveBeenCalled();
     const report = JSON.parse(a.out.join(""));
-    expect(Object.keys(report)).toEqual(["generatedAt", "libraries", "healthy", "total"]);
+    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total"]);
+    expect(report.schemaVersion).toBe(1);
     expect(report.total).toBe(DEFAULT_REGISTRY.length);
     expect(report.healthy).toBe(0);
     expect(report.libraries.every((l: { kind: string }) => l.kind === "unreachable")).toBe(true);

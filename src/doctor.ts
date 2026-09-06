@@ -63,7 +63,12 @@ export interface LibraryReport {
   reasons: string[];
 }
 
+/** Bumped when a key is renamed, removed or changes meaning. New keys may be
+ *  appended without a bump; consumers read keys by name. */
+export const DOCTOR_SCHEMA_VERSION = 1;
+
 export interface DoctorReport {
+  schemaVersion: typeof DOCTOR_SCHEMA_VERSION;
   generatedAt: string;
   libraries: LibraryReport[];
   healthy: number;
@@ -256,6 +261,7 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
   }
   const libraries = await mapLimit(entries, DOCTOR_CONCURRENCY, (e) => checkLibrary(e, opts.offline === true));
   return {
+    schemaVersion: DOCTOR_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     libraries,
     healthy: libraries.filter((l) => l.healthy).length,

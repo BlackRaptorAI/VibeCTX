@@ -235,6 +235,17 @@ describe("runDoctor source kinds and probes", () => {
     expect(lib.reasons).toEqual(['no match: "zzz-unmatched"']);
   });
 
+  it("treats probeQueries: [] exactly like an absent probeQueries (derived query)", async () => {
+    writeCache("hono", "https://hono.dev/llms-full.txt", "# Hono\n\n## Web framework\n\nHono is a small web framework.");
+    stubFetch({});
+    const report = await runDoctor(
+      reg({ name: "hono", urls: ["https://hono.dev/llms-full.txt"], description: "Hono web framework", probeQueries: [] }),
+    );
+    expect(report.libraries[0].probes).toEqual([
+      { query: "web framework", derived: true, status: "answered", followed: 0, dropped: 0 },
+    ]);
+  });
+
   it("derives a probe from the description when none is configured and marks it derived", async () => {
     writeCache("hono", "https://hono.dev/llms-full.txt", "# Hono\n\n## Web framework\n\nHono is a small web framework.");
     stubFetch({});
@@ -406,7 +417,8 @@ describe("report shape, table and exit code", () => {
 
   it("emits the documented JSON shape with stable keys", async () => {
     const report = JSON.parse(JSON.stringify(await mixedReport()));
-    expect(Object.keys(report)).toEqual(["generatedAt", "libraries", "healthy", "total"]);
+    expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total"]);
+    expect(report.schemaVersion).toBe(1);
     expect(Number.isNaN(Date.parse(report.generatedAt))).toBe(false);
     for (const lib of report.libraries) {
       expect(Object.keys(lib)).toEqual([

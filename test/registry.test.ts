@@ -39,6 +39,11 @@ describe("config probeQueries validation", () => {
     expect(reg.entries.get("hono")?.probeQueries).toEqual(["middleware", "routing"]);
   });
 
+  it("accepts probeQueries: [] and keeps it (doctor treats it as absent: derived query)", () => {
+    const path = writeConfig([{ name: "hono", urls: ["https://hono.dev/llms.txt"], probeQueries: [] }]);
+    expect(loadRegistry(path).entries.get("hono")?.probeQueries).toEqual([]);
+  });
+
   it("accepts an entry without probeQueries", () => {
     const path = writeConfig([{ name: "hono", urls: ["https://hono.dev/llms.txt"] }]);
     expect(loadRegistry(path).entries.get("hono")?.probeQueries).toBeUndefined();

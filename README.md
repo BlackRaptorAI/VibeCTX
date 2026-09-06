@@ -66,6 +66,7 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
 uses to prove the entry answers; without them a query is derived from the description.
+An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.
 
 ## Checking coverage: `vibectx doctor`
 
@@ -116,10 +117,14 @@ cached as `unreachable`. A library whose check itself fails (unreadable cache fi
 permission error) is reported `unreachable` with `error: <message>` as its reason and
 never stops the rest of the table. At most three libraries are checked at a time.
 
-`--json` emits `{ generatedAt, libraries: [{ library, kind, url, cacheAgeHours, stale,
-ttlHours, probes: [{ query, derived, status, followed, dropped }], followed, dropped,
-healthy, reasons }], healthy, total }` — keys in that order, `null` for a missing
-URL or age.
+`--json` emits `{ schemaVersion: 1, generatedAt, libraries: [{ library, kind, url,
+cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed, dropped }],
+followed, dropped, healthy, reasons }], healthy, total }` — keys in that order, `null`
+for a missing URL or age. New keys may be appended in later versions; consumers should
+read keys by name and must not assert exact key sets. `reasons[]` strings are
+human-readable and not a contract. If you snapshot the output, note that `generatedAt`,
+`cacheAgeHours`, `url` (which candidate resolved) and `reasons[]` are non-deterministic
+run to run; `schemaVersion` is bumped only when a key is renamed, removed or changes meaning.
 
 Honest limit: doctor measures **retrieval, not correctness**. A ✓ means an agent
 asking that question today gets sections back; it does not check that they are the

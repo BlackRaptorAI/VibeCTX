@@ -10,8 +10,9 @@ export interface LibraryEntry {
   /** One-line description shown by list_libraries. */
   description?: string;
   /** Topics `vibectx doctor` runs through get_docs to prove retrieval works for this
-   *  entry. Pick something the docs certainly cover; one is enough. When absent, doctor
-   *  derives a query from the description and marks it "(derived)". */
+   *  entry. Pick something the docs certainly cover; one is enough. When absent — or
+   *  an empty array, which is accepted and behaves exactly as absent — doctor derives
+   *  a query from the description and marks it "(derived)". */
   probeQueries?: string[];
 }
 
