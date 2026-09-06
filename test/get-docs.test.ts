@@ -414,6 +414,20 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("L3: after resolving typing_extensions, get_docs(\"Typing-Extensions\") is served from the same record without a new resolution", async () => {
+    const spy = stubFetch({
+      "https://registry.npmjs.org/typing_extensions/latest": "",
+      "https://pypi.org/pypi/typing-extensions/json": JSON.stringify({ info: { project_urls: { Documentation: "https://typing-extensions.readthedocs.io/" } } }),
+      "https://typing-extensions.readthedocs.io/llms.txt": "# typing-extensions\n\n## TypedDict\n\nTotal is optional.",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    expect(await getDocsToolText(reg, { library: "typing_extensions", topic: "TypedDict" })).toContain("Total is optional");
+    expect(reg.entries.has("typing-extensions")).toBe(true);
+    spy.mockClear();
+    expect(await getDocsToolText(reg, { library: "Typing-Extensions", topic: "TypedDict" })).toContain("Total is optional");
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("offline: an unknown library returns the Unknown-library text listing canonical names, without fetching", async () => {
     const spy = stubFetch({});
     expect(await getDocsToolText(registry, { library: "nope", topic: "x", offline: true })).toBe(

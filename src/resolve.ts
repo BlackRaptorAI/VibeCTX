@@ -3,6 +3,8 @@ import {
   MAX_METADATA_FETCHES,
   MAX_LLMS_CANDIDATES,
   MAX_README_CANDIDATES,
+  MAX_FETCHES_PER_RESOLUTION,
+  MAX_RESOLUTIONS_PER_HOUR,
   README_VARIANTS,
 } from "./limits.js";
 
@@ -32,10 +34,14 @@ import { classifySourceKind, type SourceKind } from "./source-kind.js";
  *      the default branch, so no main/master guess; see README_VARIANTS.
  *   5. nothing usable → one plain line saying what was tried and how to pin it in config.
  *
- * Fetch bound per name: MAX_METADATA_FETCHES (2) + MAX_LLMS_CANDIDATES (8) +
- * MAX_README_CANDIDATES (4) = 14. Candidates are probed by getLibraryDoc, which stops
- * at the first usable document and caches it under the entry name, so get_docs serves
- * it immediately afterwards.
+ * Fetch bound per name (src/limits.ts): MAX_METADATA_FETCHES (2) + the preferred
+ * ecosystem's candidates (≤ 8 llms + 4 README = 12) + — only if none of those served —
+ * the other found ecosystem's (≤ 12): MAX_FETCHES_PER_RESOLUTION = 26 (R2). In
+ * practice the second list is 4 (an ecosystem held back as README-only has no llms
+ * candidates), so the reachable maximum is 18. Candidates are probed by getLibraryDoc,
+ * which stops at the first usable document and caches it under the entry name, so
+ * get_docs serves it immediately afterwards. A process may start at most
+ * MAX_RESOLUTIONS_PER_HOUR resolutions (L2).
  *
  * Everything a registry returns is attacker-influenced (anyone can publish a package):
  * URLs go through sanitizeRemoteUrl (https, no userinfo, no IP / localhost / private
@@ -65,7 +71,8 @@ export interface PackageMetadata {
 }
 
 export interface ResolveOutcome {
-  /** The name as given (trimmed); the entry itself is stored under the folded name. */
+  /** The name as given (trimmed); the entry itself is stored under the folded name
+   *  (npm) or the PEP 503 normalised name (PyPI). */
   name: string;
   ok: boolean;
   source?: Ecosystem;
@@ -80,6 +87,9 @@ export interface ResolveOutcome {
   kind?: SourceKind;
   chars?: number;
   entry?: LibraryEntry;
+  /** False when resolved.json could not be written (another schema version on disk); `saveNote` says why. */
+  saved?: boolean;
+  saveNote?: string;
   /** What was attempted, one phrase per step; the failure message is built from it. */
   attempts: string[];
   /** The text the tool / CLI shows. */
@@ -266,6 +276,22 @@ function metadataUrlFor(eco: Ecosystem, name: string): string {
     : `https://pypi.org/pypi/${encodeURIComponent(normalisePyPiName(name))}/json`;
 }
 
+/** Resolutions started in the current sliding hour (L2); process-wide. */
+let resolutionStarts: number[] = [];
+
+/** Test hook: forget the sliding window. */
+export function resetResolutionWindow(): void {
+  resolutionStarts = [];
+}
+
+/** True when another resolution may start now; records it if so. */
+function takeResolutionSlot(nowMs: number): boolean {
+  resolutionStarts = resolutionStarts.filter((t) => nowMs - t < 3600_000);
+  if (resolutionStarts.length >= MAX_RESOLUTIONS_PER_HOUR) return false;
+  resolutionStarts.push(nowMs);
+  return true;
+}
+
 function formatResolved(out: ResolveOutcome): string {
   const chosenAt = out.candidates.indexOf(out.chosen ?? "");
   const rows = out.candidates.map((u, i) => {
@@ -274,8 +300,12 @@ function formatResolved(out: ResolveOutcome): string {
   });
   const repo = out.repository ? `https://github.com/${out.repository.owner}/${out.repository.repo}` : "—";
   const hosts = out.entry?.allowedHosts?.length ? out.entry.allowedHosts.join(", ") : "none";
+  const saved = out.saved === false
+    ? `  NOT saved: ${out.saveNote ?? "resolved.json could not be written"} — this resolution lives in memory until restart; get_docs("${out.entry?.name}") works now.`
+    : `  saved to ${resolvedStorePath()} — get_docs("${out.entry?.name}") works now; pin or override it in vibectx.config.json.`;
   return [
     `Resolved "${out.name}" via ${LABEL[out.source!]} — ${out.metadataUrl}`,
+    ...(out.entry?.description ? [`  description: (package-supplied) ${out.entry.description}`] : []),
     `  homepage:   ${out.homepage ?? "—"}`,
     `  docs:       ${out.docsUrl ?? "—"}`,
     `  repository: ${repo}`,
@@ -283,7 +313,7 @@ function formatResolved(out: ResolveOutcome): string {
     ...rows,
     `  chosen: ${out.chosen} (${out.kind}, ${(out.chars ?? 0).toLocaleString()} chars)`,
     `  followed-link hosts: ${hosts} (plus the source document's own host; https only)`,
-    `  saved to ${resolvedStorePath()} — get_docs("${out.entry?.name}") works now; pin or override it in vibectx.config.json.`,
+    saved,
   ].join("\n");
 }
 
@@ -311,16 +341,21 @@ function hasDocsSite(meta: PackageMetadata): boolean {
  */
 export async function resolvePackage(
   rawName: string,
-  opts: { ecosystem?: Ecosystem; now?: () => Date } = {},
+  opts: { ecosystem?: Ecosystem; now?: () => Date; warn?: (message: string) => void } = {},
 ): Promise<ResolveOutcome> {
   const name = rawName.trim();
-  const entryName = name.toLowerCase(); // the registry's fold()
+  const folded = name.toLowerCase(); // the registry's fold()
   const attempts: string[] = [];
   const fail = (): ResolveOutcome => ({ name, ok: false, candidates: [], attempts, text: couldNotResolveMessage(name, attempts) });
+  const now = opts.now ?? (() => new Date());
 
-  const nameErrors: Record<Ecosystem, string | undefined> = { npm: npmNameError(entryName), pypi: pypiNameError(name) };
+  const nameErrors: Record<Ecosystem, string | undefined> = { npm: npmNameError(folded), pypi: pypiNameError(name) };
   if (nameErrors.npm !== undefined && nameErrors.pypi !== undefined) {
     attempts.push(`"${name}" is not a valid npm or PyPI package name; nothing was fetched`);
+    return fail();
+  }
+  if (!takeResolutionSlot(now().getTime())) {
+    attempts.push(`resolution limit reached (${MAX_RESOLUTIONS_PER_HOUR} per hour per process); try again later, or pin the library`);
     return fail();
   }
 
@@ -338,7 +373,7 @@ export async function resolvePackage(
       continue;
     }
     if (fetched >= MAX_METADATA_FETCHES) break;
-    const metadataUrl = metadataUrlFor(eco, eco === "npm" ? entryName : name);
+    const metadataUrl = metadataUrlFor(eco, eco === "npm" ? folded : name);
     fetched += 1;
     const { json, why } = await fetchMetadata(metadataUrl);
     if (json === undefined) {
@@ -358,38 +393,59 @@ export async function resolvePackage(
     found.push({ eco, meta, candidates });
     if (hasDocsSite(meta)) break;
   }
-  const pick = found.find((f) => hasDocsSite(f.meta)) ?? found[0];
-  if (!pick) return fail();
+  // Docs-site ecosystem first, then the rest in registry order (R2: a dead end falls through).
+  const order = [...found.filter((f) => hasDocsSite(f.meta)), ...found.filter((f) => !hasDocsSite(f.meta))];
+  if (order.length === 0) return fail();
 
-  // Phase 2: probe the chosen ecosystem's candidates in order; first usable document wins.
-  const { eco, meta, candidates } = pick;
-  const entry = buildEntry(entryName, meta, candidates, (opts.now ?? (() => new Date()))());
-  const doc = await getLibraryDoc(entry, { forceRefresh: true });
-  if (!doc) {
-    attempts.push(
-      `${LABEL[eco]} metadata found (${describeMeta(meta)}); none of ${candidates.length} candidate URLs served a document: ${candidates.join(", ")}`,
-    );
-    return fail();
+  // Phase 2: probe each found ecosystem's candidates in order; the first usable document wins.
+  let budget = MAX_FETCHES_PER_RESOLUTION - fetched;
+  for (const { eco, meta, candidates } of order) {
+    const urls = candidates.slice(0, Math.max(0, budget)); // the hard ceiling; structurally never binding
+    budget -= urls.length;
+    if (urls.length === 0) break;
+    // PyPI names are keyed by their PEP 503 form (L3): typing_extensions and Typing-Extensions are one record.
+    const entryName = eco === "pypi" ? normalisePyPiName(name) : folded;
+    const entry = buildEntry(entryName, meta, urls, now());
+    const doc = await getLibraryDoc(entry, { forceRefresh: true });
+    if (!doc) {
+      attempts.push(
+        `${LABEL[eco]} metadata found (${describeMeta(meta)}); none of ${urls.length} candidate URLs served a document: ${urls.join(", ")}`,
+      );
+      continue;
+    }
+    let saveNote: string | undefined;
+    const saved = saveResolvedEntry(entry, (m) => {
+      saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();
+      (opts.warn ?? ((x: string) => process.stderr.write(x)))(m);
+    });
+    const out: ResolveOutcome = {
+      name,
+      ok: true,
+      source: eco,
+      metadataUrl: meta.metadataUrl,
+      homepage: meta.homepage,
+      docsUrl: meta.docsUrl,
+      repository: meta.repository,
+      candidates: urls,
+      chosen: doc.url,
+      kind: classifySourceKind(doc.url, doc.content),
+      chars: doc.content.length,
+      entry,
+      saved,
+      saveNote,
+      attempts,
+      text: "",
+    };
+    out.text = formatResolved(out);
+    return out;
   }
-  saveResolvedEntry(entry);
-  const out: ResolveOutcome = {
-    name,
-    ok: true,
-    source: eco,
-    metadataUrl: meta.metadataUrl,
-    homepage: meta.homepage,
-    docsUrl: meta.docsUrl,
-    repository: meta.repository,
-    candidates,
-    chosen: doc.url,
-    kind: classifySourceKind(doc.url, doc.content),
-    chars: doc.content.length,
-    entry,
-    attempts,
-    text: "",
-  };
-  out.text = formatResolved(out);
-  return out;
+  return fail();
+}
+
+/** The one lookup the tools use before resolving: canonical / alias (folded), then the
+ *  PEP 503 form so a PyPI-sourced record answers to `typing_extensions` (L3). */
+export function lookupLibrary(registry: Registry, name: string): LibraryEntry | undefined {
+  return resolveLibrary(registry, name) ?? resolveLibrary(registry, normalisePyPiName(name));
 }
 
 /**
@@ -401,8 +457,8 @@ export async function resolvePackage(
 export async function resolveToolText(registry: Registry, name: string, ecosystem?: Ecosystem): Promise<string> {
   // S2: judge "already curated" on the folded key too, so an exact-case resolved entry
   // sitting beside a curated one ("React" next to "react") cannot slip past.
-  const existing = resolveLibrary(registry, name);
-  const curated = existing && !existing.resolved ? existing : resolveLibrary(registry, name.trim().toLowerCase());
+  const existing = lookupLibrary(registry, name);
+  const curated = existing && !existing.resolved ? existing : lookupLibrary(registry, name.trim().toLowerCase());
   if (curated && !curated.resolved) {
     const existingCurated = curated;
     return [

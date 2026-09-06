@@ -13,9 +13,14 @@ import {
   MAX_METADATA_FETCHES,
   MAX_LLMS_CANDIDATES,
   MAX_README_CANDIDATES,
+  MAX_URLS_PER_ENTRY,
+  MAX_FETCHES_PER_RESOLUTION,
+  MAX_RESOLUTIONS_PER_HOUR,
   METADATA_MAX_BYTES,
+  resetResolutionWindow,
   type PackageMetadata,
 } from "../src/resolve.js";
+import { writeFileSync, readFileSync } from "node:fs";
 import { readResolvedEntries } from "../src/resolved-store.js";
 import { readCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
@@ -25,6 +30,7 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-resolve-"));
   process.env.DOCS_CACHE_DIR = dir;
+  resetResolutionWindow();
 });
 
 afterEach(() => {
@@ -490,21 +496,100 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     expect(out.text).toContain('Could not resolve "hono": npm metadata found but it has no https homepage, docs URL or GitHub repository; PyPI: no metadata (404 or unreachable). Add it');
   });
 
-  it("never exceeds the fetch bound even when every candidate exists but is unusable", async () => {
-    const spy = vi.fn(async (url: unknown) => {
-      const u = String(url);
-      if (u === NPM_HONO) {
-        return new Response(
-          JSON.stringify({ homepage: "https://a.example.com/x/y", repository: "https://github.com/o/r" }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        );
-      }
-      return new Response("   ", { status: 200, headers: { "content-type": "text/plain" } }); // blank body = miss
+  it("Q2: the fetch bound is exact — npm README-only, PyPI full list, everything fails → 2 + 12 + 4 requests, both ecosystems reported", async () => {
+    const spy = stubFetch({
+      [NPM_HTTPX]: { repository: "https://github.com/JacksonTian/httpx" }, // 4 README candidates, no docs site
+      [PYPI_HTTPX]: {
+        info: { project_urls: { Documentation: "https://b.example.com/d/e", Homepage: "https://c.example.com/f/g", Source: "https://github.com/encode/httpx" } },
+      }, // 8 llms + 4 README
     });
-    vi.stubGlobal("fetch", spy);
-    const out = await resolvePackage("hono");
+    const out = await resolvePackage("httpx");
     expect(out.ok).toBe(false);
-    expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_METADATA_FETCHES + MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
+    expect(spy).toHaveBeenCalledTimes(MAX_METADATA_FETCHES + MAX_URLS_PER_ENTRY + MAX_README_CANDIDATES);
+    expect(spy).toHaveBeenCalledTimes(18);
+    expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_FETCHES_PER_RESOLUTION);
+    expect(MAX_FETCHES_PER_RESOLUTION).toBe(26);
+    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
+    // Order: both metadata documents, then the docs-site ecosystem's 12, then npm's 4.
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls.slice(0, 2)).toEqual([NPM_HTTPX, PYPI_HTTPX]);
+    expect(urls[2]).toBe("https://b.example.com/d/e/llms-full.txt");
+    expect(urls[14]).toBe("https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md");
+    expect(out.text).toContain("PyPI metadata found (homepage https://c.example.com/f/g, docs https://b.example.com/d/e, repository github.com/encode/httpx); none of 12 candidate URLs served a document");
+    expect(out.text).toContain("npm metadata found (repository github.com/JacksonTian/httpx); none of 4 candidate URLs served a document");
+  });
+
+  it("R2: when the preferred ecosystem's candidates all fail, the other found ecosystem is probed (left-pad: PyPI squatter with a docs-looking homepage, no repo)", async () => {
+    const spy = stubFetch({
+      "https://registry.npmjs.org/left-pad/latest": { repository: "https://github.com/left-pad/left-pad" },
+      "https://pypi.org/pypi/left-pad/json": { info: { project_urls: { Homepage: "https://left-pad-docs.example.com/" } } },
+      "https://raw.githubusercontent.com/left-pad/left-pad/HEAD/README.md": "# left-pad\n\nString left pad",
+    });
+    const out = await resolvePackage("left-pad");
+    expect(out.ok).toBe(true);
+    expect(out.source).toBe("npm");
+    expect(out.chosen).toBe("https://raw.githubusercontent.com/left-pad/left-pad/HEAD/README.md");
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls.slice(2, 4)).toEqual(["https://left-pad-docs.example.com/llms-full.txt", "https://left-pad-docs.example.com/llms.txt"]);
+    expect(spy).toHaveBeenCalledTimes(2 + 2 + 1);
+    expect(readResolvedEntries()[0].resolved?.source).toBe("npm");
+  });
+
+  it("L2: at most 100 resolutions per hour per process; the 101st is refused without a fetch; the window slides", async () => {
+    const spy = stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono" });
+    let t = Date.parse("2026-09-06T10:00:00Z");
+    const now = () => new Date(t);
+    for (let i = 0; i < MAX_RESOLUTIONS_PER_HOUR; i++) expect((await resolvePackage("hono", { now })).ok).toBe(true);
+    expect(MAX_RESOLUTIONS_PER_HOUR).toBe(100);
+    spy.mockClear();
+    const refused = await resolvePackage("hono", { now });
+    expect(refused.ok).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+    expect(refused.text).toBe(
+      'Could not resolve "hono": resolution limit reached (100 per hour per process); try again later, or pin the library. ' +
+        'Add it to vibectx.config.json like: { "name": "hono", "urls": ["https://..."] }',
+    );
+    t += 61 * 60_000;
+    expect((await resolvePackage("hono", { now })).ok).toBe(true);
+  });
+
+  it("L2: a name that fails validation does not consume the budget", async () => {
+    const spy = stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono" });
+    const now = () => new Date("2026-09-06T10:00:00Z");
+    for (let i = 0; i < MAX_RESOLUTIONS_PER_HOUR; i++) await resolvePackage("not a name", { now });
+    expect(spy).not.toHaveBeenCalled();
+    expect((await resolvePackage("hono", { now })).ok).toBe(true);
+  });
+
+  it("L3: a PyPI-sourced entry is keyed by its PEP 503 name, so typing_extensions and Typing-Extensions are one record", async () => {
+    stubFetch({
+      "https://pypi.org/pypi/typing-extensions/json": { info: { project_urls: { Documentation: "https://typing-extensions.readthedocs.io/" } } },
+      "https://typing-extensions.readthedocs.io/llms.txt": "# typing-extensions",
+    });
+    const a = await resolvePackage("typing_extensions");
+    expect(a.ok).toBe(true);
+    expect(a.entry?.name).toBe("typing-extensions");
+    const b = await resolvePackage("Typing-Extensions");
+    expect(b.entry?.name).toBe("typing-extensions");
+    expect(readResolvedEntries().map((e) => e.name)).toEqual(["typing-extensions"]);
+  });
+
+  it("K2: when resolved.json belongs to another schema version the resolution still works but the report says NOT saved", async () => {
+    writeFileSync(join(dir, "resolved.json"), JSON.stringify({ schemaVersion: 7, entries: [] }), "utf8");
+    stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono" });
+    const notes: string[] = [];
+    const out = await resolvePackage("hono", { warn: (m) => notes.push(m) });
+    expect(out.ok).toBe(true);
+    expect(out.text).toContain("NOT saved");
+    expect(out.text).toContain("schemaVersion 7");
+    expect(notes.join("")).toMatch(/schemaVersion 7/);
+    expect(JSON.parse(readFileSync(join(dir, "resolved.json"), "utf8")).schemaVersion).toBe(7);
+  });
+
+  it("L1: the report labels the description as package-supplied", async () => {
+    stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono" });
+    const out = await resolvePackage("hono");
+    expect(out.text).toContain("  description: (package-supplied) Web framework built on Web Standards");
   });
 
   it("metadata larger than the cap is treated as no metadata", async () => {
@@ -601,5 +686,19 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     const text = await resolveToolText(reg, "React");
     expect(text).toContain('"React" is already in the registry as "react"');
     expect(reg.entries.get("react")).toBe(curated);
+  });
+
+  it("L3: a registry lookup also tries the PEP 503 form, so a resolved typing-extensions answers to typing_extensions without a new resolution", async () => {
+    const spy = stubFetch({
+      "https://pypi.org/pypi/typing-extensions/json": { info: { project_urls: { Documentation: "https://typing-extensions.readthedocs.io/" } } },
+      "https://typing-extensions.readthedocs.io/llms.txt": "# typing-extensions",
+    });
+    const reg = registry();
+    await resolveToolText(reg, "typing_extensions");
+    expect(reg.entries.has("typing-extensions")).toBe(true);
+    spy.mockClear();
+    const text = await resolveToolText(reg, "Typing_Extensions");
+    expect(text).toContain('Resolved "Typing_Extensions" via PyPI'); // resolved entries are re-resolvable by design …
+    expect(reg.entries.size).toBe(2); // … but still one record
   });
 });

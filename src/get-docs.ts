@@ -1,5 +1,5 @@
 import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
-import { resolvePackage } from "./resolve.js";
+import { lookupLibrary, resolvePackage } from "./resolve.js";
 import {
   getLibraryDoc,
   fetchLinkedPage,
@@ -71,7 +71,7 @@ export async function getDocsToolText(
   args: GetDocsArgs & { library: string },
 ): Promise<string> {
   const { library, ...rest } = args;
-  let entry = resolveLibrary(registry, library);
+  let entry = lookupLibrary(registry, library);
   if (!entry) {
     if (rest.offline) return unknownLibraryMessage(registry, library);
     const out = await resolvePackage(library);
