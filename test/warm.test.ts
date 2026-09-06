@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
 import { loadRegistry, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
-import { readProjectRecord, projectRecordPath } from "../src/project-store.js";
-import { runWarm, formatWarmTable, warmExitCode, warmToolText, WARM_CONCURRENCY, type WarmReport } from "../src/warm.js";
+import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
+import { runWarm, formatWarmTable, warmExitCode, warmToolText, WARM_CONCURRENCY, WARM_SCHEMA_VERSION, type WarmReport } from "../src/warm.js";
 
 let cache: string;
 let project: string;
@@ -242,6 +242,21 @@ describe("runWarm (PAR-656)", () => {
     expect(formatWarmTable(report)).toContain("0/0 dependencies cached");
   });
 
+  it("R-2 / D-13: a project record that cannot be written is a warn line and a report note, never a failed run", async () => {
+    writeCache("react", REACT_URL, "# React fresh");
+    writePackageJson({ react: "19" });
+    writeFileSync(join(cache, "projects"), "not a directory", "utf8"); // mkdir of <cacheRoot>/projects fails
+    stubFetch({});
+    const warnings: string[] = [];
+    const report = await runWarm(registry(), { dir: project, warn: (m) => warnings.push(m) });
+    expect(byName(report).react).toMatchObject({ status: "already fresh" });
+    expect(report.cached).toBe(1);
+    expect(warmExitCode(report)).toBe(0); // the docs ARE on disk; only the memo was lost
+    expect(report.notes.some((n) => n.startsWith("project record not written: "))).toBe(true);
+    expect(warnings.join("")).toMatch(/^vibectx: project record not written: /);
+    expect(formatWarmTable(report)).toMatch(/note: project record not written: /);
+  });
+
   it("a per-name failure (cache write error) is an `unreachable` row with the message, never a thrown run", async () => {
     writePackageJson({ react: "19", hono: "4" });
     stubFetch({ [REACT_URL]: "# React", [HONO_URL]: "# Hono" });
@@ -376,6 +391,16 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     }
     expect(Object.keys(byName(report).react)).toEqual(["name", "ecosystem", "source", "library", "status", "url"]);
     expect(Object.keys(byName(report)["zz-nothing"])).toEqual(["name", "ecosystem", "source", "status", "note", "failedAt"]);
+  });
+
+  it("K-2: the report's schema version IS the project record's — one constant, so the two can never drift", async () => {
+    expect(WARM_SCHEMA_VERSION).toBe(PROJECT_RECORD_SCHEMA_VERSION);
+    writeCache("react", REACT_URL, "# React fresh");
+    writePackageJson({ react: "19" });
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project });
+    expect(report.schemaVersion).toBe(WARM_SCHEMA_VERSION);
+    expect(JSON.parse(readFileSync(projectRecordPath(project), "utf8")).schemaVersion).toBe(WARM_SCHEMA_VERSION);
   });
 
   it("Q1: warm fetches ONLY the primary document — an index-like primary with links is cached and none of its links are requested", async () => {

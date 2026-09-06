@@ -7,7 +7,7 @@ import { readCache, cacheRoot } from "./cache.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
 import { mapLimit } from "./doctor.js";
 import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
-import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
+import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, PROJECT_RECORD_SCHEMA_VERSION, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
 
 export type { WarmRow, WarmStatus } from "./project-store.js";
 
@@ -70,9 +70,12 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
 /** Names warmed at once. Bounds fan-out to remote hosts (same reasoning as DOCTOR_CONCURRENCY). */
 export const WARM_CONCURRENCY = 4;
 
-/** Bumped when a key is renamed, removed or changes meaning, and when a WarmStatus value is
- *  added or removed (K3: readers drop rows with an unknown status). New keys may be appended. */
-export const WARM_SCHEMA_VERSION = 1;
+/** The `--json` report's schema version. K2: ONE constant governs both the report and the
+ *  on-disk project record, because they carry the same rows — this is a re-export of
+ *  PROJECT_RECORD_SCHEMA_VERSION, so the two can never drift. Bumped when a key is renamed,
+ *  removed or changes meaning, and when a WarmStatus value is added or removed (K3: readers
+ *  drop rows with an unknown status). New keys may be appended. */
+export const WARM_SCHEMA_VERSION = PROJECT_RECORD_SCHEMA_VERSION;
 
 /** How long an `unresolved` outcome in the project record short-circuits the next run (R3). ASSUMED. */
 export const RECENT_FAILURE_HOURS = 24;
@@ -273,7 +276,16 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     total: rows.length,
   };
   if (!report.offline) {
-    writeProjectRecord({ schemaVersion: 1, dir, manifests: report.manifests, dependencies: rows, warmedAt: report.generatedAt }, opts.warn);
+    // D-13 (oversight, 2026-09-06): the record is a memo, not the product. An unwritable
+    // cache costs the next run one resolution retry — it must never cost the user the report
+    // they asked for, so a failure is a warn line plus a note, and the exit code is unchanged.
+    try {
+      writeProjectRecord({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir, manifests: report.manifests, dependencies: rows, warmedAt: report.generatedAt }, opts.warn);
+    } catch (e) {
+      const reason = cleanText(errorMessage(e));
+      report.notes.push(`project record not written: ${reason}`);
+      (opts.warn ?? ((m: string) => process.stderr.write(m)))(`vibectx: project record not written: ${reason}\n`);
+    }
   }
   return report;
 }
