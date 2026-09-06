@@ -413,39 +413,64 @@ describe("discoverProjectDependencies — hostile or oversized input", () => {
   });
 });
 
-describe("S1 — no super-linear parsing: 1 MiB pathological lines finish in < 1 s", () => {
+describe("N-1 / N-3 — a BOM does not break a manifest, and every parser is guarded", () => {
+  const BOM = "﻿";
+  it("a BOM-prefixed package.json, package-lock.json, requirements.txt and pyproject.toml all parse", () => {
+    expect(parsePackageJsonDeps(BOM + JSON.stringify({ dependencies: { next: "15" } }))).toEqual(["next"]);
+    expect(parsePackageLockDeps(BOM + JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { hono: "4" } } } }))).toEqual(["hono"]);
+    expect(parseRequirementsTxt(`${BOM}flask\n`).names).toEqual(["flask"]);
+    expect(parsePyprojectDeps(`${BOM}[project]\ndependencies = ["httpx"]\n`)).toEqual(["httpx"]);
+    expect(parsePnpmLockDeps(`${BOM}dependencies:\n  hono: 4\n`)).toEqual(["hono"]);
+  });
+
+  it("discovery reads a BOM-prefixed package.json instead of noting a parse failure", () => {
+    write("package.json", BOM + JSON.stringify({ dependencies: { next: "15" } }));
+    const out = discoverProjectDependencies(dir);
+    expect(out.manifests).toEqual(["package.json"]);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["next"]);
+    expect(out.notes).toEqual([]);
+  });
+});
+
+describe("S1 — no super-linear parsing: 1 MiB pathological lines finish inside the budget", () => {
   const MiB = 1024 * 1024;
+  /** Q-4: a wall-clock budget on a shared CI box is a flake generator, so it is set well above
+   *  any linear scan of a megabyte (measured: single-digit ms here) and far below the
+   *  super-linear behaviour it exists to catch (measured before the fix: 11.3 s at 3000 spaces
+   *  for the TOML header, 31.8 s at 4000 for the pnpm key). Anything between the two is a
+   *  regression this catches; nothing in between is a plausible healthy time. */
+  const BUDGET_MS = 5000;
   const took = (fn: () => unknown) => {
     const t = performance.now();
     fn();
     return performance.now() - t;
   };
   it("TOML table header `[` + spaces + `x` (was 11.3 s at 3000 spaces)", () => {
-    expect(took(() => parsePyprojectDeps("[" + " ".repeat(MiB) + "x"))).toBeLessThan(1000);
-    expect(took(() => parsePyprojectDeps("[[" + " ".repeat(MiB) + "]"))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps("[" + " ".repeat(MiB) + "x"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePyprojectDeps("[[" + " ".repeat(MiB) + "]"))).toBeLessThan(BUDGET_MS);
   });
   it("pnpm key: indentation + `x` without a colon (was 31.8 s at 4000 spaces)", () => {
-    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n" + " ".repeat(MiB) + "x"))).toBeLessThan(1000);
-    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n      '" + "a".repeat(MiB)))).toBeLessThan(1000);
-    expect(took(() => parsePnpmLockDeps(" ".repeat(MiB) + "dependencies :"))).toBeLessThan(1000);
+    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n" + " ".repeat(MiB) + "x"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePnpmLockDeps("importers:\n  .:\n    dependencies:\n      '" + "a".repeat(MiB)))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePnpmLockDeps(" ".repeat(MiB) + "dependencies :"))).toBeLessThan(BUDGET_MS);
   });
   it("requirements: long names, long runs of spaces, long -r lines, long markers and extras", () => {
-    expect(took(() => parseRequirementsTxt("a" + " ".repeat(MiB) + "="))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("a".repeat(MiB) + "!"))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("-r" + " ".repeat(MiB)))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("--requirement=" + "x".repeat(MiB)))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("x[" + "e,".repeat(MiB / 2) + "]; " + "python_version > '3' and ".repeat(MiB / 25)))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("a\\\n" + " ".repeat(MiB) + "\\\nb"))).toBeLessThan(1000);
-    expect(took(() => parseRequirementsTxt("git+" + "a".repeat(MiB) + "://x"))).toBeLessThan(1000);
+    expect(took(() => parseRequirementsTxt("a" + " ".repeat(MiB) + "="))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("a".repeat(MiB) + "!"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("-r" + " ".repeat(MiB)))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("--requirement=" + "x".repeat(MiB)))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("x[" + "e,".repeat(MiB / 2) + "]; " + "python_version > '3' and ".repeat(MiB / 25)))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("a\\\n" + " ".repeat(MiB) + "\\\nb"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parseRequirementsTxt("git+" + "a".repeat(MiB) + "://x"))).toBeLessThan(BUDGET_MS);
   });
   it("pyproject: long array values, long inline tables, long keys", () => {
-    expect(took(() => parsePyprojectDeps('[project]\ndependencies = ["' + "a".repeat(MiB) + '"]'))).toBeLessThan(1000);
-    expect(took(() => parsePyprojectDeps("[project]\ndependencies = [" + '"a",'.repeat(MiB / 4) + "]"))).toBeLessThan(1000);
-    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\n" + "k".repeat(MiB) + " = { version = '*' }"))).toBeLessThan(1000);
-    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\nx = {" + " ".repeat(MiB) + "path = 'a' }"))).toBeLessThan(1000);
+    expect(took(() => parsePyprojectDeps('[project]\ndependencies = ["' + "a".repeat(MiB) + '"]'))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePyprojectDeps("[project]\ndependencies = [" + '"a",'.repeat(MiB / 4) + "]"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\n" + "k".repeat(MiB) + " = { version = '*' }"))).toBeLessThan(BUDGET_MS);
+    expect(took(() => parsePyprojectDeps("[tool.poetry.dependencies]\nx = {" + " ".repeat(MiB) + "path = 'a' }"))).toBeLessThan(BUDGET_MS);
   });
   it("package.json: a long npm: alias spec", () => {
-    expect(took(() => parsePackageJsonDeps(JSON.stringify({ dependencies: { x: "npm:" + "a".repeat(MiB), y: "npm:@" + "a".repeat(MiB) } })))).toBeLessThan(1000);
+    expect(took(() => parsePackageJsonDeps(JSON.stringify({ dependencies: { x: "npm:" + "a".repeat(MiB), y: "npm:@" + "a".repeat(MiB) } })))).toBeLessThan(BUDGET_MS);
   });
   it("tripwire: the module's remaining regex literals are exactly the allow-listed linear ones", () => {
     const src = readFileSync(new URL("../src/project-deps.ts", import.meta.url), "utf8")
@@ -489,35 +514,35 @@ describe("S2 / D-09 — symlinks are refused, and nothing outside the project is
     rmSync(outside, { recursive: true, force: true });
   });
 
-  it("a symlinked requirements-x.txt is skipped (symlink), the target never read", () => {
+  it("a symlinked requirements-x.txt pointing outside is refused, the target never read", () => {
     symlinkSync(join(outside, "requirements.txt"), join(dir, "requirements-x.txt"));
     write("requirements.txt", "flask\n");
     const out = discoverProjectDependencies(dir);
     expect(out.manifests).toEqual(["requirements.txt"]);
     expect(out.dependencies.map((d) => d.name)).toEqual(["flask"]);
-    expect(out.notes).toEqual(["requirements-x.txt: skipped (symlink)"]);
+    expect(out.notes).toEqual(["requirements-x.txt: is outside the project directory; skipped"]);
     expect(JSON.stringify(out)).not.toContain(CANARY);
   });
 
-  it("a symlinked package.json / pyproject.toml is skipped (symlink)", () => {
+  it("a symlinked package.json / pyproject.toml pointing outside is refused", () => {
     writeFileSync(join(outside, "package.json"), JSON.stringify({ dependencies: { [CANARY]: "1" } }), "utf8");
     symlinkSync(join(outside, "package.json"), join(dir, "package.json"));
     symlinkSync(join(outside, "requirements.txt"), join(dir, "pyproject.toml"));
     const out = discoverProjectDependencies(dir);
     expect(out.manifests).toEqual([]);
-    expect(out.notes).toEqual(["package.json: skipped (symlink)", "pyproject.toml: skipped (symlink)"]);
+    expect(out.notes).toEqual(["package.json: is outside the project directory; skipped", "pyproject.toml: is outside the project directory; skipped"]);
     expect(JSON.stringify(out)).not.toContain(CANARY);
   });
 
-  it("a symlinked lockfile is skipped (symlink) too", () => {
+  it("a symlinked lockfile pointing outside is refused too", () => {
     writeFileSync(join(outside, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "": { dependencies: { [CANARY]: "1" } } } }), "utf8");
     symlinkSync(join(outside, "package-lock.json"), join(dir, "package-lock.json"));
     const out = discoverProjectDependencies(dir);
-    expect(out.notes).toEqual(["package-lock.json: skipped (symlink)"]);
+    expect(out.notes).toEqual(["package-lock.json: is outside the project directory; skipped"]);
     expect(JSON.stringify(out)).not.toContain(CANARY);
   });
 
-  it("-r to a symlinked file, or through a symlinked directory, is skipped (symlink)", () => {
+  it("-r to a symlinked file, or through a symlinked directory, is refused", () => {
     symlinkSync(join(outside, "requirements.txt"), join(dir, "linked.txt"));
     symlinkSync(outside, join(dir, "linkdir"));
     mkdirSync(join(dir, "real"));
@@ -526,7 +551,10 @@ describe("S2 / D-09 — symlinks are refused, and nothing outside the project is
     const out = discoverProjectDependencies(dir);
     expect(out.manifests).toEqual(["requirements.txt", "real/base.txt"]);
     expect(out.dependencies.map((d) => d.name)).toEqual(["httpx"]);
-    expect(out.notes).toEqual(["requirements.txt: -r linked.txt skipped (symlink)", "requirements.txt: -r linkdir/requirements.txt skipped (symlink)"]);
+    expect(out.notes).toEqual([
+      "requirements.txt: -r linked.txt is outside the project directory; skipped",
+      "requirements.txt: -r linkdir/requirements.txt is outside the project directory; skipped",
+    ]);
     expect(JSON.stringify(out)).not.toContain(CANARY);
   });
 
@@ -537,6 +565,44 @@ describe("S2 / D-09 — symlinks are refused, and nothing outside the project is
     expect(out.notes).toHaveLength(2);
     for (const n of out.notes) expect(n).toMatch(/is outside the project directory; skipped$/);
     expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("Q-1: a -r include that lands OUTSIDE the project is reported as outside, not merely as a symlink — the realpath-containment branch decides", () => {
+    // Lexically `linked.txt` and `linkdir/requirements.txt` are inside the project; their real
+    // paths are not. Neuter the containment branch in checkPath (`return "ok"`) and these two
+    // notes become "skipped (symlink)", so this assertion goes red.
+    symlinkSync(join(outside, "requirements.txt"), join(dir, "linked.txt"));
+    symlinkSync(outside, join(dir, "linkdir"));
+    write("requirements.txt", "-r linked.txt\n-r linkdir/requirements.txt\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.notes).toEqual([
+      "requirements.txt: -r linked.txt is outside the project directory; skipped",
+      "requirements.txt: -r linkdir/requirements.txt is outside the project directory; skipped",
+    ]);
+    expect(out.dependencies).toEqual([]);
+    expect(JSON.stringify(out)).not.toContain(CANARY);
+  });
+
+  it("Q-1: a symlink that stays INSIDE the project is still refused, and still says so — D-09 is unchanged for in-project links", () => {
+    mkdirSync(join(dir, "real"));
+    writeFileSync(join(dir, "real", "base.txt"), "httpx\n", "utf8");
+    symlinkSync(join(dir, "real", "base.txt"), join(dir, "inside-link.txt"));
+    symlinkSync(join(dir, "real"), join(dir, "insidedir"));
+    write("requirements.txt", "-r inside-link.txt\n-r insidedir/base.txt\n-r real/base.txt\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.notes).toEqual([
+      "requirements.txt: -r inside-link.txt skipped (symlink)",
+      "requirements.txt: -r insidedir/base.txt skipped (symlink)",
+    ]);
+    expect(out.manifests).toEqual(["requirements.txt", "real/base.txt"]);
+    expect(out.dependencies.map((d) => d.name)).toEqual(["httpx"]);
+  });
+
+  it("a dangling symlink is still reported as a symlink, not as a missing file", () => {
+    symlinkSync(join(dir, "gone.txt"), join(dir, "requirements-dangling.txt"));
+    write("requirements.txt", "flask\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.notes).toEqual(["requirements-dangling.txt: skipped (symlink)"]);
   });
 
   it("the project directory itself may sit behind a symlink (realpath containment compares real paths on both sides)", () => {

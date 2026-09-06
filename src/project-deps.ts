@@ -33,11 +33,12 @@ import { normalisePyPiName, npmNameError, pypiNameError } from "./package-names.
  *                            are reported, not read.
  *
  * Trust boundary. A manifest is a file anyone with write access to the repo can edit, so:
- *   - Symlinks are refused (oversight decision D-09, 2026-09-06): every manifest and every
- *     `-r` target is `lstat`ed component by component under the project root; a symlink
- *     anywhere in the path is `skipped (symlink)`. On top of that the target's real path
- *     must lie under the project root's real path (realpath containment) — so the project
- *     directory itself may live behind a symlink, but nothing it links OUT to is read.
+ *   - Symlinks are refused (oversight decision D-09, 2026-09-06). Containment is checked
+ *     first: every manifest and every `-r` target's REAL path must lie under the project
+ *     root's real path, so the project directory itself may live behind a symlink but
+ *     nothing it links OUT to is read — a path that lands outside is reported `is outside
+ *     the project directory; skipped`. A path that lands inside is then `lstat`ed component
+ *     by component under the root, and a symlink anywhere in it is `skipped (symlink)`.
  *   - Only names that pass the package-name rules (npm grammar / PEP 508) are kept; the rest
  *     are counted in a note, never echoed.
  *   - Every note, manifest name and `source` passes through `cleanText`, which strips C0 / C1
@@ -123,6 +124,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** Drop a leading UTF-8 BOM (N-1). Editors on Windows write one, `JSON.parse` rejects it, and
+ *  a BOM-prefixed package.json otherwise read as "could not parse". No regex: one charCode. */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 const isWs = (c: string): boolean => c === " " || c === "\t" || c === "\r" || c === "\f" || c === "\v";
 const isAlnum = (c: string): boolean => (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9");
 const isNameChar = (c: string): boolean => isAlnum(c) || c === "." || c === "_" || c === "-";
@@ -151,7 +158,7 @@ function npmAliasTarget(spec: string): string | undefined {
 
 /** package.json → npm names from `dependencies` then `devDependencies`. Throws on invalid JSON. */
 export function parsePackageJsonDeps(text: string): string[] {
-  const json: unknown = JSON.parse(text);
+  const json: unknown = JSON.parse(stripBom(text));
   const out: string[] = [];
   const seen = new Set<string>();
   if (!isRecord(json)) return out;
@@ -246,7 +253,7 @@ export function parseRequirementsTxt(text: string): { names: string[]; includes:
   const includes: string[] = [];
   const seen = new Set<string>();
   // Join `\` continuations first (anchored on the literal backslash-newline: linear).
-  const logical = text.replace(/\r\n?/g, "\n").replace(/\\\n\s*/g, " ").split("\n");
+  const logical = stripBom(text).replace(/\r\n?/g, "\n").replace(/\\\n\s*/g, " ").split("\n");
   for (const raw of logical) {
     const line = stripComment(raw).trim();
     const inc = includeTarget(line);
@@ -305,7 +312,7 @@ function tableHeader(line: string): string | undefined {
  *  headers; values kept as raw text (arrays joined across lines). Anything unparseable is skipped. */
 function scanToml(text: string): TomlKeyValue[] {
   const out: TomlKeyValue[] = [];
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const lines = stripBom(text).replace(/\r\n?/g, "\n").split("\n");
   let table = "";
   for (let i = 0; i < lines.length; i++) {
     const line = stripComment(lines[i]).trim();
@@ -423,7 +430,7 @@ export function parsePyprojectDeps(text: string): string[] {
 /** package-lock.json v2/v3 → the root package's dependencies + devDependencies; [] for v1
  *  (no root list) or anything unexpected. Throws on invalid JSON. */
 export function parsePackageLockDeps(text: string): string[] {
-  const json: unknown = JSON.parse(text);
+  const json: unknown = JSON.parse(stripBom(text));
   const out: string[] = [];
   const seen = new Set<string>();
   if (!isRecord(json) || !isRecord(json.packages) || !isRecord(json.packages[""])) return out;
@@ -473,7 +480,7 @@ function pnpmKey(line: string): string | undefined {
 export function parsePnpmLockDeps(text: string): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
+  const lines = stripBom(text).replace(/\r\n?/g, "\n").split("\n");
   const collect = (start: number, blockIndent: number) => {
     let keyIndent = -1;
     for (let i = start + 1; i < lines.length; i++) {
@@ -543,11 +550,30 @@ function toPosix(p: string): string {
 type PathVerdict = "ok" | "symlink" | "outside" | "missing";
 
 /**
- * D-09: may `rel` (relative to `root`) be read? Every path component under the root is
- * `lstat`ed — a symlink anywhere is refused — and the file's real path must lie under the
- * root's real path (`rootReal + sep`). The root itself may be reached through a symlink.
+ * D-09: may `rel` (relative to `root`) be read? Two independent refusals, containment first
+ * (Q-1, PAR-656):
+ *
+ *   1. Where the path REALLY lands decides. `realpathSync` follows every symlink, in the
+ *      root prefix and in `rel` alike, and the result must lie under the root's real path
+ *      (`rootReal + sep`). Anything else is `outside` — so a manifest or `-r` target that is
+ *      lexically inside the project but links out of it is reported as what it is, rather
+ *      than as a bare symlink. This is the branch that keeps a hostile repo from reading
+ *      /etc or a sibling checkout, and it is the one the Q-1 test pins.
+ *   2. Only for a path that DOES land inside: every component under the root is `lstat`ed,
+ *      and a symlink anywhere is refused as `symlink`. The root itself may be reached
+ *      through a symlink — only what is under it is checked.
+ *
+ * A path that cannot be resolved at all is `symlink` when a component is a dangling link
+ * (that is the more specific fact) and `missing` otherwise.
  */
 function checkPath(root: string, rootReal: string, rel: string): PathVerdict {
+  let real: string | undefined;
+  try {
+    real = realpathSync(join(root, rel));
+  } catch {
+    real = undefined; // does not exist, or a dangling symlink: the component walk decides
+  }
+  if (real !== undefined && !real.startsWith(rootReal + sep)) return "outside";
   let cur = root;
   for (const part of rel.split("/")) {
     cur = join(cur, part);
@@ -557,13 +583,7 @@ function checkPath(root: string, rootReal: string, rel: string): PathVerdict {
       return "missing";
     }
   }
-  let real: string;
-  try {
-    real = realpathSync(cur);
-  } catch {
-    return "missing";
-  }
-  return real.startsWith(rootReal + sep) ? "ok" : "outside";
+  return real === undefined ? "missing" : "ok";
 }
 
 /** Read every manifest in `dir` (see the module comment for the order and the rules).
@@ -620,6 +640,8 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
       return undefined;
     }
   };
+  /** Every parser runs through here (N-3), so a throw from any of them is one `could not
+   *  parse` note and a skipped manifest — never a failed discovery. */
   const parseWith = <T>(rel: string, text: string, parse: (t: string) => T): T | undefined => {
     try {
       return parse(text);
@@ -658,9 +680,12 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
   if (present("pyproject.toml")) {
     const text = read("pyproject.toml");
     if (text !== undefined) {
-      pypiManifest = true;
-      record("pyproject.toml");
-      addAll(parsePyprojectDeps(text), "pypi", "pyproject.toml");
+      const names = parseWith("pyproject.toml", text, parsePyprojectDeps);
+      if (names) {
+        pypiManifest = true;
+        record("pyproject.toml");
+        addAll(names, "pypi", "pyproject.toml");
+      }
     }
   }
 
@@ -672,9 +697,11 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
     if (readRels.has(rel)) return;
     const text = read(rel, label);
     if (text === undefined) return;
+    const parsed = parseWith(rel, text, parseRequirementsTxt);
+    if (parsed === undefined) return; // N-3: a parse failure is a note, not a recorded manifest
     pypiManifest = true;
     record(rel);
-    const { names, includes } = parseRequirementsTxt(text);
+    const { names, includes } = parsed;
     addAll(names, "pypi", rel);
     for (const inc of includes) {
       const incLabel = `${rel}: -r ${inc}`;
@@ -733,8 +760,11 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
     if (present("pnpm-lock.yaml")) {
       const text = read("pnpm-lock.yaml");
       if (text !== undefined) {
-        record("pnpm-lock.yaml");
-        addAll(parsePnpmLockDeps(text), "npm", "pnpm-lock.yaml");
+        const names = parseWith("pnpm-lock.yaml", text, parsePnpmLockDeps);
+        if (names) {
+          record("pnpm-lock.yaml");
+          addAll(names, "npm", "pnpm-lock.yaml");
+        }
       }
     }
     if (present("yarn.lock")) {
