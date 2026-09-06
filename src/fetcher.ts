@@ -20,8 +20,9 @@ export const PRIMARY_DOC_MAX_BYTES = 25 * 1024 * 1024;
 export const LINKED_PAGE_MAX_BYTES = 2 * 1024 * 1024;
 
 export interface FetchOutcome {
-  /** `refused`: the response's final URL (after redirects) failed the link policy
-   *  (left the allowed hosts or was not https) — body never read. `too-large`: exceeded `maxBytes`. */
+  /** `refused`: a redirect target or the final URL failed the guard (left the allowed
+   *  hosts, or was not https on a public host) — never requested, body never read.
+   *  `too-large`: exceeded `maxBytes`. `miss`: HTTP failure, > MAX_REDIRECT_HOPS, or no Location. */
   status: "ok" | "not-modified" | "miss" | "refused" | "too-large";
   body?: string;
   etag?: string;
@@ -34,20 +35,38 @@ export interface FetchOptions {
   /** When set, the response's final URL must pass `isAllowedLink` against this source
    *  document and policy — the same function the pre-fetch guard applied to the link. */
   linkGuard?: { sourceUrl: string; policy?: LinkPolicy };
-  /** When set, the response's final URL must be https on a non-forbidden host (any host:
-   *  cross-host redirects stay allowed, per D-04). Used for content-derived primary URLs
-   *  (resolved entries) and registry metadata, whose targets no operator vetted. */
+  /** When set, the FIRST URL is content-derived too (resolved entries, registry metadata):
+   *  the final URL must be https on a non-forbidden host even when no redirect happened.
+   *  Redirect targets are held to that baseline for every caller (see hopAllowed). */
   publicFinalUrl?: boolean;
 }
 
 /** https on a host `isForbiddenHost` does not name; false for anything unparseable. */
-function isPublicHttpsUrl(url: string): boolean {
+export function isPublicHttpsUrl(url: string): boolean {
   try {
     const u = new URL(url);
     return u.protocol === "https:" && !isForbiddenHost(u.hostname);
   } catch {
     return false;
   }
+}
+
+/** Redirect hops followed per request; beyond this the fetch is a miss. */
+export const MAX_REDIRECT_HOPS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * May a redirect target (or the final URL) be requested under `opts`? Every redirect
+ * target — whoever configured the first URL — must be https on a public host: an
+ * operator's curated primary may redirect across hosts (D-04) but never to http, an IP
+ * literal or localhost. On top of that, the caller's guard applies: `linkGuard` runs
+ * `isAllowedLink` (the same function as the pre-fetch check); `publicFinalUrl` is the
+ * baseline itself.
+ */
+function hopAllowed(target: string, opts: FetchOptions): boolean {
+  if (!isPublicHttpsUrl(target)) return false;
+  if (opts.linkGuard !== undefined && !isAllowedLink(target, opts.linkGuard.sourceUrl, opts.linkGuard.policy)) return false;
+  return true;
 }
 
 /** Read a body up to `maxBytes`; `undefined` once the cap is exceeded (the stream
@@ -89,20 +108,44 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
         "vibectx/0.1.3 (+https://github.com/BlackRaptorAI/VibeCTX)",
     };
     if (opts.etag) headers["if-none-match"] = opts.etag;
-    const res = await fetch(url, {
-      headers,
-      redirect: "follow",
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (opts.linkGuard !== undefined) {
-      // The pre-fetch guard saw the link URL; redirects can move it. Re-check
-      // where the chain actually ended — with the SAME policy — before touching the body.
-      if (!isAllowedLink(res.url || url, opts.linkGuard.sourceUrl, opts.linkGuard.policy)) {
-        await res.body?.cancel();
-        return { status: "refused" };
+    // Redirects are followed by hand (S1, PAR-655 security gate): with redirect:"follow"
+    // the runtime would issue the request to the Location before any check could run —
+    // a blind SSRF for a 302 to http://127.0.0.1/. Each Location is checked BEFORE it is
+    // requested; on refusal no request is made.
+    if (opts.publicFinalUrl && !isPublicHttpsUrl(url)) return { status: "refused" }; // content-derived first URL: check before requesting
+    let current = url;
+    let res: Response;
+    for (let hop = 0; ; hop++) {
+      res = await fetch(current, {
+        headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(20_000),
+      });
+      if (!REDIRECT_STATUSES.has(res.status)) break;
+      const location = res.headers.get("location");
+      await res.body?.cancel();
+      if (location === null || hop >= MAX_REDIRECT_HOPS) return { status: "miss" };
+      let next: string;
+      try {
+        next = new URL(location, current).href; // relative Locations resolve against the current URL
+      } catch {
+        return { status: "miss" };
       }
+      if (!hopAllowed(next, opts)) return { status: "refused" };
+      current = next;
     }
-    if (opts.publicFinalUrl && !isPublicHttpsUrl(res.url || url)) {
+    // Final-URL check kept: should a runtime report a different res.url, judge that too.
+    // (No redirect happened when res.url equals the operator's own first URL.)
+    const final = res.url || current;
+    if (final !== url && !hopAllowed(final, opts)) {
+      await res.body?.cancel();
+      return { status: "refused" };
+    }
+    if (opts.linkGuard !== undefined && !isAllowedLink(final, opts.linkGuard.sourceUrl, opts.linkGuard.policy)) {
+      await res.body?.cancel();
+      return { status: "refused" };
+    }
+    if (opts.publicFinalUrl && !isPublicHttpsUrl(final)) {
       await res.body?.cancel();
       return { status: "refused" };
     }
@@ -154,9 +197,9 @@ export async function getLibraryDoc(
     for (const url of entry.urls) {
       const cached = readCache(entry.name, url, ttl);
       // No origin pin here: primary URLs legitimately redirect across hosts
-      // (docs.anthropic.com → platform.claude.com) — D-04. Curated entries are operator-configured;
-      // a resolved entry's URLs came from package metadata, so its final URL must at least be
-      // https on a public host.
+      // (docs.anthropic.com → platform.claude.com) — D-04; redirect targets must still be https
+      // on a public host (fetchUrl). A resolved entry's URLs came from package metadata, so
+      // its first URL is held to that baseline as well.
       const out = await fetchUrl(url, {
         etag: cached?.meta.etag,
         maxBytes: PRIMARY_DOC_MAX_BYTES,

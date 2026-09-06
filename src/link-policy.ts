@@ -25,14 +25,16 @@ const MAX_REMOTE_URL_LENGTH = 2048;
 /**
  * Hosts that are never fetched from a content-derived URL, whatever any allow-list
  * says: IP literals (v4, and v6 in either `[::1]` or bare form), `localhost` and its
- * subdomains, `.local` / `.internal` names, and single-label names (which only
- * resolve inside a private search domain). Compared after lowercasing. Note that
+ * subdomains, `.local` / `.internal` names, single-label names (which only
+ * resolve inside a private search domain), and any host with a trailing dot.
+ * Compared after lowercasing. Note that
  * the WHATWG URL parser normalises decimal / hex / short IPv4 forms
  * (`2130706433`, `0x7f.1`) to dotted quads before this sees them.
  */
 export function isForbiddenHost(hostname: string): boolean {
   const h = hostname.trim().toLowerCase();
   if (h.length === 0) return true;
+  if (h.endsWith(".")) return true; // "localhost." / "x.internal." would slip past the suffix checks; a trailing dot has no legitimate use here
   if (h.startsWith("[") || h.includes(":")) return true; // IPv6 literal
   if (IPV4_RE.test(h)) return true;
   if (h === "localhost" || h.endsWith(".localhost")) return true;

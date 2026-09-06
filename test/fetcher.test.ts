@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +11,7 @@ import {
   fetchLinkedPage,
   LINKED_PAGE_MAX_BYTES,
   PRIMARY_DOC_MAX_BYTES,
+  MAX_REDIRECT_HOPS,
 } from "../src/fetcher.js";
 import { writeCache, readCache } from "../src/cache.js";
 
@@ -229,14 +232,20 @@ describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {
     }
   });
 
-  it("the post-redirect check and the pre-check are the same function (a policy the pre-check rejects is rejected after redirect too)", async () => {
+  it("post-redirect check uses the allowed-host policy, not origin equality: same policy passes an allowed host and refuses a malformed entry both before and after the redirect", async () => {
+    const link = "https://docs.example.com/guide.md";
+    // Pass case: the redirect lands on a host the policy allows (origin equality would refuse this).
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://api.example.com/guide.md", "# On api")));
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({
+      status: "ok",
+      page: { content: "# On api", url: link },
+    });
     // A malformed policy entry never matches, before or after the redirect.
     const broken = { allowedHosts: ["https://api.example.com"] };
-    const link = "https://docs.example.com/guide.md";
-    vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://api.example.com/guide.md", "SECRET")));
-    expect(await fetchLinkedPage("lib", "https://api.example.com/guide.md", source, 168, false, broken)).toEqual({ status: "refused" });
-    expect(await fetchLinkedPage("lib", link, source, 168, false, broken)).toEqual({ status: "refused" });
-    expect(readCache("lib", link, 999)).toBeUndefined();
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://api.example.com/other.md", "SECRET")));
+    expect(await fetchLinkedPage("lib", "https://api.example.com/other.md", source, 168, false, broken)).toEqual({ status: "refused" });
+    expect(await fetchLinkedPage("lib", "https://docs.example.com/other.md", source, 168, false, broken)).toEqual({ status: "refused" });
+    expect(readCache("lib", "https://docs.example.com/other.md", 999)).toBeUndefined();
   });
 });
 
@@ -393,5 +402,143 @@ describe("etag revalidation", () => {
     const doc = await getLibraryDoc(entry);
     expect(doc?.content).toBe("# Fresh content");
     expect(readCache(entry.name, entry.urls[0], 999)?.meta.etag).toBe('"v2"');
+  });
+});
+
+describe("hop-by-hop redirects (S1): every Location is checked BEFORE it is requested", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const link = "https://docs.example.com/guide.md";
+  const policy = { allowedHosts: ["*.example.org"] };
+  const resolvedMeta = { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/evil/latest" };
+  let server: Server;
+  let listenerHits: string[];
+  let port: number;
+  const realFetch = globalThis.fetch;
+
+  beforeEach(async () => {
+    listenerHits = [];
+    server = createServer((req, res) => {
+      listenerHits.push(`${req.method} ${req.url}`);
+      if (req.url === "/start") {
+        res.writeHead(302, { location: "/admin/reboot?x=1" });
+        res.end();
+        return;
+      }
+      res.end("SECRET");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+  });
+
+  const redirect = (location: string) => new Response(null, { status: 302, headers: { location } });
+
+  /** Stub: the https origin answers from `routes` (a string is a 200 body, a Response is returned as is);
+   *  anything else goes to the REAL fetch — so a followed hop to the listener is observable. */
+  function stubOrigin(routes: Record<string, string | Response | (() => Response)>) {
+    const spy = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const r = routes[String(url)];
+      if (r === undefined) return realFetch(url as string, init);
+      if (typeof r === "string") return new Response(r, { status: 200, headers: { "content-type": "text/plain" } });
+      return typeof r === "function" ? r() : r;
+    });
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  }
+
+  it("linkGuard path: a 302 to http://127.0.0.1:<port> produces ZERO requests at the listener and is refused", async () => {
+    const spy = stubOrigin({ [link]: () => redirect(`http://127.0.0.1:${port}/admin/reboot?x=1`) });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "refused" });
+    expect(listenerHits).toEqual([]);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(readCache("lib", link, 999)).toBeUndefined();
+  });
+
+  it("publicFinalUrl path (resolved primary): a 302 to the listener produces ZERO requests and nothing is served or cached", async () => {
+    const primary = "https://evil-pkg.example.com/llms.txt";
+    for (const target of [`http://127.0.0.1:${port}/admin/reboot?x=1`, `https://127.0.0.1:${port}/x`, `https://localhost:${port}/x`]) {
+      const spy = stubOrigin({ [primary]: () => redirect(target) });
+      expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta }), target).toBeUndefined();
+      expect(listenerHits, target).toEqual([]);
+      expect(spy, target).toHaveBeenCalledTimes(1);
+    }
+    expect(readCache("evil", primary, 999)).toBeUndefined();
+  });
+
+  it("curated primary (no guard, D-04): cross-host https redirects are followed, but never to http / an IP / localhost", async () => {
+    stubOrigin({
+      "https://docs.example.com/llms.txt": () => redirect("https://platform.example.org/llms.txt"),
+      "https://platform.example.org/llms.txt": "# Moved docs",
+    });
+    expect((await getLibraryDoc({ name: "curated", urls: ["https://docs.example.com/llms.txt"] }))?.content).toBe("# Moved docs");
+    stubOrigin({ "https://docs.example.com/llms.txt": () => redirect(`http://127.0.0.1:${port}/admin/reboot?x=1`) });
+    expect(await getLibraryDoc({ name: "curated2", urls: ["https://docs.example.com/llms.txt"] })).toBeUndefined();
+    expect(listenerHits).toEqual([]);
+  });
+
+  it("a real listener that 302s to itself: the operator-configured first request is made, the hop is not; a resolved entry's http first URL is not even requested", async () => {
+    vi.stubGlobal("fetch", realFetch);
+    const start = `http://127.0.0.1:${port}/start`;
+    expect(await getLibraryDoc({ name: "cur-local", urls: [start] })).toBeUndefined();
+    expect(listenerHits).toEqual(["GET /start"]); // never GET /admin/reboot
+    expect(await getLibraryDoc({ name: "res-local", urls: [start], resolved: resolvedMeta })).toBeUndefined();
+    expect(listenerHits).toEqual(["GET /start"]); // the resolved entry's first URL fails the baseline pre-flight
+  });
+
+  it("a 302 to an allowed https host is followed; relative Locations resolve against the current URL; the page is cached under the link URL", async () => {
+    const spy = stubOrigin({
+      [link]: () => redirect("https://sub.example.org/v2/guide.md"),
+      "https://sub.example.org/v2/guide.md": () => redirect("../v3/guide.md"),
+      "https://sub.example.org/v3/guide.md": "# Guide v3",
+    });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "ok", page: { content: "# Guide v3", url: link } });
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([link, "https://sub.example.org/v2/guide.md", "https://sub.example.org/v3/guide.md"]);
+    expect(readCache("lib", link, 999)?.content).toBe("# Guide v3");
+  });
+
+  it("a hop to a disallowed host in the MIDDLE of a chain is refused before it is requested", async () => {
+    const spy = stubOrigin({
+      [link]: () => redirect("https://sub.example.org/a.md"),
+      "https://sub.example.org/a.md": () => redirect("https://evil.example.net/b.md"),
+      "https://evil.example.net/b.md": "SECRET",
+    });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "refused" });
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://evil.example.net/b.md");
+  });
+
+  it(`more than ${MAX_REDIRECT_HOPS} hops is a miss, and the next hop is not requested`, async () => {
+    const routes: Record<string, () => Response> = {};
+    routes[link] = () => redirect("https://docs.example.com/r1.md");
+    for (let i = 1; i <= MAX_REDIRECT_HOPS + 2; i++) routes[`https://docs.example.com/r${i}.md`] = () => redirect(`https://docs.example.com/r${i + 1}.md`);
+    const spy = stubOrigin(routes);
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(1 + MAX_REDIRECT_HOPS);
+    expect(MAX_REDIRECT_HOPS).toBe(5);
+  });
+
+  it("a 3xx without a Location, or with an unparseable one, is a miss and nothing further is requested", async () => {
+    let spy = stubOrigin({ [link]: () => new Response(null, { status: 302 }) });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy = stubOrigin({ [link]: () => redirect("http://[::1") });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the existing final-URL check still applies when the runtime reports a different res.url", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt("http://169.254.169.254/latest/meta-data", "SECRET")));
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "refused" });
+  });
+
+  it("R1: trailing-dot hosts (localhost., x.internal., x.local., foo.) are refused as redirect targets on the publicFinalUrl path", async () => {
+    const primary = "https://evil-pkg.example.com/llms.txt";
+    for (const host of ["localhost.", "x.internal.", "x.local.", "foo."]) {
+      const spy = stubOrigin({ [primary]: () => redirect(`https://${host}/x`) });
+      expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta }), host).toBeUndefined();
+      expect(spy, host).toHaveBeenCalledTimes(1);
+    }
   });
 });

@@ -114,6 +114,14 @@ describe("isForbiddenHost", () => {
     }
     for (const h of ["example.com", "docs.example.com", "a-b.co.uk"]) expect(isForbiddenHost(h), h).toBe(false);
   });
+
+  it("R1: a trailing dot does not bypass the checks — such hosts are forbidden outright", () => {
+    for (const h of ["localhost.", "x.internal.", "x.local.", "foo.", "example.com.", "LOCALHOST."]) {
+      expect(isForbiddenHost(h), h).toBe(true);
+      expect(isAllowedLink(`https://${h}/x`, source), h).toBe(false);
+      expect(sanitizeRemoteUrl(`https://${h}/x`), h).toBeUndefined();
+    }
+  });
 });
 
 describe("normaliseAllowedHost (config / persisted validation)", () => {
