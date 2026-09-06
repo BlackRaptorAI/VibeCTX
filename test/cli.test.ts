@@ -8,14 +8,41 @@ import { listLibrariesText } from "../src/list-libraries.js";
 import { parseDoctorArgs, parseResolveArgs, dispatchCli, RESOLVE_USAGE, type CliIo } from "../src/cli.js";
 
 let dir: string;
+/** A working directory with no `.git` and no config file (Q1). */
+let sandbox: string;
+const ENV_KEYS = ["HOME", "XDG_CONFIG_HOME", "VIBECTX_CONFIG"] as const;
+let previousEnv: Partial<Record<(typeof ENV_KEYS)[number], string>>;
 
+/**
+ * Q1 (PAR-657): since config discovery needs no flag, EVERY case in this file would
+ * otherwise be at the mercy of the machine it runs on — a developer's own
+ * ~/.config/vibectx/config.json, or a vibectx.config.json sitting in the repo root while
+ * the suite runs from there. HOME, XDG_CONFIG_HOME and VIBECTX_CONFIG are replaced with
+ * empty temp locations and process.cwd() is pointed at a directory with neither `.git`
+ * nor a config, so discovery finds nothing unless the test plants it.
+ */
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-cli-"));
   process.env.DOCS_CACHE_DIR = dir;
+  sandbox = join(dir, "sandbox");
+  mkdirSync(sandbox, { recursive: true });
+  previousEnv = {};
+  for (const key of ENV_KEYS) {
+    previousEnv[key] = process.env[key];
+    delete process.env[key];
+  }
+  process.env.HOME = join(dir, "home");
+  process.env.XDG_CONFIG_HOME = join(dir, "xdg");
+  vi.spyOn(process, "cwd").mockReturnValue(sandbox);
 });
 
 afterEach(() => {
   delete process.env.DOCS_CACHE_DIR;
+  for (const key of ENV_KEYS) {
+    if (previousEnv[key] === undefined) delete process.env[key];
+    else process.env[key] = previousEnv[key];
+  }
+  vi.restoreAllMocks();
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
 });
@@ -263,7 +290,7 @@ describe("dispatchCli resolve (PAR-655)", () => {
 });
 
 import { parseWarmArgs, WARM_USAGE } from "../src/cli.js";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdtempSync as mkdtemp2 } from "node:fs";
 import { projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 
@@ -396,26 +423,13 @@ describe("warm --force and the JSON row order (PAR-656 R3 / K1)", () => {
 
 describe("CLI config discovery: no flag needed (PAR-657)", () => {
   let repo: string;
-  let previousXdg: string | undefined;
-  let previousEnvConfig: string | undefined;
 
+  // HOME, XDG_CONFIG_HOME and VIBECTX_CONFIG are already isolated for the whole file (Q1);
+  // this block adds the one thing these cases need: a working directory that IS a repo.
   beforeEach(() => {
     repo = join(dir, "repo");
     mkdirSync(join(repo, ".git"), { recursive: true });
-    // Hermetic: an empty XDG_CONFIG_HOME stands in for the machine's user-level config.
-    previousXdg = process.env.XDG_CONFIG_HOME;
-    previousEnvConfig = process.env.VIBECTX_CONFIG;
-    process.env.XDG_CONFIG_HOME = join(dir, "xdg");
-    delete process.env.VIBECTX_CONFIG;
     vi.spyOn(process, "cwd").mockReturnValue(repo);
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-    if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
-    else process.env.XDG_CONFIG_HOME = previousXdg;
-    if (previousEnvConfig === undefined) delete process.env.VIBECTX_CONFIG;
-    else process.env.VIBECTX_CONFIG = previousEnvConfig;
   });
 
   const commit = (name: string, libraries: unknown[]): string => {

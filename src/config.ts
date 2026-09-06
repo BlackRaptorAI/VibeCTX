@@ -76,8 +76,10 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   const home = opts.home ?? homedir();
   const show = (p: string): string => displayPath(p, opts.cwd, home);
 
+  // The trimmed value is what was tested for emptiness, so it is also what is used: a path
+  // that differs from it only by surrounding whitespace is the same path.
   const flag = opts.flag?.trim();
-  if (flag) return { files: [{ path: opts.flag as string, scope: "flag", legacy: false }], notes };
+  if (flag) return { files: [{ path: flag, scope: "flag", legacy: false }], notes };
   const env = (opts.env[CONFIG_ENV] ?? "").trim();
   if (env) return { files: [{ path: env, scope: "env", legacy: false }], notes };
 

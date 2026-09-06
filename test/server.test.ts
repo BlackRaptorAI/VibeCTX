@@ -26,6 +26,9 @@ afterEach(() => {
   delete process.env.DOCS_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
+  // Q2 (PAR-657): the done-when case spies process.cwd(); restoring it here means a failure
+  // inside that test cannot leave every later file running against a temp directory.
+  vi.restoreAllMocks();
 });
 
 const REACT_URL = "https://react.dev/llms-full.txt";
@@ -178,6 +181,5 @@ describe("done-when (PAR-657): a committed vibectx.config.json reaches a flagles
     await started.autowarm; // the autowarm's "configured libraries" include the discovered entry
     expect(spy.mock.calls.map((c) => String(c[0]))).toContain(ACME_URL);
     await client.close();
-    vi.restoreAllMocks();
   });
 });
