@@ -84,7 +84,14 @@ heading path, a snippet's language and its context line are stripped of control,
 zero-width characters before they are rendered; section bodies are not, because the body
 is the document.
 
-Measured comparison against the previous ranker: [`docs/eval/2026-09-06-par-658.md`](docs/eval/2026-09-06-par-658.md).
+Measured comparison against the previous ranker: on the GitHub-README corpus the
+build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe
+questions answered with the right section in the top result (+0/−0; "no sections
+matched" falls from 12 to 7). The docs-site `llms-full.txt` primaries these
+libraries publish — the documents the ranker is meant for — are unreachable from
+that sandbox, so this is not yet a measurement of the ranking on real
+documentation. Full numbers and method:
+[`docs/eval/2026-09-06-par-658.md`](docs/eval/2026-09-06-par-658.md).
 
 ### Code-first answers: `mode: "snippets"`
 
