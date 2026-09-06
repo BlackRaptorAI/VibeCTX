@@ -87,7 +87,9 @@ verification")` answers from the cache with the network unplugged.
   comments and `\` continuations stripped; `-r` / `--requirement` includes followed one
   level, relative to the including file and only inside the project directory; `-c`, `-e`,
   options, URLs and paths skipped. PyPI names are normalised (PEP 503), so
-  `Typing_Extensions` and `typing-extensions` are one dependency.
+  `Typing_Extensions` and `typing-extensions` are one dependency. Only names that pass the
+  npm / PEP 508 name rules are kept (the rest are counted in a note, never printed); a
+  manifest over 32 MiB is not read.
 - Lockfiles, **only when the ecosystem's manifest is absent**, for names: `package-lock.json`
   v2/v3 (the root package's lists; v1 has none and is reported), `pnpm-lock.yaml`
   (`importers['.']`, or the v5 top-level blocks). `yarn.lock`, `uv.lock` and `poetry.lock`
