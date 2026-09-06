@@ -139,6 +139,53 @@ describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHE
     expect(notes.join("")).toMatch(/newer schemaVersion 2/);
   });
 
+  it("K-1: the schema gate's seeded record — a javascript: url is dropped, a traversing source drops the row, an over-long note is truncated", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const rows = record().dependencies;
+    const longNote = "n".repeat(5026);
+    writeFileSync(
+      projectRecordPath(project),
+      JSON.stringify({
+        ...record(),
+        dependencies: [
+          { ...rows[0], name: "bad-url", url: "javascript:alert(1)" },
+          { ...rows[0], name: "http-url", url: "http://insecure.example.com/llms.txt" },
+          { ...rows[3], name: "traversing-source", source: "../../etc/passwd" },
+          { ...rows[3], name: "absolute-source", source: "/etc/passwd" },
+          { ...rows[3], name: "long-note", note: longNote },
+          { ...rows[0], name: "long-library", library: "l".repeat(215) },
+        ],
+      }),
+      "utf8",
+    );
+    const back = readProjectRecord(project)!;
+    expect(back.dependencies.map((d) => d.name)).toEqual(["bad-url", "http-url", "long-note", "long-library"]);
+    // A url that is not an https URL is DROPPED; the row survives, it just no longer claims one.
+    expect(back.dependencies[0].url).toBeUndefined();
+    expect(back.dependencies[1].url).toBeUndefined();
+    // A source that is not a plain relative manifest path DROPS THE ROW — it is a file name, and
+    // one that traverses is evidence the file was written by something other than this tool.
+    expect(JSON.stringify(back)).not.toContain("passwd");
+    // An over-long note is TRUNCATED, not dropped: the reason a name failed is still worth showing.
+    expect(back.dependencies[2].note).toHaveLength(512);
+    expect(back.dependencies[2].note!.endsWith("…")).toBe(true);
+    // An over-long library name drops that field only.
+    expect(back.dependencies[3].library).toBeUndefined();
+  });
+
+  it("K-1: legitimate manifest sources and https urls survive untouched", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const rows = record().dependencies;
+    const keep = [
+      { ...rows[0], name: "a", source: "package.json" },
+      { ...rows[0], name: "b", source: "requirements-dev.txt" },
+      { ...rows[0], name: "c", source: "sub/requirements.txt" },
+      { ...rows[0], name: "d", source: "@scope/pyproject.toml" },
+    ];
+    writeFileSync(projectRecordPath(project), JSON.stringify({ ...record(), dependencies: keep }), "utf8");
+    expect(readProjectRecord(project)?.dependencies).toEqual(keep);
+  });
+
   it("K3: an unknown status is dropped on read; failedAt must be a date when present", () => {
     mkdirSync(join(dir, "projects"), { recursive: true });
     const rows = record().dependencies;

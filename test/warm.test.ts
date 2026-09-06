@@ -487,6 +487,56 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     expect(cfgReport.dependencies.filter((r) => r.name === "stripe").every((r) => r.note === undefined)).toBe(true);
   });
 
+  it("Q-3 / S3: ESC, C1, bidi and zero-width characters reach neither the table, nor the tool text, nor the --json report", async () => {
+    // Everything cleanText strips, minus the newline the renderers legitimately join lines with.
+    const CONTROLS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+    const HOSTILE = "boom\u001b[31mx\u009f\u202ey\u200bz";
+    const CLEAN = "boom[31mxyz";
+    // Route 1: a seeded project record — the R3 memo copies the previous run's note into this run's row.
+    writePackageJson({ "zz-nothing": "1" });
+    mkdirSync(join(cache, "projects"), { recursive: true });
+    writeFileSync(
+      projectRecordPath(project),
+      JSON.stringify({
+        schemaVersion: PROJECT_RECORD_SCHEMA_VERSION,
+        dir: project,
+        manifests: ["package.json"],
+        dependencies: [{ name: "zz-nothing", ecosystem: "npm", source: "package.json", status: "unresolved", note: HOSTILE, failedAt: "2026-09-06T10:00:00.000Z" }],
+        warmedAt: "2026-09-06T10:00:00.000Z",
+      }),
+      "utf8",
+    );
+    // Route 2: a manifest FILE NAME carrying the same characters — it becomes a `source` and a manifest entry.
+    writeFileSync(join(project, "requirements-\u001b[31mred\u200b.txt"), "flask\n", "utf8");
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project, now: () => new Date("2026-09-06T13:00:00Z") });
+
+    const memo = report.dependencies.find((d) => d.name === "zz-nothing")!;
+    expect(memo.status).toBe("unresolved (recent)");
+    expect(memo.note).toContain(CLEAN); // cleaned, not dropped
+    expect(report.manifests).toContain("requirements-[31mred.txt");
+
+    const table = formatWarmTable(report);
+    expect(table).toContain(CLEAN);
+    expect(CONTROLS.test(table)).toBe(false);
+
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+    try {
+      const tool = await warmToolText(registry(), project);
+      expect(CONTROLS.test(tool)).toBe(false);
+      expect(tool).toContain(CLEAN);
+    } finally {
+      cwd.mockRestore();
+    }
+
+    // --json has no renderer to clean it, so the rows themselves must already be clean.
+    const json = JSON.stringify(report, null, 2);
+    expect(CONTROLS.test(json)).toBe(false); // bidi / zero-width survive JSON.stringify unescaped
+    expect(json).not.toMatch(/\\u00(1b|9f)/); // a control character would appear escaped
+    expect(json).toContain(CLEAN);
+    expect(json).toContain("requirements-[31mred.txt");
+  });
+
   it("D-10: warmToolText (the MCP tool) accepts only the server's working directory or a directory beneath it", async () => {
     writePackageJson({ react: "19" });
     writeCache("react", REACT_URL, "# React fresh");

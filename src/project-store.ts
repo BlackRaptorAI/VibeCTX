@@ -3,7 +3,8 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
-import type { DependencyEcosystem } from "./project-deps.js";
+import { sanitizeRemoteUrl } from "./link-policy.js";
+import { cleanText, type DependencyEcosystem } from "./project-deps.js";
 
 /**
  * Project records for `vibectx warm` (PAR-656): `<cacheRoot>/projects/<hash>.json`, one
@@ -12,8 +13,18 @@ import type { DependencyEcosystem } from "./project-deps.js";
  * nothing about the path (which may be long, or contain characters the filesystem
  * dislikes) is in the file name.
  *
- * Same discipline as resolved.json: atomic write (temp file + rename), every field
- * re-validated on read, a corrupt file reads as absent. Upgrade policy (K2): a file whose
+ * Same discipline as resolved.json — and the same reason: the cache directory is a trust
+ * boundary, so the file is written atomically (temp file + rename) and EVERY field is
+ * re-validated on read against the rule that field has, not merely typechecked. In full
+ * (K1): `schemaVersion` must equal ours, `dir` must equal the directory asked for,
+ * `manifests` must be an array of strings, `warmedAt` must be a parseable date, and
+ * `dependencies` must be an array — any of those failing makes the record absent. Then, per
+ * row: `name` 1…214 characters, `ecosystem` exactly npm or pypi, `source` a relative
+ * manifest path (no absolute path, no `..` segment), `status` one of WARM_STATUSES and
+ * `failedAt` a parseable date when present — each of those failing drops the ROW; `library`
+ * over 214 characters and a `url` that is not an https URL passing `sanitizeRemoteUrl` drop
+ * that FIELD; a `note` over 512 characters is truncated. Every surviving string passes
+ * through `cleanText`. A corrupt file reads as absent. Upgrade policy (K2): a file whose
  * `schemaVersion` is LOWER than ours is ignored on read and replaced on write (an older
  * vibectx wrote it; this version owns the format now); a HIGHER one is ignored on read and
  * never overwritten (a newer vibectx owns it — refuse, with a note on stderr). A record
@@ -101,8 +112,14 @@ export function projectRecordPath(dir: string): string {
   return join(cacheRoot(), "projects", `${hash}.json`);
 }
 
-/** Build a row with its keys in the documented order (K1): name, ecosystem, source,
- *  library?, status, url?, note?, failedAt?. Every writer goes through here. */
+/**
+ * Build a row with its keys in the documented order (K1): name, ecosystem, source, library?,
+ * status, url?, note?, failedAt?. Every writer goes through here, which makes it the one
+ * place S3 has to hold: each free-text field passes through `cleanText`, so a control, bidi
+ * or zero-width character out of a manifest, a resolver message or a previous project record
+ * cannot reach the table, the tool's text, OR the `--json` report — the renderers clean
+ * again, but the JSON has no renderer to clean it.
+ */
 export function makeWarmRow(fields: {
   name: string;
   ecosystem: DependencyEcosystem;
@@ -113,30 +130,81 @@ export function makeWarmRow(fields: {
   note?: string;
   failedAt?: string;
 }): WarmRow {
-  const { name, ecosystem, source, library, status } = fields;
+  const { ecosystem, status } = fields;
+  const name = cleanText(fields.name);
+  const source = cleanText(fields.source);
+  const library = fields.library === undefined ? undefined : cleanText(fields.library);
   const row: WarmRow = library !== undefined ? { name, ecosystem, source, library, status } : { name, ecosystem, source, status };
-  if (fields.url !== undefined) row.url = fields.url;
-  if (fields.note !== undefined) row.note = fields.note;
+  if (fields.url !== undefined) row.url = cleanText(fields.url);
+  if (fields.note !== undefined) row.note = cleanText(fields.note);
   if (fields.failedAt !== undefined) row.failedAt = fields.failedAt;
   return row;
 }
 
+/** Longest `name` / `library`: npm's published package-name limit. */
+const MAX_NAME = 214;
+/** Longest `source`: a manifest file name, possibly one directory deep. */
+const MAX_SOURCE = 256;
+/** Longest `note`: one plain phrase of detail, truncated with an ellipsis past this. */
+export const MAX_NOTE = 512;
+
+/**
+ * A `source` is a manifest file name relative to the project directory — `package.json`,
+ * `requirements-dev.txt`, `sub/requirements.txt`. Accepted characters are the ones those
+ * names use; a path that is absolute or contains a `..` segment is refused outright, because
+ * this field is echoed into the table and nothing this tool writes ever traverses.
+ */
+const SOURCE_CHARS = /^[A-Za-z0-9._@/-]{1,256}$/;
+function validSource(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_SOURCE) return false;
+  if (!SOURCE_CHARS.test(value)) return false;
+  if (value.startsWith("/")) return false;
+  return !value.split("/").includes("..");
+}
+
+/** One plain line of at most MAX_NOTE characters; truncated, never dropped — the reason a
+ *  name failed is worth showing even when whatever wrote the file was over-generous. */
+function cleanNote(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const text = cleanText(value);
+  if (text.length === 0) return undefined;
+  return text.length > MAX_NOTE ? `${text.slice(0, MAX_NOTE - 1)}…` : text;
+}
+
+/**
+ * Validate one persisted row (K1). The file is a trust boundary — anything with write access
+ * to the cache directory can put a row here, and every field lands in a table a person and a
+ * model both read — so each field is re-validated with the rule that field actually has:
+ *
+ *   name       required, 1…214 characters       — row dropped otherwise
+ *   ecosystem  exactly "npm" or "pypi"          — row dropped otherwise
+ *   source     a relative manifest path         — row dropped otherwise (see validSource)
+ *   status     one of WARM_STATUSES             — row dropped otherwise (K3)
+ *   failedAt   a parseable date when present    — row dropped otherwise
+ *   library    1…214 characters                 — FIELD dropped otherwise
+ *   url        passes sanitizeRemoteUrl (https, no credentials, no forbidden host)
+ *                                               — FIELD dropped otherwise
+ *   note       ≤ 512 characters                 — TRUNCATED, never dropped
+ *
+ * Every surviving string also passes through `cleanText`, so no control, bidi or zero-width
+ * character reaches the renderer (S3).
+ */
 function toWarmRow(raw: unknown): WarmRow | undefined {
   if (!isRecord(raw)) return undefined;
   const { name, ecosystem, source, library, status, url, note, failedAt } = raw;
-  if (typeof name !== "string" || name.length === 0 || name.length > 214) return undefined;
+  if (typeof name !== "string" || name.length === 0 || name.length > MAX_NAME) return undefined;
   if (ecosystem !== "npm" && ecosystem !== "pypi") return undefined;
-  if (typeof source !== "string") return undefined;
+  if (!validSource(source)) return undefined;
   if (typeof status !== "string" || !(WARM_STATUSES as readonly string[]).includes(status)) return undefined; // K3: unknown status → row dropped
   if (failedAt !== undefined && (typeof failedAt !== "string" || Number.isNaN(Date.parse(failedAt)))) return undefined;
   return makeWarmRow({
     name,
     ecosystem,
     source,
-    library: typeof library === "string" ? library : undefined,
+    library: typeof library === "string" && library.length > 0 && library.length <= MAX_NAME ? library : undefined,
     status: status as WarmStatus,
-    url: typeof url === "string" ? url : undefined,
-    note: typeof note === "string" ? note : undefined,
+    url: sanitizeRemoteUrl(url),
+    note: cleanNote(note),
     failedAt: typeof failedAt === "string" ? failedAt : undefined,
   });
 }
