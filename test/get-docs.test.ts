@@ -270,6 +270,18 @@ describe("getDocs index following", () => {
     expect(out.text).toBe(await getDocs(entry, { topic: "request hostname" }));
   });
 
+  it("does not count the synthetic link-title heading as an answer from a followed page", async () => {
+    // get_docs prefixes each followed page with "# <link title>". That heading alone
+    // matches "request" but carries no content; a followed page that says nothing
+    // about the topic must not register as returnedFromFollowed.
+    seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    stubFetch({ "https://fastify.dev/docs/Request.md": "# Unrelated\n\nNothing about the topic here." });
+    const out = await getDocsDetailed(entry, { topic: "request" });
+    expect(out.followed).toEqual(["https://fastify.dev/docs/Request.md"]);
+    expect(out.matched).toBeGreaterThan(0); // the index's own link line still matches
+    expect(out.returnedFromFollowed).toBe(0);
+  });
+
   it("reports no source and zero matches structurally when nothing is reachable or cached", async () => {
     stubFetch({});
     const out = await getDocsDetailed({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"] }, { topic: "x" });

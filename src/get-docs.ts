@@ -165,12 +165,16 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     };
   }
   const body = assemble(ranked, budget);
-  // Section origin: a returned section is "from a followed page" when no section of the
-  // primary document has the same heading and body. Only computed when something was followed.
+  // Section origin: a returned section is "from a followed page" when it has content and
+  // no section of the primary document has the same heading and body. Body-less sections
+  // are excluded because the "# <link title>" marker prefixed to each followed page matches
+  // the topic by construction without carrying any answer. Only computed when something was followed.
   let returnedFromFollowed = 0;
   if (followed.length > 0) {
     const primaryKeys = new Set(splitSections(doc.content).map(sectionKey));
-    returnedFromFollowed = selectSections(ranked, budget).filter((s) => !primaryKeys.has(sectionKey(s))).length;
+    returnedFromFollowed = selectSections(ranked, budget).filter(
+      (s) => s.body.trim().length > 0 && !primaryKeys.has(sectionKey(s)),
+    ).length;
   }
   return {
     text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${body}`,

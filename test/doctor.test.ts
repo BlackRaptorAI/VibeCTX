@@ -168,6 +168,23 @@ describe("runDoctor source kinds and probes", () => {
     expect(lib.reasons.join(" ")).toMatch(/index-only.*no links followed/);
   });
 
+  it("index-only with a followed page that lacks the topic is 'answered' (from the link list), not index-followed", async () => {
+    // Rule as specified for PAR-707: ✗ only when zero links were followed. This row is ✓
+    // with links 1/0 and probe 'answered' — the operator can see the answer did not come
+    // from the followed page. A stricter rule (index-only requires an index-followed probe)
+    // is a candidate follow-up, not applied here.
+    writeCache("fastify", FASTIFY_INDEX_URL, fastifyIndex());
+    stubFetch({ [FASTIFY_PAGE_URL]: "# Unrelated\n\nNothing about the topic here." });
+    const report = await runDoctor(
+      reg({ name: "fastify", urls: [FASTIFY_INDEX_URL], probeQueries: ["querystring parsing"] }),
+    );
+    const [lib] = report.libraries;
+    expect(lib.kind).toBe("index-only");
+    expect(lib.followed).toBe(1);
+    expect(lib.probes[0].status).toBe("answered");
+    expect(lib.healthy).toBe(true);
+  });
+
   it("full-text: prose at an llms-full.txt URL, probe answered, healthy", async () => {
     writeCache("react", REACT_URL, REACT_DOC);
     stubFetch({});
