@@ -9,6 +9,8 @@ import { doctorToolText } from "./doctor.js";
 import { resolveToolText } from "./resolve.js";
 import { warmToolText } from "./warm.js";
 import { shouldAutowarm, startAutowarm, type AutowarmSummary } from "./autowarm.js";
+import { sweepCacheTempFiles } from "./atomic-store.js";
+import { cacheRoot } from "./cache.js";
 
 /**
  * The MCP server, transport-agnostic (PAR-656 Q2): `buildServer` registers the tools,
@@ -127,6 +129,9 @@ export async function startServer(
   transport: Transport,
   opts: { env?: NodeJS.ProcessEnv; warn?: (message: string) => void } = {},
 ): Promise<StartedServer> {
+  // S-C: a previous run killed mid-write leaves `<target>.<pid>.<ms>.tmp` files nothing ever
+  // reads. Sweep them once, before anything else writes. Best effort; never throws.
+  sweepCacheTempFiles(cacheRoot());
   const server = buildServer(registry);
   const controller = new AbortController();
   let resolveClosed!: () => void;

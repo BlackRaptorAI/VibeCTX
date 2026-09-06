@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 import { readCache, writeCache, touchCache, cacheRoot } from "../src/cache.js";
+import { sweepTempFiles, sweepCacheTempFiles } from "../src/atomic-store.js";
 
 let dir: string;
 
@@ -90,5 +91,34 @@ describe("cache — atomic writes (PAR-656 S4)", () => {
     const p = paths();
     expect(readdirSync(p.dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
     expect(readCache("react", URL_, 168)!.meta.fetchedAt > before).toBe(true);
+  });
+});
+
+describe("S-C — orphan temp files are swept from the cache directories", () => {
+  const URL_ = "https://react.dev/llms.txt";
+  const orphan = (dirPath: string, base: string) => join(dirPath, `${base}.4242.1757000000000.tmp`);
+
+  it("sweepTempFiles removes only names the atomic writers produce, and never throws on a missing directory", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    writeFileSync(orphan(dir, "resolved.json"), "{}", "utf8");
+    writeFileSync(orphan(join(dir, "projects"), "abc.json"), "{}", "utf8");
+    writeFileSync(join(dir, "notes.tmp"), "mine", "utf8"); // not our shape: untouched
+    writeFileSync(join(dir, "resolved.json"), "{}", "utf8");
+    sweepTempFiles(dir);
+    sweepTempFiles(join(dir, "projects"));
+    expect(() => sweepTempFiles(join(dir, "does-not-exist"))).not.toThrow();
+    expect(readdirSync(dir).sort()).toEqual(["notes.tmp", "projects", "resolved.json"]);
+    expect(readdirSync(join(dir, "projects"))).toEqual([]);
+  });
+
+  it("sweepCacheTempFiles reaches the per-library document directories too, and leaves real files alone", () => {
+    writeCache("react", URL_, "# React");
+    const libDir = join(dir, "react");
+    writeFileSync(orphan(libDir, "page.md"), "half a document", "utf8");
+    writeFileSync(orphan(join(dir, "react"), "page.meta.json"), "{", "utf8");
+    const before = readdirSync(libDir).filter((f) => !f.endsWith(".tmp")).sort();
+    sweepCacheTempFiles(dir);
+    expect(readdirSync(libDir).sort()).toEqual(before);
+    expect(readCache("react", URL_, 168)?.content).toBe("# React");
   });
 });

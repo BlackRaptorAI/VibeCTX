@@ -4,6 +4,7 @@ import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registr
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { readCache, cacheRoot } from "./cache.js";
+import { sweepCacheTempFiles } from "./atomic-store.js";
 import { mapLimit } from "./doctor.js";
 import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
 import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
@@ -246,6 +247,7 @@ function recentFailures(dir: string, nowMs: number): Map<string, WarmRow> {
  * project record unless `offline`.
  */
 export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promise<WarmReport> {
+  sweepCacheTempFiles(cacheRoot()); // S-C: clear temp files a killed run left behind
   const dir = normaliseProjectDir(opts.dir ?? process.cwd());
   const discovery = discoverProjectDependencies(dir);
   if (discovery.manifests.length === 0) {

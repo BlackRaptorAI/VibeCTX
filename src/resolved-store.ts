@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, pypiNameError } from "./package-names.js";
@@ -112,7 +113,7 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   const dir = cacheRoot();
   mkdirSync(dir, { recursive: true });
   const path = resolvedStorePath();
-  const newer = newerSchemaVersion(path);
+  const newer = newerSchemaVersion(path, RESOLVED_SCHEMA_VERSION);
   if (newer !== undefined) {
     // K2: a file written by a NEWER vibectx is not ours to rewrite; the resolution stays in memory.
     // An OLDER schemaVersion is ours to replace (aligned with the project store, PAR-656).
@@ -123,26 +124,6 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   const at = entries.findIndex((e) => e.name === valid.name);
   if (at === -1) entries.push(valid);
   else entries[at] = valid;
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  const body = JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: entries.map(toRecord) }, null, 2);
-  try {
-    writeFileSync(tmp, body, "utf8");
-    renameSync(tmp, path);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeAtomic(path, JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: entries.map(toRecord) }, null, 2));
   return true;
-}
-
-/** The on-disk file's schemaVersion when it parses and is NEWER than ours; undefined when
- *  absent, corrupt, ours, or older (an older file is replaced on the next save). */
-function newerSchemaVersion(path: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (isRecord(parsed) && typeof parsed.schemaVersion === "number" && parsed.schemaVersion > RESOLVED_SCHEMA_VERSION) return String(parsed.schemaVersion);
-  } catch {
-    return undefined;
-  }
-  return undefined;
 }

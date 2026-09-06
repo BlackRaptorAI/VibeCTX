@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -106,6 +106,19 @@ describe("startServer + autowarm over an in-memory transport", () => {
     expect(await started.autowarm).toEqual({ attempted: 1, cached: 1, failed: [], aborted: 0 });
     expect(await call("list_libraries")).not.toContain("warming…");
     expect(notes.join("")).toBe("vibectx: autowarm cached 1/1 configured libraries\n");
+    await client.close();
+  });
+
+  it("S-C: startServer sweeps orphan temp files out of the cache directories before anything else writes", async () => {
+    writeCache("react", REACT_URL, "# React fresh");
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const orphans = [join(dir, "resolved.json.4242.1757000000000.tmp"), join(dir, "projects", "abc.json.4242.1757000000000.tmp"), join(dir, "react", "page.md.4242.1757000000000.tmp")];
+    for (const o of orphans) writeFileSync(o, "half a file", "utf8");
+    writeFileSync(join(dir, "keep.tmp"), "not ours", "utf8");
+    heldFetch();
+    const { client } = await connect(registry(), { VIBECTX_NO_AUTOWARM: "1" });
+    for (const o of orphans) expect(existsSync(o), o).toBe(false);
+    expect(existsSync(join(dir, "keep.tmp"))).toBe(true);
     await client.close();
   });
 

@@ -253,6 +253,20 @@ describe("runWarm (PAR-656)", () => {
     expect(byName(report).hono).toMatchObject({ status: "cached" });
   });
 
+  it("S-C: a run sweeps orphan temp files out of the cache directories first", async () => {
+    writeCache("react", REACT_URL, "# React fresh");
+    mkdirSync(join(cache, "projects"), { recursive: true });
+    const orphans = [join(cache, "resolved.json.4242.1757000000000.tmp"), join(cache, "projects", "abc.json.4242.1757000000000.tmp"), join(cache, "react", "page.md.4242.1757000000000.tmp")];
+    for (const o of orphans) writeFileSync(o, "half a file", "utf8");
+    writeFileSync(join(cache, "keep.tmp"), "not ours", "utf8");
+    writePackageJson({ react: "19" });
+    stubFetch({});
+    await runWarm(registry(), { dir: project });
+    for (const o of orphans) expect(existsSync(o), o).toBe(false);
+    expect(existsSync(join(cache, "keep.tmp"))).toBe(true);
+    expect(readCache("react", REACT_URL, 168)?.content).toBe("# React fresh");
+  });
+
   it("runs at most WARM_CONCURRENCY names at once", async () => {
     expect(WARM_CONCURRENCY).toBe(4);
     const deps: Record<string, string> = {};

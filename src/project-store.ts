@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
 import type { DependencyEcosystem } from "./project-deps.js";
 
@@ -165,20 +166,6 @@ export function readProjectRecord(dir: string): ProjectRecord | undefined {
   return toProjectRecord(parsed, dir);
 }
 
-/** The on-disk file's schemaVersion when it parses and is NEWER than ours (K2); undefined when
- *  absent, corrupt, ours, or older (older files are ours to replace). */
-function newerSchemaVersion(path: string): string | undefined {
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (isRecord(parsed) && typeof parsed.schemaVersion === "number" && parsed.schemaVersion > PROJECT_RECORD_SCHEMA_VERSION) {
-      return String(parsed.schemaVersion);
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
 /**
  * Write the record for `record.dir` via a temp file and rename (readers see the old or the
  * new file, never a partial one). Returns false, with a note via `warn`, when the file on
@@ -188,7 +175,7 @@ export function writeProjectRecord(record: ProjectRecord, warn: (message: string
   const dir = normaliseProjectDir(record.dir);
   const path = projectRecordPath(dir);
   mkdirSync(join(cacheRoot(), "projects"), { recursive: true });
-  const newer = newerSchemaVersion(path);
+  const newer = newerSchemaVersion(path, PROJECT_RECORD_SCHEMA_VERSION);
   if (newer !== undefined) {
     warn(
       `vibectx: not writing the project record for ${dir} — ${path} has a newer schemaVersion ${newer} (this version writes ${PROJECT_RECORD_SCHEMA_VERSION}); upgrade vibectx or delete the file\n`,
@@ -206,14 +193,7 @@ export function writeProjectRecord(record: ProjectRecord, warn: (message: string
     null,
     2,
   );
-  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
-  try {
-    writeFileSync(tmp, body, "utf8");
-    renameSync(tmp, path);
-  } catch (e) {
-    rmSync(tmp, { force: true });
-    throw e;
-  }
+  writeAtomic(path, body);
   return true;
 }
 

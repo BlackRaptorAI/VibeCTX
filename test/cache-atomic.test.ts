@@ -36,15 +36,16 @@ afterEach(() => {
 const URL_ = "https://react.dev/llms.txt";
 
 describe("cache write discipline (temp file + rename, content before meta)", () => {
-  it("writeCache never writes a final path directly: content tmp → rename, then meta tmp → rename", () => {
+  it("N-5: writeCache stages BOTH temp files, then renames content and meta back to back — nothing but a rename sits in the new-content/old-meta window", () => {
     writeCache("react", URL_, "# React", '"v1"');
-    expect(calls.map((c) => c.op)).toEqual(["write", "rename", "write", "rename"]);
+    expect(calls.map((c) => c.op)).toEqual(["write", "write", "rename", "rename"]);
     for (const c of calls.filter((c) => c.op === "write")) expect(c.path).toMatch(/\.tmp$/);
-    expect(calls[1].to).toMatch(/\.md$/);
+    expect(calls[2].to).toMatch(/\.md$/);
     expect(calls[3].to).toMatch(/\.meta\.json$/);
     // temp files live in the same directory as their target (rename is atomic only within a filesystem)
     for (const c of calls.filter((c) => c.op === "rename")) expect(join(c.path, "..")).toBe(join(c.to!, ".."));
     expect(readCache("react", URL_, 168)?.content).toBe("# React");
+    expect(readCache("react", URL_, 168)?.meta.etag).toBe('"v1"');
   });
 
   it("touchCache rewrites meta through a temp file + rename as well", () => {
