@@ -1,11 +1,14 @@
 import { homedir } from "node:os";
 import type { Registry } from "./registry.js";
-import { describeConfig } from "./config.js";
-import { cleanText } from "./project-deps.js";
+import { clipText, describeConfig } from "./config.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { classifySourceKind } from "./doctor.js";
 import { autowarmStatus } from "./autowarm.js";
 import { readProjectRecord, summariseProjectRecord } from "./project-store.js";
+
+/** Longest config- or registry-supplied field (name, one alias, description) in one row.
+ *  A row is a one-line summary; anything longer is a payload, not a description. ASSUMED. */
+export const MAX_LIBRARY_FIELD_CHARS = 200;
 
 export interface ListLibrariesOptions {
   /** Directory whose `vibectx warm` record (if any) is summarised on the last line (default: process.cwd()). */
@@ -42,11 +45,14 @@ export function listLibrariesText(registry: Registry, opts: ListLibrariesOptions
     const kind = cached && cachedUrl ? classifySourceKind(cachedUrl, cached.content) : "unknown";
     // S2 (PAR-657): name, aliases and description come from a config file or a package
     // registry — text this process did not write. Clean every one of them at the point of
-    // render, so a terminal escape or a bidi override cannot ride out in a tool answer.
-    const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.map(cleanText).join(", ")})` : "";
+    // render, so a terminal escape or a bidi override cannot ride out in a tool answer —
+    // and CLIP them, because cleaning leaves length: a 5 KB `description` in one entry
+    // would otherwise bury the other rows of the answer in a client's log pane.
+    const show = (s: string): string => clipText(s, MAX_LIBRARY_FIELD_CHARS);
+    const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.map(show).join(", ")})` : "";
     const resolved = e.resolved ? " [resolved]" : ""; // synthesized by resolve_library, not curated (PAR-655)
     const description = e.resolved && e.description ? `(package-supplied) ${e.description}` : (e.description ?? "");
-    return `- **${cleanText(e.name)}**${aka} — ${cleanText(description)} [${status}] [${kind}]${resolved}`;
+    return `- **${show(e.name)}**${aka} — ${show(description)} [${status}] [${kind}]${resolved}`;
   });
   const record = readProjectRecord(opts.projectDir ?? process.cwd());
   const footer = record ? `\n\n${summariseProjectRecord(record)}` : "";

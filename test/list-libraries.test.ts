@@ -199,6 +199,36 @@ describe("listLibrariesText: the config header (D-18, PAR-657)", () => {
     expect(text).toMatch(/- \*\*acme\[31m\*\* \(aka acmejs\) — Acme\[2J platform docs/);
   });
 
+  it("S2: an over-long config-supplied name, alias or description is clipped, not printed whole", () => {
+    // Cleaning alone leaves length: a config can carry a 5 KB `description`, and one entry
+    // must not be able to bury the other twenty-nine rows of the answer.
+    const path = join(dir, "long.json");
+    writeFileSync(
+      path,
+      JSON.stringify({
+        libraries: [
+          {
+            name: `n${"a".repeat(5300)}`,
+            aliases: [`x${"b".repeat(5300)}`],
+            urls: ["https://docs.acme.example.com/llms.txt"],
+            description: `d${"c".repeat(5300)}`,
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const line = listLibrariesText(loadRegistry(path), { cwd: dir, home: dir })
+      .split("\n")
+      .find((l) => l.startsWith("- **naa")); // not `next.js`, which the defaults also supply
+    expect(line).toBeDefined();
+    for (const field of [/^- \*\*([^*]+)\*\*/, /\(aka ([^)]+)\)/, /— ([^[]+) \[/]) {
+      const shown = field.exec(line!)?.[1];
+      expect(shown, String(field)).toBeDefined();
+      expect(shown!.length, shown!.slice(0, 12)).toBeLessThanOrEqual(200);
+      expect(shown!.endsWith("…"), shown!.slice(0, 12)).toBe(true); // clipped, and it says so
+    }
+  });
+
   it("omits the header for a hand-built registry (no config resolution to report)", () => {
     expect(listLibrariesText(registry).startsWith(`Cache dir: ${dir}\n\n`)).toBe(true);
   });
