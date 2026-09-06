@@ -182,10 +182,10 @@ above is the real, unedited output of this code against a fixture — pinned by
 two ever drift. It is the *shape* of a response, not a capture from any vendor's site.
 
 **Cache-only, by design.** `search` never fetches, never resolves a new package name and
-never touches the network — so it is instant, deterministic, and works on a plane. The flip
-side is that it searches exactly what is already cached, which is why every response ends
-with how many libraries it looked at, out of how many are configured, and how to cache the
-rest:
+never touches the network — so it is deterministic and works on a plane. (How fast is
+measured, not asserted: see [the search index](#the-search-index).) The flip side is that it
+searches exactly what is already cached, which is why every response ends with how many
+libraries it looked at, out of how many are configured, and how to cache the rest:
 
 ```
 Searched 5 of 30 configured libraries; 4 matched.
@@ -205,9 +205,20 @@ library filling the whole response would defeat that. At most 8 libraries appear
 response. Each group carries its `Source:` line, and a cached copy past its TTL is marked
 stale with the `vibectx refresh` line that would fix it.
 
+**The budget is a cap, not a hint.** It is priced on the text you actually get back: whole
+rendered sections, their group headers, and the separators between them, with the closing
+accounting line reserved out of it. The rendered response and the sum of `--json` section
+bodies both stay inside `maxTokens × 4` characters. The one deliberate exception is at the
+bottom: at least one section from the best-scoring library always comes back, so a budget
+too small to hold even one section returns that section clipped to what the budget allows —
+the same trade `get_docs` makes for an over-long snippet.
+
 `--library <name>` (repeatable; `libraries: [...]` over MCP) narrows the search; names and
 aliases both work, and an unknown one is *reported in the response* rather than failing the
-search. Exit codes: `0` something matched, `1` nothing matched, `2` usage or config error.
+search. A filtered search reports both numbers — `Searched 1 of 2 requested libraries
+(30 configured)` — so narrowing the search can never make your cache look emptier than it
+is. `query` is capped at 1000 characters. Exit codes: `0` something matched, `1` nothing
+matched, `2` usage or config error.
 
 ### The search index
 
@@ -220,17 +231,35 @@ small inverted index at `<cache>/index.json`. Three things are worth knowing abo
   a content hash, and an entry whose hash does not match the cached document is ignored and
   rebuilt. So a stale, hand-edited or planted index cannot make `search` return a single word
   the cache does not hold — at worst it costs a slower query.
-- **It maintains itself.** `warm`, the startup autowarm, `get_docs` and `refresh` update it
-  whenever they write a library's primary document, and `refresh` invalidates that library's
-  entry first. Anything missing is rebuilt inside the next `search`. Deleting the file is
-  always safe: the next search rebuilds what it needs and answers the same way.
-- **What it costs is vocabulary, not bytes.** MEASURED on the build sandbox: over a 5.63 MB
-  fixture corpus in 12 documents, the file is 0.55 MB (10% of the corpus), a warm search takes
-  **44 ms**, and the one-off cold build takes ~300 ms. A pathological corpus in which every
-  token is globally unique is the other extreme — 146% of the corpus and 100 ms for 1.65 MB.
-  Both figures are printed by `test/search-perf.test.ts` on every run. Documents over 8 MiB
-  are not indexed at all; they are tokenized at query time and the response says so for that
-  library.
+- **It is keyed to the code that built it.** The file also records a *retrieval version*, and
+  a file written by a build whose tokenizer, stemmer, section splitter or field weighting
+  differed is refused whole and rebuilt. The content hash proves the *document* is unchanged,
+  which is exactly why a change to that code slips past it: same bytes, different terms, and
+  the answer would go quietly empty instead of visibly wrong.
+- **It maintains itself.** Every writer of a library's primary document updates it —
+  `warm`, the startup autowarm, `get_docs`, `refresh`, and `resolve_library` (so a
+  *newly resolved* library is indexed the moment it is cached, not on some later run).
+  `refresh` invalidates that library's entry first and a successful refresh rebuilds it.
+  Anything missing is rebuilt inside the next `search`. Deleting the file is always safe: the
+  next search rebuilds what it needs and answers the same way.
+- **What it costs is vocabulary, not bytes — and it does not stay at 44 ms as you scale.**
+  Two MEASURED points on the build sandbox, both worth carrying:
+
+  | corpus | index file | warm `search` | one-off index build |
+  | --- | --- | --- | --- |
+  | 5.63 MB, 12 documents | 0.55 MB (10%) | **44 ms** | ~300 ms |
+  | 143 MB, 30 documents | 16.1 MB (11%) | **805–868 ms** | 6.1 s |
+
+  The 300 ms target this feature was built to is the **first** row — a normal project's stack
+  of `llms.txt` files. Thirty five-megabyte `llms-full.txt` documents is 2.7–2.9× that target,
+  and the cost there is dominated by `JSON.parse` of a 16 MB index plus a SHA-256 over every
+  scanned document. The first row is printed by `test/search-perf.test.ts` on every run; the
+  second was measured with the probe described in the PAR-659 change record. A pathological
+  corpus in which every token is globally unique is the other extreme — 146% of the corpus
+  and 100 ms for 1.65 MB. Documents over 8 MiB are not indexed at all; they are tokenized at
+  query time and the response says so for that library. The file itself is never written
+  larger than the 64 MiB a read will accept: past that, the largest entries are left out and
+  the response names them.
 
 ## Warm your project's docs
 
@@ -845,7 +874,8 @@ cache without touching the network (`unknown` until something is cached).
 - **Cross-library search:** `search(query)` runs one BM25 query over every cached
   document and groups the hits by library, for the common case where the agent does not
   know which library owns a concept. Cache-only and offline; backed by a derived,
-  self-maintaining index that stores no document text — see
+  self-maintaining index that stores no document text. MEASURED: a warm search is 44 ms over
+  a 5.63 MB / 12-document corpus and 805–868 ms over 143 MB in 30 documents — see
   [Don't know which library? `search`](#dont-know-which-library-search).
 - **Deterministic retrieval:** markdown heading-split + BM25 scoring over a camelCase-aware,
   lightly stemmed tokenizer — see [How ranking works](#how-ranking-works). No embeddings,
