@@ -430,12 +430,16 @@ export async function resolvePackage(
     // would have been lower still, but that writer also serves FOLLOWED PAGES, which D-34
     // deliberately does not index — it would have filed a followed page under the library's
     // name and displaced its primary document.)
-    indexCachedDocument(entry.name, doc.url, doc.content, undefined, opts.warn);
     let saveNote: string | undefined;
     const saved = saveResolvedEntry(entry, (m) => {
       saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();
       (opts.warn ?? ((x: string) => process.stderr.write(x)))(m);
     });
+    // …and the index is written only once the RECORD is, in that order. Indexing first filed a
+    // posting list under a library name that a refused save leaves no trace of anywhere else —
+    // an orphan no later process could ever use, spending the index's size budget (D-40) that a
+    // library the registry does know might then be shed to make room in.
+    if (saved) indexCachedDocument(entry.name, doc.url, doc.content, undefined, opts.warn);
     const out: ResolveOutcome = {
       name,
       ok: true,

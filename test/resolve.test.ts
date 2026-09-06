@@ -22,7 +22,8 @@ import {
   type PackageMetadata,
 } from "../src/resolve.js";
 import { writeFileSync, readFileSync } from "node:fs";
-import { readResolvedEntries } from "../src/resolved-store.js";
+import { RESOLVED_SCHEMA_VERSION, readResolvedEntries } from "../src/resolved-store.js";
+import { readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 import { readCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 
@@ -708,5 +709,49 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     const reg: Registry = { entries: new Map([["typing_extensions", pin]]) };
     expect(lookupLibrary(reg, "Typing.Extensions")).toBe(pin);
     expect(lookupLibrary(reg, "typing-extensions")).toBe(pin);
+  });
+});
+
+/**
+ * PAR-659 · D-34 — RESOLUTION INDEXES WHAT IT SAVED, IN THAT ORDER.
+ *
+ * The index hook sat BEFORE `saveResolvedEntry`, so a resolution whose record could not be
+ * written (a newer `resolved.json` on disk — K2 — or an unwritable cache) still filed a posting
+ * list under a library name nothing would know about at the next start. That entry is not
+ * merely useless: the index has a size budget (D-40), and an orphan spends it, so a library the
+ * registry DOES know can be shed to make room for one it does not.
+ *
+ * Indexing after the save costs nothing when the save works and leaves nothing behind when it
+ * does not. (The document itself is still cached, and the resolution still works in memory for
+ * this process — that is what `saved: false` already says.)
+ */
+describe("PAR-659 D-34 · an unsaved resolution leaves no orphan index entry", () => {
+  const README = "# Hono\n\nUltrafast web framework.\n\n## Middleware\n\nUse app.use().";
+  const README_URL = "https://raw.githubusercontent.com/honojs/hono/HEAD/README.md";
+
+  it("a save refused by a newer resolved.json indexes nothing", async () => {
+    resetSearchIndexMemo();
+    // K2: a resolved.json written by a NEWER vibectx is not ours to rewrite, so the save is
+    // refused — the one failure mode that needs no I/O trickery to produce.
+    writeFileSync(join(dir, "resolved.json"), JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION + 1, entries: [] }), "utf8");
+    const warns: string[] = [];
+    stubFetch({ [NPM_HONO]: honoNpm, [README_URL]: README });
+
+    const out = await resolvePackage("hono", { warn: (m) => warns.push(m) });
+    expect(out.ok).toBe(true);
+    expect(out.saved).toBe(false);
+    expect(warns.join("")).toMatch(/not saving "hono"/);
+    // The document is cached and usable now; what must NOT exist is an index entry for a
+    // library no later process will have in its registry.
+    expect(readCache("hono", README_URL, 168)?.content).toBe(README);
+    expect(readIndex().libraries.has("hono")).toBe(false);
+  });
+
+  it("a save that succeeds still indexes, in the same call", async () => {
+    resetSearchIndexMemo();
+    stubFetch({ [NPM_HONO]: honoNpm, [README_URL]: README });
+    const out = await resolvePackage("hono");
+    expect(out.saved).toBe(true);
+    expect(readIndex().libraries.get("hono")?.url).toBe(README_URL);
   });
 });
