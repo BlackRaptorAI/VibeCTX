@@ -83,18 +83,40 @@ Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
    (`HEAD` is the default branch, whatever it is called).
 5. Otherwise one plain line: what was tried, and the config snippet to pin the library.
 
-**Fetch bound.** A resolution makes at most **14 requests**: 2 metadata, 8 llms.txt
-probes, 4 README variants — and stops as soon as one document is usable. Metadata
-responses over 8 MiB are treated as absent; documents keep the normal 25 MiB cap.
+**Fetch bound.** A resolution makes at most **26 requests**: 2 metadata documents, then
+the preferred ecosystem's candidates (8 llms.txt probes + 4 README variants), then — only
+if none of those served — the other ecosystem's candidates; it stops as soon as one
+document is usable (in practice the worst case is 18, since an ecosystem held back as
+README-only has no llms.txt probes). Metadata responses over 8 MiB are treated as absent;
+documents keep the normal 25 MiB cap. A process starts at most **100 resolutions per
+hour**; beyond that, unknown names get a "resolution limit reached" line until the
+window slides (pin the library in config if you hit it).
 
 **Where it persists.** Successful resolutions are written to `resolved.json` in the
-cache directory (`~/.docs-cache-mcp/`, or `DOCS_CACHE_DIR`) via a temp file and rename.
-On startup they are merged **below** the defaults and your config: a real registry or
-config entry always wins, and a persisted resolution never overrides one. Records are
-re-validated on every load (bad ones are skipped; a corrupt file is ignored).
-`list_libraries` marks them `[resolved]`; `doctor` checks them like any entry;
-`refresh` re-resolves them through the same ecosystem, so a project that later publishes
-`llms.txt` is picked up.
+cache directory (`~/.docs-cache-mcp/`, or `DOCS_CACHE_DIR`) via a temp file and rename —
+an internal file of shape `{ "schemaVersion": 1, "entries": [{ name, urls, description?,
+resolved: { source, resolvedAt, metadataUrl, homepage?, docsUrl? } }] }`. On startup they
+are merged **below** the defaults and your config: a real registry or config entry always
+wins, and a persisted resolution never overrides one — not even a record whose name is a
+different-case spelling of a curated one (record names must already be lowercase; PyPI
+names are stored in their PEP 503 form, so `typing_extensions` and `Typing-Extensions`
+are one record). Records are re-validated on every load (bad ones are skipped; a corrupt
+file is ignored; a file written by a newer vibectx with another `schemaVersion` is left
+alone and new resolutions stay in memory, with a note on stderr). `list_libraries` marks
+them `[resolved]` and prefixes their descriptions `(package-supplied)`; `doctor` checks
+them like any entry; `refresh` re-resolves them through the same ecosystem, so a project
+that later publishes `llms.txt` is picked up.
+
+When `get_docs` resolves a name on the spot, its response starts with one provenance line
+— ecosystem, the package's own description, homepage / repository, and the nearest
+curated name when the request looks like a typo of one — ending in *"not a curated
+entry; verify this is the package you meant"*. A typo can resolve to a real, unrelated
+package; that line is how you notice.
+
+**Command line.** `vibectx resolve <name> [--npm | --pypi] [--config <path>]` exits `0`
+when resolved (or already curated), `1` when it could not resolve, `2` on a usage or
+config error. The report text and `resolved.json` are **not a stable machine contract**
+(there is no `--json`); read them, do not parse them.
 
 **Pin or override.** To fix a resolution you dislike, add the name to `vibectx.config.json`
 with your own `urls` — config beats resolution, and the entry stops being `[resolved]`.
@@ -102,7 +124,11 @@ To resolve a name into the other ecosystem, run `vibectx resolve <name> --pypi` 
 `--npm`); the later explicit resolution replaces the earlier one.
 
 **`allowedHosts` and followed links.** Followed index links are `https`-only and confined
-to the source document's own host **plus** the entry's `allowedHosts`. For a resolved
+to the source document's own host **plus** the entry's `allowedHosts`. Redirects are
+followed one hop at a time (at most 5): every `Location` is checked against the same rule
+*before* it is requested, so a page that redirects to a private address never produces a
+request. The same hop rule — `https`, public host — applies to every fetch vibectx makes,
+curated primaries included (those may still redirect across hosts). For a resolved
 entry that set is derived from its metadata — the homepage host, the docs-URL host and
 `docs.<registrable domain of the homepage>` — and is recomputed on every load, never read
 from `resolved.json`. In config, `allowedHosts` is an array of bare hostnames
@@ -120,6 +146,19 @@ project that publishes `llms.txt` gives full-text answers; most today do not, so
 README on GitHub is what you get — fine for "how do I install / basic usage", thin for
 deep API questions. `vibectx doctor --library <name>` tells you which you got. A project
 with no GitHub repository and no `llms.txt` cannot be resolved; pin it in config.
+
+**Security note.** Resolution turns package-registry metadata — which anyone can publish —
+into fetches. Every URL is checked by name (https only; no IP literals, `localhost`,
+`.local`, `.internal`, single-label or trailing-dot hosts; GitHub repositories only via
+`raw.githubusercontent.com`; redirects checked hop by hop), and per-name and per-hour
+bounds cap the volume (up to 26 requests per unknown name, 100 resolutions per hour per
+process, so *N* unknown names can mean up to 26·*N* requests to the registries, docs hosts
+and GitHub). Name-based checks cannot see through DNS: a hostname such as
+`127.0.0.1.nip.io` resolves to a loopback address and the connection will be attempted;
+TLS certificate-name verification then prevents a body from being read from a host that
+cannot present a certificate for that name. If your environment has internal services on
+routable names, run vibectx where they are not reachable, or pin libraries in config and
+do not rely on resolution.
 
 ## Configuration
 
