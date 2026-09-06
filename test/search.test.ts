@@ -263,6 +263,120 @@ describe("runSearch · the budget (PAR-659, D-35, D-39)", () => {
 });
 
 /**
+ * PAR-659 · D-43 — WHEN THE BUDGET CANNOT HOLD BOTH, THE ANSWER OUTRANKS THE ACCOUNTING.
+ *
+ * MEASURED before this: `--max-tokens 20` on the fixture below returned 249 characters against
+ * an 80-character budget (3.1×) that held no library name, no `Source:` line and not one word
+ * of any section — a blank line and the footer, whose own text claimed "4 matched, 1 shown
+ * within the budget" while exiting 0. The footer had been reserved out of the budget first, the
+ * sections floored at zero, and the assembled body sliced to nothing.
+ *
+ * D-43's order of sacrifice: drop other libraries, clip the section body, shorten the footer to
+ * one line, drop the footer — never the section. The budget may be overshot only for the
+ * irreducible minimum (the best library's header, its `Source:` line and one clipped section),
+ * and a response that overshoots says so.
+ *
+ * The fixture is built to make the footer expensive: four cached libraries that all match, plus
+ * two uncached ones, so the accounting carries its long "Not cached, so not searched" line.
+ */
+const CROWDED_BODY =
+  "Open a streaming response and write each server-sent event as it is produced, flushing " +
+  "between writes so the client sees them as they arrive rather than at the end. The helper " +
+  "frames the events, keeps the connection alive, and closes the stream when the handler returns.";
+
+function crowdedRegistry(): Registry {
+  const entries = new Map<string, { name: string; urls: string[] }>();
+  for (let i = 0; i < 4; i++) {
+    const name = `streaming-library-${i}`;
+    const url = `https://${name}.example.com/llms.txt`;
+    writeCache(name, url, `# ${name}\n\n## Streaming events\n\n${CROWDED_BODY}`);
+    entries.set(name, { name, urls: [url] });
+  }
+  for (let i = 0; i < 2; i++) {
+    const name = `uncached-library-${i}`;
+    entries.set(name, { name, urls: [`https://${name}.example.com/llms.txt`] });
+  }
+  return { entries };
+}
+
+/** Library blocks actually present in a rendered response — `# name` lines, not `## heading`. */
+function emittedLibraries(text: string): number {
+  return text.split("\n").filter((l) => /^# \S/.test(l)).length;
+}
+
+const CROWDED_QUERY = "streaming events flushing";
+
+describe("formatSearchResults · the guarantee outranks the accounting (PAR-659, D-43)", () => {
+  for (const maxTokens of [1, 20, 40, 60]) {
+    it(`at maxTokens ${maxTokens} the answer still carries the best library, its Source line and section text`, () => {
+      const reg = crowdedRegistry();
+      const out = runSearch(reg, { query: CROWDED_QUERY, maxTokens });
+      const text = formatSearchResults(out);
+      const best = out.groups[0];
+      expect(searchExitCode(out)).toBe(0);
+      expect(text).toContain(`# ${best.library}`);
+      expect(text).toContain(`Source: ${best.url}`);
+      // The section itself, not merely its heading: the opening of the body is in the response.
+      expect(best.sections[0].body.length).toBeGreaterThan(0);
+      expect(text).toContain(best.sections[0].body.slice(0, 40));
+      // …and only ONE library, because dropping the others is the first thing D-43 sacrifices.
+      expect(emittedLibraries(text)).toBe(1);
+    });
+  }
+
+  it("every budget from 1 to 200 tokens: the answer survives, and any overshoot is announced", () => {
+    const reg = crowdedRegistry();
+    const rungs = { full: 0, short: 0, none: 0, over: 0 };
+    for (let maxTokens = 1; maxTokens <= 200; maxTokens++) {
+      const out = runSearch(reg, { query: CROWDED_QUERY, maxTokens });
+      const text = formatSearchResults(out);
+      const best = out.groups[0];
+      expect(text).toContain(`Source: ${best.url}`);
+      expect(text).toContain(best.sections[0].body.slice(0, 40));
+      if (text.length > maxTokens * 4) {
+        // Over budget is allowed ONLY for the irreducible minimum, and it must say so.
+        expect(text).toContain("Over budget");
+        rungs.over++;
+      } else if (text.includes("Not cached, so not searched")) rungs.full++;
+      else if (text.includes("Accounting shortened")) rungs.short++;
+      else rungs.none++;
+    }
+    // Every rung of the ladder is actually reached on this fixture — the ladder is behaviour,
+    // not a comment.
+    expect(rungs.over).toBeGreaterThan(0);
+    expect(rungs.none).toBeGreaterThan(0);
+    expect(rungs.short).toBeGreaterThan(0);
+    expect(rungs.full).toBeGreaterThan(0);
+  });
+
+  it("a response that overshoots the budget says so, and one that fits never does", () => {
+    const reg = crowdedRegistry();
+    const tight = formatSearchResults(runSearch(reg, { query: CROWDED_QUERY, maxTokens: 20 }));
+    expect(tight).toContain("Over budget");
+    expect(tight).toContain("80"); // the budget it could not fit inside, in characters
+    const roomy = formatSearchResults(runSearch(reg, { query: CROWDED_QUERY, maxTokens: 4000 }));
+    expect(roomy).not.toContain("Over budget");
+    expect(roomy).toContain("Not cached, so not searched"); // the full accounting, when it fits
+    expect(roomy.length).toBeLessThanOrEqual(16_000);
+  });
+
+  it("`n shown` counts the libraries actually emitted, never the ones merely selected", () => {
+    const reg = crowdedRegistry();
+    for (let maxTokens = 1; maxTokens <= 400; maxTokens += 3) {
+      const text = formatSearchResults(runSearch(reg, { query: CROWDED_QUERY, maxTokens }));
+      const claim = /(\d+) shown/.exec(text);
+      if (claim) expect(emittedLibraries(text)).toBe(Number(claim[1]));
+    }
+    // MEASURED before D-43: at maxTokens 20 the footer claimed "1 shown within the budget" over
+    // a response holding zero library blocks.
+    const tight = runSearch(reg, { query: CROWDED_QUERY, maxTokens: 20 });
+    const text = formatSearchResults(tight);
+    expect(emittedLibraries(text)).toBe(1);
+    expect(/(\d+) shown/.exec(text)?.[1] ?? "1").toBe("1");
+  });
+});
+
+/**
  * PAR-659 · D-36 — the two per-call bounds, each with a case that FAILS if the bound is
  * removed. The quality gate found both surviving mutation (raising MAX_LAZY_INDEX_DOCS to
  * infinity, deleting MAX_RENDERED_LIBRARIES) because nothing exercised the boundary at all.
@@ -635,7 +749,13 @@ describe("runSearch · what the budget reports, and where bodies come from (PAR-
     const tight = search({ query: "streaming server-sent events schema object", maxTokens: 1 });
     expect(tight.groups).toHaveLength(1);
     expect(tight.matchedLibraries).toBe(full.matchedLibraries); // unchanged by the budget
-    const text = formatSearchResults(tight);
+
+    // The smallest budget that still buys BOTH the answer and the full accounting. Below it,
+    // D-43 spends what is left on the section and the footer is what gives way — so this case
+    // asks its question (does the footer count MATCHES or what fitted?) where a footer exists.
+    const narrow = search({ query: "streaming server-sent events schema object", maxTokens: 60 });
+    expect(narrow.groups).toHaveLength(1);
+    const text = formatSearchResults(narrow);
     expect(text).toContain(`${full.matchedLibraries} matched, 1 shown within the budget`);
   });
 

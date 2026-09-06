@@ -205,13 +205,22 @@ library filling the whole response would defeat that. At most 8 libraries appear
 response. Each group carries its `Source:` line, and a cached copy past its TTL is marked
 stale with the `vibectx refresh` line that would fix it.
 
-**The budget is a cap, not a hint.** It is priced on the text you actually get back: whole
-rendered sections, their group headers, and the separators between them, with the closing
-accounting line reserved out of it. The rendered response and the sum of `--json` section
-bodies both stay inside `maxTokens × 4` characters. The one deliberate exception is at the
-bottom: at least one section from the best-scoring library always comes back, so a budget
-too small to hold even one section returns that section clipped to what the budget allows —
-the same trade `get_docs` makes for an over-long snippet.
+**The budget is a cap, and the answer outranks it.** It is priced on the text you actually
+get back: whole rendered sections, their group headers, and the separators between them, with
+the closing accounting line reserved out of it. Whenever the budget can hold an answer at all,
+the rendered response and the sum of `--json` section bodies both stay inside `maxTokens × 4`
+characters.
+
+What the budget never buys is silence. At **any** budget the response carries the
+best-scoring library's name, its `Source:` line, and at least one section of its text; when
+the budget cannot hold both that and the accounting, the accounting is what gives way, in
+this order — other libraries are dropped, the section body is clipped, the closing accounting
+shrinks to one line (`Searched 3/8 libraries; 3 matched, 1 shown. (Accounting shortened to
+fit the budget.)`), and then it goes altogether. A section excerpt is never clipped below 120
+characters, so a budget too small even for the smallest possible answer — one library name,
+one `Source:` line, one 120-character excerpt — gets that answer anyway, over budget, with
+one line saying by how much. That is the only case in which a response exceeds
+`maxTokens × 4`, and it always announces itself.
 
 `--library <name>` (repeatable; `libraries: [...]` over MCP) narrows the search; names and
 aliases both work, and an unknown one is *reported in the response* rather than failing the

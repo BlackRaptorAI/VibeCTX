@@ -116,6 +116,11 @@ const MAX_NAMED_UNCACHED = 8;
 const MAX_HEADING_CHARS = 200;
 /** Longest note carried into the footer. Notes quote file paths and parser positions. ASSUMED. */
 const MAX_NOTE_CHARS = 300;
+/** D-43 — the shortest section excerpt this tool will call an answer: roughly thirty tokens,
+ *  one sentence of prose. The ONE section D-35 guarantees is never clipped below it, even when
+ *  the whole budget is smaller than that — a header over an empty body is an accounting entry,
+ *  not a search result. ASSUMED. */
+const MIN_SECTION_BODY_CHARS = 120;
 
 /** How `formatSearchResults` joins what it renders. Named because `selectAcrossLibraries`
  *  prices them: a budget that ignores its own separators is not a budget. */
@@ -566,13 +571,18 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
       .filter((s) => split[s.sectionIndex] !== undefined)
       .map((s) => {
         const real = split[s.sectionIndex];
-        return {
+        const section = {
           ...s,
           heading: clipText(real.heading, MAX_HEADING_CHARS),
           path: real.path.map((p) => clipText(p, MAX_HEADING_CHARS)),
           level: real.level,
-          body: real.body.length > budget ? real.body.slice(0, budget) : real.body,
+          body: real.body,
         };
+        // D-43: the footer's reservation may leave `budget` at or near zero. The section that
+        // D-35 guarantees is clipped to what the budget holds ONCE THE FOOTER IS GIVEN UP for
+        // it — never to nothing — so the allowance here is the larger of the two.
+        const allow = Math.max(budget, guaranteeBodyChars(base, group, section));
+        return { ...section, body: real.body.length > allow ? real.body.slice(0, allow) : real.body };
       });
     // K1: `matched` is now a count of sections the DOCUMENT has, not of postings the index
     // claims. MEASURED before this: a hash-matching index carrying 50 `lengths` on a
@@ -638,10 +648,71 @@ function footerReserve(outcome: SearchOutcome): number {
   return footerLines(outcome, Math.max(1, outcome.matchedLibraries - 1)).join("\n").length + BLOCK_JOIN.length;
 }
 
-/** The characters the rendered library blocks may occupy. Zero when the budget cannot even
- *  hold the accounting line — there the accounting wins and the sections are what shrink. */
+/** D-43 rung 3 — the accounting compressed to one line, for a budget that can hold the answer
+ *  and a line of accounting but not both in full. It keeps the two numbers that stop "nothing
+ *  matched" being read as "nothing was looked at" (how many libraries were searched, of how
+ *  many configured) and says outright that the rest was dropped, so a reader is never told a
+ *  short footer is the whole story. */
+function shortFooterLine(outcome: SearchOutcome, shown: number): string {
+  return (
+    `Searched ${outcome.searched}/${outcome.configured} libraries; ${outcome.matchedLibraries} matched, ` +
+    `${shown} shown. (Accounting shortened to fit the budget.)`
+  );
+}
+
+/** The one line a response that could not fit its own irreducible minimum owes the reader. */
+function overshootNote(length: number, budgetChars: number): string {
+  return (
+    `> Over budget: the smallest answer search can give (one library, one section) is ${length} characters, ` +
+    `against the ${budgetChars} this budget allows.`
+  );
+}
+
+/** The characters the rendered library blocks may occupy with the accounting footer paid for
+ *  in full. Zero when the footer alone fills the budget — which is not the end of the story:
+ *  `guaranteeBodyChars` and the ladder in `formatSearchResults` are what keep a zero here from
+ *  emptying the response (D-43). */
 function sectionBudgetChars(outcome: SearchOutcome): number {
   return Math.max(0, outcome.maxTokens * 4 - footerReserve(outcome));
+}
+
+/**
+ * D-43 — the body allowance of the ONE section D-35 guarantees, priced as if the footer had
+ * already been given up for it: the whole budget, less this library's header (its name and the
+ * `Source:` line, both mandatory) and the section's own heading. Never below
+ * MIN_SECTION_BODY_CHARS, which is the point at which the budget stops being able to buy an
+ * answer at all and the response overshoots and says so.
+ */
+function guaranteeBodyChars(outcome: SearchOutcome, group: SearchGroup, section: SplitSection): number {
+  const fixed = groupHeader(group).length + renderSection({ ...section, body: "" }).length;
+  return Math.max(MIN_SECTION_BODY_CHARS, outcome.maxTokens * 4 - fixed);
+}
+
+/** The irreducible minimum D-43 protects: the best library's header, its `Source:` line, the
+ *  best section's heading and MIN_SECTION_BODY_CHARS of that section's body. Every rendered
+ *  response starts with exactly these characters, so a response clipped to any length at or
+ *  above this one still contains them. */
+function irreducibleMinimum(outcome: SearchOutcome): string {
+  const best = outcome.groups[0];
+  const section = best.sections[0];
+  if (section === undefined) return groupHeader(best);
+  return groupHeader(best) + renderSection({ ...section, body: section.body.slice(0, MIN_SECTION_BODY_CHARS) });
+}
+
+/** As many whole library blocks as `room` holds, best library first and always at least one —
+ *  clipped to `room` when even the first block is larger than it, which is the only way a
+ *  block is ever cut mid-way. Returns what was emitted AND how many libraries it holds, so the
+ *  footer's `n shown` counts blocks in the text rather than blocks that were selected. */
+function packBlocks(blocks: string[], room: number): { text: string; shown: number } {
+  let text = "";
+  let shown = 0;
+  for (const block of blocks) {
+    const next = shown === 0 ? block : `${text}${BLOCK_JOIN}${block}`;
+    if (next.length > room) break;
+    text = next;
+    shown += 1;
+  }
+  return shown === 0 ? { text: blocks[0].slice(0, room), shown: 1 } : { text, shown };
 }
 
 /** Human-readable result; the same text the CLI prints and the MCP `search` tool returns. */
@@ -666,13 +737,36 @@ export function formatSearchResults(outcome: SearchOutcome): string {
       ...footerLines(outcome, 0),
     ].join("\n");
   }
-  // D-39's guarantee, not its estimate. `selectAcrossLibraries` priced every block exactly, so
-  // this only ever bites for the one section D-35 forces us to return whatever it costs —
-  // the same order `assemble` and `clipSnippet` already settled: the cap wins.
-  const body = blocks.join(BLOCK_JOIN);
-  const budget = sectionBudgetChars(outcome);
-  const capped = body.length > budget ? body.slice(0, budget) : body;
-  return `${capped}${BLOCK_JOIN}${footerLines(outcome, outcome.groups.length).join("\n")}`;
+  // D-43 — THE ANSWER OUTRANKS THE ACCOUNTING. `selectAcrossLibraries` priced every block
+  // exactly against a budget that had the footer reserved out of it; what is left here is the
+  // case where that reservation and the guarantee cannot both be paid. The order of sacrifice
+  // is: other libraries (already dropped by selection), then the section body (already clipped
+  // by `guaranteeBodyChars`), then the footer — shortened to one line, then dropped — and never
+  // the section. MEASURED before this: at `--max-tokens 20` the footer was reserved first, the
+  // sections floored at zero and the body sliced to nothing, so 249 characters of pure
+  // accounting came back claiming "1 shown within the budget" over no library block at all.
+  const total = outcome.maxTokens * 4;
+  const minimum = irreducibleMinimum(outcome);
+  const rungs: { reserve: number; tail: (shown: number) => string }[] = [
+    { reserve: footerReserve(outcome), tail: (shown) => BLOCK_JOIN + footerLines(outcome, shown).join("\n") },
+    {
+      reserve: BLOCK_JOIN.length + shortFooterLine(outcome, Math.max(1, outcome.matchedLibraries - 1)).length,
+      tail: (shown) => BLOCK_JOIN + shortFooterLine(outcome, shown),
+    },
+    { reserve: 0, tail: () => "" },
+  ];
+  for (const rung of rungs) {
+    // Each reserve is an UPPER bound on what its tail can render (both footers are longest at
+    // the largest `shown` they can ever carry), so a rung that fits here fits when rendered:
+    // `text` + `tail` never exceeds the budget.
+    const room = total - rung.reserve;
+    if (room < minimum.length) continue;
+    const { text, shown } = packBlocks(blocks, room);
+    return text + rung.tail(shown);
+  }
+  // Not even the minimum fits. It goes out anyway — that is what D-35 guarantees and what D-43
+  // ranks above the accounting — and the response says, in one line, that it is over budget.
+  return `${minimum}${BLOCK_JOIN}${overshootNote(minimum.length, total)}`;
 }
 
 /** The MCP `search` tool body: the formatted results for `query`. Never throws. */
