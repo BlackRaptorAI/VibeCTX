@@ -1,4 +1,5 @@
 import { loadDiscoveredRegistry, type Registry } from "./registry.js";
+import { ConfigError } from "./config.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
@@ -153,9 +154,14 @@ function registryFor(flag: string | undefined, io: CliIo): Registry {
   });
 }
 
-/** The one config-failure line: it already names the file, so only an explicit flag is echoed. */
-function configError(flag: string | undefined, e: unknown): string {
-  return `Could not load config${flag === undefined ? "" : ` ${flag}`}: ${message(e)}\n`;
+/**
+ * The one config-failure line (D-22, R1). A `ConfigError` already IS that line — file,
+ * locator, message — so it is printed as it stands; printing the path again produced
+ * `Could not load config ./x.json: ./x.json: …`. Anything else that escapes the loader
+ * gets the prefix, because it may not name a file at all.
+ */
+function configError(e: unknown): string {
+  return `${e instanceof ConfigError ? e.message : `could not load config: ${message(e)}`}\n`;
 }
 
 /** Run `vibectx doctor <args>`; returns the process exit code:
@@ -172,7 +178,7 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   try {
     registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(configError(parsed.config, e));
+    io.stderr(configError(e));
     return 2;
   }
   let report;
@@ -200,7 +206,7 @@ export async function runResolveCli(args: string[], io: CliIo): Promise<number> 
   try {
     registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(configError(parsed.config, e));
+    io.stderr(configError(e));
     return 2;
   }
   const text = await resolveToolText(registry, parsed.name, parsed.ecosystem);
@@ -222,7 +228,7 @@ export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
   try {
     registry = registryFor(parsed.config, io);
   } catch (e) {
-    io.stderr(configError(parsed.config, e));
+    io.stderr(configError(e));
     return 2;
   }
   let report;

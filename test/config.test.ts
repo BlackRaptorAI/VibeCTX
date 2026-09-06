@@ -247,30 +247,67 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
     );
   });
 
-  it("reports the entry index and field for a bad name or urls", () => {
+  it("reports the entry index and field for a bad name or urls, naming the entry when it has one (D-22)", () => {
     expect(bad({ libraries: [{ urls: ["https://a.example.com/x"] }] })).toThrow(
-      /libraries\[0\]\.name: must be a non-empty string/,
+      /libraries\[0\]\.name: must be a non-empty string/, // no name to quote yet
     );
     expect(bad({ libraries: [{ name: "   ", urls: ["https://a.example.com/x"] }] })).toThrow(/libraries\[0\]\.name/);
     expect(bad({ libraries: [{ name: "a", urls: [] }] })).toThrow(
-      /libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs/,
     );
-    expect(bad({ libraries: [{ name: "a" }] })).toThrow(/libraries\[0\]\.urls: must be a non-empty array of https URLs/);
+    expect(bad({ libraries: [{ name: "a" }] })).toThrow(/libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs/);
     expect(bad({ libraries: [{ name: "a", urls: ["http://a.example.com/x"] }] })).toThrow(
-      /libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs/,
     );
     expect(
       bad({ libraries: [{ name: "a", urls: ["https://a.example.com/x"] }, { name: "b", urls: ["https://b/x"] }, { name: "c", urls: "nope" }] }),
-    ).toThrow(/libraries\[2\]\.urls: must be a non-empty array of https URLs/);
+    ).toThrow(/libraries\[2\]\.urls \("c"\): must be a non-empty array of https URLs/);
   });
 
   it("reports bad aliases, probeQueries, allowedHosts, description and ttlHours", () => {
     const entry = (extra: Record<string, unknown>) => ({ libraries: [{ name: "a", urls: ["https://a.example.com/x"], ...extra }] });
-    expect(bad(entry({ aliases: "one" }))).toThrow(/libraries\[0\]\.aliases: must be an array of non-empty strings/);
-    expect(bad(entry({ aliases: [1] }))).toThrow(/libraries\[0\]\.aliases: must be an array of non-empty strings/);
-    expect(bad(entry({ probeQueries: [""] }))).toThrow(/libraries\[0\]\.probeQueries: must be an array of non-empty strings/);
-    expect(bad(entry({ allowedHosts: "api.acme.com" }))).toThrow(/libraries\[0\]\.allowedHosts: must be an array of hostnames/);
-    expect(bad(entry({ description: 3 }))).toThrow(/libraries\[0\]\.description: must be a string/);
+    expect(bad(entry({ aliases: "one" }))).toThrow(/libraries\[0\]\.aliases \("a"\): must be an array of non-empty strings/);
+    expect(bad(entry({ aliases: [1] }))).toThrow(/libraries\[0\]\.aliases \("a"\): must be an array of non-empty strings/);
+    expect(bad(entry({ probeQueries: [""] }))).toThrow(/libraries\[0\]\.probeQueries \("a"\): must be an array of non-empty strings/);
+    expect(bad(entry({ allowedHosts: "api.acme.com" }))).toThrow(/libraries\[0\]\.allowedHosts \("a"\): must be an array of hostnames/);
+    expect(bad(entry({ description: 3 }))).toThrow(/libraries\[0\]\.description \("a"\): must be a string/);
+  });
+
+  it("S1: no content of the file reaches the message — a config pointed at a secrets file leaks nothing", () => {
+    const secrets = write(root, ".env", "STRIPE_SECRET_KEY=sk_live_hunter2\nDB_PASSWORD=correct-horse\n");
+    symlinkSync(secrets, join(repo, "linked.json"));
+    try {
+      readConfigFile(join(repo, "linked.json"));
+      expect.unreachable();
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m).toMatch(/linked\.json: invalid JSON(?: at line \d+ column \d+)?$/);
+      expect(m).not.toMatch(/hunter2|correct-horse|STRIPE|PASSWORD/);
+    }
+  });
+
+  it("S1: a terminal escape or bidi override in a config value never reaches the error text", () => {
+    const nasty = "acme\u001b\u202egnip\u200b"; // ESC, right-to-left override, zero-width space
+    const dangerous = /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/;
+    expect(bad({ libraries: [{ name: nasty, urls: [] }] })).toThrow(/libraries\[0\]\.urls \("acmegnip"\)/);
+    try {
+      bad({ libraries: [{ name: nasty, urls: [] }] })();
+      expect.unreachable();
+    } catch (e) {
+      expect((e as Error).message).not.toMatch(dangerous);
+    }
+  });
+
+  it("S1: every config error is one line of at most 300 characters", () => {
+    const huge = "z".repeat(5000);
+    try {
+      bad({ libraries: [{ name: huge, urls: [] }] })();
+      expect.unreachable();
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m.length).toBeLessThanOrEqual(300);
+      expect(m.split("\n")).toHaveLength(1);
+    }
   });
 
   it("never leaks a zod issue dump or a stack trace", () => {
@@ -284,20 +321,25 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
     }
   });
 
-  it("reports a JSON syntax error with line and column when the parser gives a position", () => {
-    expect(bad('{\n "libraries": [\n  { "name": "a" "urls": [] }\n ]\n}\n')).toThrow(
-      /vibectx\.config\.json: invalid JSON at line 3 column \d+: Expected/,
-    );
-  });
-
-  it("falls back to `invalid JSON: <reason>` — still one line — when the parser gives no position", () => {
-    expect(bad('{\n  "libraries": [,]\n}\n')).toThrow(/vibectx\.config\.json: invalid JSON: Unexpected token/);
-    expect(bad("")).toThrow(/vibectx\.config\.json: invalid JSON: Unexpected end of JSON input/);
+  it("reports a JSON syntax error with line and column, and nothing else (S1)", () => {
+    // The V8 message quotes the offending source; the config may be any file the user
+    // pointed at, so the position is reported and the content never is.
     try {
-      bad('{\n  "libraries": [,]\n}\n')();
+      bad('{\n "libraries": [\n  { "name": "a" "urls": [] }\n ]\n}\n')();
       expect.unreachable();
     } catch (e) {
-      expect((e as Error).message.split("\n")).toHaveLength(1);
+      expect((e as Error).message).toMatch(/^.*vibectx\.config\.json: invalid JSON at line 3 column \d+$/);
+    }
+  });
+
+  it("falls back to a bare `invalid JSON` — still one line — when the parser gives no position", () => {
+    try {
+      bad("")();
+      expect.unreachable();
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m).toMatch(/vibectx\.config\.json: invalid JSON$/);
+      expect(m.split("\n")).toHaveLength(1);
     }
   });
 

@@ -156,7 +156,7 @@ function pickInDirectory(
 function isRegularFile(path: string, show: (p: string) => string): boolean {
   const st = statSync(path, { throwIfNoEntry: false });
   if (st === undefined) return false;
-  if (!st.isFile()) throw new Error(`${show(path)}: not a regular file`);
+  if (!st.isFile()) throw new ConfigError(show(path), "not a regular file");
   return true;
 }
 
@@ -187,9 +187,56 @@ export function describeConfig(resolution: ConfigResolution, opts: { cwd: string
 }
 
 /* ------------------------------------------------------------------ *
- * D-17 — file validation. One line per failure: `<file>: <path>: <message>`,
- * never a zod issue dump and never a JSON.parse stack.
+ * D-17 / D-22 — file validation. ONE line per failure, in ONE grammar:
+ *
+ *   <display path>: libraries[i].<field> ("<name>" when known): <message>
+ *
+ * for schema failures here and for the semantic ones registry.ts raises (alias
+ * collisions, allowedHosts values, D-06 conflicts) alike. Never a zod issue dump,
+ * never a JSON.parse stack, and never any content of the file: a config path can be
+ * pointed at any file on disk (`--config ~/.env`), so only positions are reported.
  * ------------------------------------------------------------------ */
+
+/** Longest config-error line. A message is read by a human in a terminal or an MCP
+ *  client's log pane; anything longer is a payload, not a message. ASSUMED. */
+export const MAX_CONFIG_ERROR_CHARS = 300;
+/** Longest quoted value inside one (a hostname, a library name). ASSUMED. */
+export const MAX_CONFIG_VALUE_CHARS = 80;
+
+/** `s` with control / bidi characters removed and clipped to `max`, ellipsis included. */
+export function clipText(s: string, max: number): string {
+  const clean = cleanText(s);
+  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
+}
+
+/**
+ * One config failure, as one printable line. `detail` is the part after the display path,
+ * which is what the D-18 header shows next to a file it could not load (D-19). Both parts
+ * are cleaned and bounded on the way in, so every consumer prints a safe line.
+ */
+export class ConfigError extends Error {
+  readonly display: string;
+  readonly detail: string;
+  constructor(display: string, detail: string) {
+    const shownPath = clipText(display, MAX_CONFIG_ERROR_CHARS);
+    const shownDetail = clipText(detail, MAX_CONFIG_ERROR_CHARS - 2);
+    super(clipText(`${shownPath}: ${shownDetail}`, MAX_CONFIG_ERROR_CHARS));
+    this.name = "ConfigError";
+    this.display = shownPath;
+    this.detail = shownDetail;
+  }
+}
+
+/**
+ * D-22's locator: `libraries[3].allowedHosts ("acme")`. The name is quoted only when the
+ * file actually supplies one — a broken `name` field has nothing to quote — and is clipped,
+ * because it is attacker-adjacent text from a file the user may not have written.
+ */
+export function configLocator(index: number, field: string, name?: unknown): string {
+  const known = typeof name === "string" && name.trim().length > 0;
+  const shown = known ? ` (${JSON.stringify(clipText(name as string, MAX_CONFIG_VALUE_CHARS))})` : "";
+  return `libraries[${index}].${field}${shown}`;
+}
 
 const URLS_MESSAGE = "must be a non-empty array of https URLs";
 const STRINGS_MESSAGE = "must be an array of non-empty strings";
@@ -237,9 +284,20 @@ const ConfigSchema = z.object(
   { invalid_type_error: 'must be an object with a "libraries" array', required_error: 'must be an object with a "libraries" array' },
 );
 
-/** `libraries[2].urls` from a zod issue path. */
-function issuePath(path: readonly (string | number)[]): string {
-  return path.map((seg, i) => (typeof seg === "number" ? `[${seg}]` : i === 0 ? seg : `.${seg}`)).join("");
+/**
+ * The D-22 locator for a zod issue path: `libraries` for a top-level failure,
+ * `libraries[2].urls ("acme")` for an entry field — the entry's own name is read back out
+ * of the parsed JSON when the file supplies a usable one. `""` when the whole document is
+ * the wrong shape (path `[]`), which needs no locator at all.
+ */
+function issueLocator(path: readonly (string | number)[], json: unknown): string {
+  if (path.length === 0) return "";
+  if (path.length < 3 || typeof path[1] !== "number" || typeof path[2] !== "string") {
+    return path.map((seg, i) => (typeof seg === "number" ? `[${seg}]` : i === 0 ? seg : `.${seg}`)).join("");
+  }
+  const [, index, field] = path;
+  const entry = (json as { libraries?: unknown[] } | null)?.libraries?.[index] as { name?: unknown } | undefined;
+  return configLocator(index, String(field), entry?.name);
 }
 
 /** Drop a leading UTF-8 BOM (editors on Windows write one; JSON.parse rejects it). */
@@ -247,19 +305,22 @@ function stripBom(text: string): string {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
 }
 
-/** `invalid JSON at line L column C: <reason>` — line/col computed from the parser's
- *  position when it reports one (Node 18 does; Node 20+ also prints them itself). */
+/**
+ * `invalid JSON at line L column C` — the position, and NOTHING from the file (S1). Every
+ * V8 syntax-error message quotes a run of the offending source ("Unexpected token 'S',
+ * \"SECRET=hun\"... is not valid JSON"), so the message itself is discarded: a config path
+ * is user-supplied and may name a `.env`, an id_rsa or any other file whose bytes must not
+ * reach a log. Line/column come from the parser's own position when it reports one (every
+ * supported Node does; Node 20+ also prints them itself).
+ */
 function jsonErrorMessage(text: string, err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err);
-  // V8 embeds a snippet of the offending source (with its newlines) in some messages; flatten
-  // and bound it so the result is always ONE readable line.
-  const reason = raw.split(" in JSON at position")[0].replace(/\s+/g, " ").trim().slice(0, 120);
   const at = /at position (\d+)/.exec(raw);
-  if (!at) return `invalid JSON: ${reason}`;
+  if (!at) return "invalid JSON";
   const pos = Math.min(Number(at[1]), text.length);
   const before = text.slice(0, pos);
   const lastBreak = before.lastIndexOf("\n");
-  return `invalid JSON at line ${before.split("\n").length} column ${pos - lastBreak}: ${reason}`;
+  return `invalid JSON at line ${before.split("\n").length} column ${pos - lastBreak}`;
 }
 
 /**
@@ -268,21 +329,21 @@ function jsonErrorMessage(text: string, err: unknown): string {
  */
 export function readConfigFile(path: string, display: string = path): { libraries: LibraryEntry[] } {
   const st = statSync(path, { throwIfNoEntry: false });
-  if (st === undefined) throw new Error(`${display}: not found`);
-  if (!st.isFile()) throw new Error(`${display}: not a regular file`);
-  if (st.size > MAX_CONFIG_BYTES) throw new Error(`${display}: larger than 1 MiB`);
+  if (st === undefined) throw new ConfigError(display, "not found");
+  if (!st.isFile()) throw new ConfigError(display, "not a regular file");
+  if (st.size > MAX_CONFIG_BYTES) throw new ConfigError(display, "larger than 1 MiB");
   const text = stripBom(readFileSync(path, "utf8"));
   let json: unknown;
   try {
     json = JSON.parse(text);
   } catch (e) {
-    throw new Error(`${display}: ${jsonErrorMessage(text, e)}`);
+    throw new ConfigError(display, jsonErrorMessage(text, e));
   }
   const parsed = ConfigSchema.safeParse(json);
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
-    const where = issuePath(issue.path);
-    throw new Error(`${display}: ${where === "" ? "" : `${where}: `}${cleanText(issue.message)}`);
+    const where = issueLocator(issue.path, json);
+    throw new ConfigError(display, `${where === "" ? "" : `${where}: `}${issue.message}`);
   }
   return { libraries: (parsed.data.libraries ?? []) as LibraryEntry[] };
 }

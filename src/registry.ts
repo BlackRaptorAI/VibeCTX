@@ -1,4 +1,15 @@
-import { discoverConfig, readConfigFile, type ConfigFile, type ConfigResolution } from "./config.js";
+import { homedir } from "node:os";
+import {
+  ConfigError,
+  clipText,
+  configLocator,
+  discoverConfig,
+  displayPath,
+  readConfigFile,
+  MAX_CONFIG_VALUE_CHARS,
+  type ConfigFile,
+  type ConfigResolution,
+} from "./config.js";
 import { normaliseAllowedHost } from "./link-policy.js";
 import { readResolvedEntries } from "./resolved-store.js";
 import { normalisePyPiName } from "./package-names.js";
@@ -430,50 +441,76 @@ const fold = (s: string): string => s.trim().toLowerCase();
 function validateAliases(
   entries: Map<string, LibraryEntry>,
   configNames: ReadonlySet<string>,
-  fileOf: ReadonlyMap<string, string>,
+  fileOf: ReadonlyMap<string, ConfigSite>,
 ): void {
   const owner = new Map<string, string>();
-  /** D-17: a config-caused failure names the file it came from; a defaults-only one cannot. */
-  const at = (name: string): string => {
-    const file = fileOf.get(fold(name));
-    return file === undefined ? "" : `${file}: `;
+  /** D-22: a config-caused failure is `<file>: libraries[i].aliases ("name"): <detail>`; a
+   *  defaults-only one has no file and no index, so it names the entry in the detail. */
+  const fail = (name: string, detail: string): never => {
+    const site = fileOf.get(fold(name));
+    if (site === undefined) throw new Error(`alias on entry "${name}": ${detail}`);
+    throw new ConfigError(site.display, `${configLocator(site.index, "aliases", name)}: ${detail}`);
   };
   for (const e of entries.values()) {
     for (const raw of e.aliases ?? []) {
       const a = fold(raw);
       if (entries.has(a)) {
         const what = a === fold(e.name) ? "the entry itself" : configNames.has(a) ? "another config entry" : "a default library";
-        throw new Error(
-          `${at(e.name)}alias "${a}" on config entry "${e.name}" collides with the canonical name "${a}" (${what}); ` +
+        fail(
+          e.name,
+          `alias "${a}" collides with the canonical name "${a}" (${what}); ` +
             `rename the alias, or override "${a}" (with its urls) and set aliases: [] on that entry`,
         );
       }
       const other = owner.get(a);
-      if (other !== undefined) throw new Error(`${at(e.name)}alias "${a}" is declared on both "${other}" and "${e.name}"`);
+      if (other !== undefined) fail(e.name, `alias "${a}" is also declared on "${other}"`);
       owner.set(a, e.name);
     }
   }
+}
+
+/** Where a config entry came from: the file as the messages show it, and the entry's index
+ *  in that file's `libraries` array — together, D-22's locator. */
+interface ConfigSite {
+  display: string;
+  index: number;
 }
 
 /**
  * Normalise one config file's entries: keys folded, allowed hosts normalised, any `resolved`
  * marker dropped (only the resolver may set one). Shape was already validated by
  * `readConfigFile`; what can still fail here is a host VALUE the link policy refuses.
+ *
+ * The refusal is re-worded into D-22's grammar, with the offending value clipped: it is a
+ * string from a file this process did not write, and link-policy quotes it back whole.
  */
-function normaliseLayer(libraries: LibraryEntry[], file: string): LibraryEntry[] {
-  return libraries.map((e) => {
+function normaliseLayer(libraries: LibraryEntry[], display: string): LibraryEntry[] {
+  return libraries.map((e, index) => {
     const normalised: LibraryEntry = { ...e, name: fold(e.name) };
     if (e.aliases !== undefined) normalised.aliases = e.aliases.map(fold);
     if (e.allowedHosts !== undefined) {
-      try {
-        normalised.allowedHosts = e.allowedHosts.map(normaliseAllowedHost);
-      } catch (err) {
-        throw new Error(`${file}: config entry "${e.name}": ${err instanceof Error ? err.message : String(err)}`);
-      }
+      normalised.allowedHosts = e.allowedHosts.map((host) => {
+        try {
+          return normaliseAllowedHost(host);
+        } catch (err) {
+          const why = whyHostRefused(err, host);
+          const value = clipText(typeof host === "string" ? host : JSON.stringify(host), MAX_CONFIG_VALUE_CHARS);
+          throw new ConfigError(display, `${configLocator(index, "allowedHosts", e.name)}: "${value}" ${why}`);
+        }
+      });
     }
     delete normalised.resolved;
     return normalised;
   });
+}
+
+/** link-policy says `allowedHosts: "<value>" <why>`; the value is re-quoted clipped, so
+ *  only the reason is taken from its message (and the whole message when it is shaped
+ *  differently — a message is never dropped). */
+function whyHostRefused(err: unknown, host: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const prefix = `allowedHosts: ${typeof host === "string" ? `"${host}"` : `"${JSON.stringify(host)}"`} `;
+  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
 }
 
 /**
@@ -486,15 +523,15 @@ function applyLayer(
   entries: Map<string, LibraryEntry>,
   layer: LibraryEntry[],
   configNames: Set<string>,
-  fileOf: Map<string, string>,
-  file: string,
+  fileOf: Map<string, ConfigSite>,
+  display: string,
 ): void {
   // D-06: every key this layer claims — as a name or an alias — leaves the layers below.
   const claimed = new Set<string>();
-  for (const e of layer) {
+  for (const [index, e] of layer.entries()) {
     claimed.add(e.name);
     configNames.add(e.name);
-    fileOf.set(e.name, file);
+    fileOf.set(e.name, { display, index });
     for (const a of e.aliases ?? []) claimed.add(a);
   }
   const rewritten: [string, LibraryEntry][] = [];
@@ -531,9 +568,17 @@ function applyLayer(
  *   registry or config entry always wins and a persisted resolution never overrides one.
  *   `includeResolved: false` skips the file (tests; tools that must not read the cache).
  */
-export function loadRegistry(configPath?: string, opts: { includeResolved?: boolean } = {}): Registry {
+export function loadRegistry(configPath?: string, opts: LoadRegistryOptions = {}): Registry {
   const files: ConfigFile[] = configPath ? [{ path: configPath, scope: "flag", legacy: false }] : [];
   return loadRegistryFrom({ files, notes: [] }, opts);
+}
+
+export interface LoadRegistryOptions {
+  includeResolved?: boolean;
+  /** Directory config paths are shown relative to in messages (default: process.cwd()). */
+  cwd?: string;
+  /** Home directory those paths are `~`-abbreviated against (default: os.homedir()). */
+  home?: string;
 }
 
 /**
@@ -542,14 +587,17 @@ export function loadRegistry(configPath?: string, opts: { includeResolved?: bool
  * `loadRegistry(path)` is this with a single `--config` layer, which is why every 0.1.x
  * behaviour above is unchanged for an explicit config.
  */
-export function loadRegistryFrom(resolution: ConfigResolution, opts: { includeResolved?: boolean } = {}): Registry {
+export function loadRegistryFrom(resolution: ConfigResolution, opts: LoadRegistryOptions = {}): Registry {
+  const cwd = opts.cwd ?? process.cwd();
+  const home = opts.home ?? homedir();
   const entries = new Map<string, LibraryEntry>();
   for (const e of DEFAULT_REGISTRY) entries.set(e.name, e);
   const configNames = new Set<string>();
-  const fileOf = new Map<string, string>();
+  const fileOf = new Map<string, ConfigSite>();
   for (const file of resolution.files) {
-    const { libraries } = readConfigFile(file.path);
-    applyLayer(entries, normaliseLayer(libraries, file.path), configNames, fileOf, file.path);
+    const display = displayPath(file.path, cwd, home);
+    const { libraries } = readConfigFile(file.path, display);
+    applyLayer(entries, normaliseLayer(libraries, display), configNames, fileOf, display);
   }
   validateAliases(entries, configNames, fileOf);
   if (opts.includeResolved !== false) {
@@ -578,7 +626,11 @@ export interface DiscoveredRegistryOptions {
  */
 export function loadDiscoveredRegistry(opts: DiscoveredRegistryOptions): Registry {
   const resolution = discoverConfig({ cwd: opts.cwd, env: opts.env, flag: opts.flag, home: opts.home });
-  const registry = loadRegistryFrom(resolution, { includeResolved: opts.includeResolved });
+  const registry = loadRegistryFrom(resolution, {
+    includeResolved: opts.includeResolved,
+    cwd: opts.cwd,
+    home: opts.home ?? homedir(),
+  });
   for (const note of resolution.notes) opts.warn?.(note);
   return registry;
 }

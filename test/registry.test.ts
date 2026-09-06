@@ -217,19 +217,19 @@ describe("config aliases validation", () => {
 
   it("rejects an alias that collides with a canonical name (default or config), with an actionable hint", () => {
     expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["react"] }]))).toThrow(
-      /alias "react" on config entry "hono" collides with the canonical name "react" \(a default library\); rename the alias, or override "react" \(with its urls\) and set aliases: \[\]/,
+      /libraries\[0\]\.aliases \("hono"\): alias "react" collides with the canonical name "react" \(a default library\); rename the alias, or override "react" \(with its urls\) and set aliases: \[\]/,
     );
     expect(() =>
       loadRegistry(writeConfig([
         { name: "hono", urls: [U] },
         { name: "elysia", urls: [U], aliases: ["hono"] },
       ])),
-    ).toThrow(/alias "hono" on config entry "elysia" collides with the canonical name "hono" \(another config entry\)/);
+    ).toThrow(/libraries\[1\]\.aliases \("elysia"\): alias "hono" collides with the canonical name "hono" \(another config entry\)/);
   });
 
   it("rejects an alias equal to the entry's own name", () => {
     expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["hono"] }]))).toThrow(
-      /alias "hono" on config entry "hono" collides with the canonical name "hono" \(the entry itself\)/,
+      /libraries\[0\]\.aliases \("hono"\): alias "hono" collides with the canonical name "hono" \(the entry itself\)/,
     );
   });
 
@@ -239,7 +239,7 @@ describe("config aliases validation", () => {
         { name: "a", urls: [U], aliases: ["shared"] },
         { name: "b", urls: [U], aliases: ["shared"] },
       ])),
-    ).toThrow(/alias "shared".*both "a" and "b"/);
+    ).toThrow(/libraries\[1\]\.aliases \("b"\): alias "shared" is also declared on "a"/);
   });
 
   it("validates the defaults even without a config (no alias/canonical collision shipped)", () => {
@@ -312,7 +312,7 @@ describe("config normalization: names and aliases are trimmed and lower-cased be
 
   it('alias "React" on another entry is rejected as a canonical collision', () => {
     expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["React"] }]))).toThrow(
-      /alias "react" on config entry "hono" collides with the canonical name "react"/,
+      /libraries\[0\]\.aliases \("hono"\): alias "react" collides with the canonical name "react"/,
     );
   });
 
@@ -383,7 +383,7 @@ describe("config probeQueries validation", () => {
 
   it("still rejects an entry missing name or urls", () => {
     expect(() => loadRegistry(writeConfig([{ name: "x" }]))).toThrow(
-      /libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+      /libraries\[0\]\.urls \("x"\): must be a non-empty array of https URLs/,
     );
     expect(() => loadRegistry(writeConfig([{ urls: ["https://x.example.com/llms.txt"] }]))).toThrow(
       /libraries\[0\]\.name: must be a non-empty string/,
@@ -407,7 +407,7 @@ describe("config allowedHosts validation (PAR-655)", () => {
     ["a non-string element", [1]],
   ])("rejects allowedHosts whose SHAPE is wrong (%s) with the schema's path + message", (_label, allowedHosts) => {
     expect(() => loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts }]))).toThrow(
-      /libraries\[0\]\.allowedHosts: must be an array of hostnames/,
+      /libraries\[0\]\.allowedHosts \("acme"\): must be an array of hostnames/,
     );
   });
 
@@ -423,8 +423,23 @@ describe("config allowedHosts validation (PAR-655)", () => {
     ["a .internal host", ["vault.internal"]],
     ["a single label", ["intranet"]],
     ["an empty element", [""]],
-  ])("rejects the host VALUE %s, naming the file and the entry", (_label, allowedHosts) => {
-    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts }]))).toThrow(/config entry "acme": allowedHosts/);
+  ])("rejects the host VALUE %s, naming the file, the entry and the offending value (D-22)", (_label, allowedHosts) => {
+    expect(() => loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts }]))).toThrow(
+      new RegExp(`vibectx\\.config\\.json: libraries\\[0\\]\\.allowedHosts \\("acme"\\): "${(allowedHosts as string[])[0].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" `),
+    );
+  });
+
+  it("S1: an oversized host value is clipped — the line stays inside the 300-character bound", () => {
+    const huge = `${"h".repeat(4000)}.example.com`;
+    try {
+      loadRegistry(writeConfig([{ name: "acme", urls: [U], allowedHosts: [huge] }]));
+      expect.unreachable();
+    } catch (e) {
+      const m = (e as Error).message;
+      expect(m.length).toBeLessThanOrEqual(300);
+      expect(m).toMatch(/libraries\[0\]\.allowedHosts \("acme"\): "h+…" is longer than/);
+      expect(m.split("\n")).toHaveLength(1);
+    }
   });
 
   it("strips a `resolved` marker from config entries (only the resolver may set it)", () => {
@@ -493,9 +508,13 @@ describe("loadRegistryFrom: layered config, project over user over defaults (D-1
   it("names the FILE a semantic failure came from (D-17)", () => {
     const user = layerFile("user.json", [{ name: "mine", urls: [U] }]);
     const project = layerFile("project.json", [{ name: "hono", urls: [U], aliases: ["react"] }]);
-    expect(() => layered(user, project)).toThrow(new RegExp(`${escapeRe(project)}: alias "react" on config entry "hono"`));
+    expect(() => layered(user, project)).toThrow(
+      new RegExp(`${escapeRe(project)}: libraries\\[0\\]\\.aliases \\("hono"\\): alias "react" collides`),
+    );
     const badHost = layerFile("bad-host.json", [{ name: "acme", urls: [U], allowedHosts: ["localhost"] }]);
-    expect(() => layered(user, badHost)).toThrow(new RegExp(`${escapeRe(badHost)}: config entry "acme": allowedHosts`));
+    expect(() => layered(user, badHost)).toThrow(
+      new RegExp(`${escapeRe(badHost)}: libraries\\[0\\]\\.allowedHosts \\("acme"\\): "localhost" must have at least two labels`),
+    );
   });
 
   it("carries the resolution on registry.config for the list_libraries header (D-18)", () => {
@@ -564,7 +583,7 @@ describe("loadDiscoveredRegistry: the path index.ts and the CLI use (D-14, PAR-6
   it("reports a bad discovered file as one line naming that file", () => {
     writeFileSync(join(repo, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
     expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home })).toThrow(
-      /vibectx\.config\.json: libraries\[0\]\.urls: must be a non-empty array of https URLs/,
+      /^\.\/vibectx\.config\.json: libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
     );
   });
 });

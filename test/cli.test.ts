@@ -85,7 +85,7 @@ describe("dispatchCli", () => {
     const a = io();
     const code = await dispatchCli(["node", "dist/index.js", "--config", "/nonexistent.json", "doctor"], a);
     expect(code).toBe(2);
-    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+    expect(a.err.join("")).toMatch(/^\/nonexistent\.json: not found$/m);
   });
 
   it("does not mistake a --library or --config VALUE named 'doctor' for the subcommand", async () => {
@@ -152,7 +152,7 @@ describe("dispatchCli", () => {
     const a = io();
     const bad = writeConfig([{ name: "x", urls: ["https://x.example/llms.txt"], aliases: ["react"] }]);
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", bad, "--offline"], a)).toBe(2);
-    expect(a.err.join("")).toMatch(/Could not load config .*alias "react"/);
+    expect(a.err.join("")).toMatch(/^.*vibectx\.config\.json: libraries\[0\]\.aliases \("x"\): alias "react" collides/m);
   });
 
   it("exits 2 on an unknown library", async () => {
@@ -165,7 +165,7 @@ describe("dispatchCli", () => {
     const a = io();
     const missing = join(dir, "missing.json");
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", missing, "--offline"], a)).toBe(2);
-    expect(a.err.join("")).toMatch(/Could not load config/);
+    expect(a.err.join("")).toMatch(/missing\.json: not found/);
     const bad = writeConfig([{ name: "x", urls: ["https://x.example/llms.txt"], probeQueries: [""] }]);
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--config", bad, "--offline"], a)).toBe(2);
     expect(a.err.join("")).toMatch(/probeQueries/);
@@ -247,7 +247,7 @@ describe("dispatchCli resolve (PAR-655)", () => {
     expect(a.err.join("")).toContain(RESOLVE_USAGE);
     expect(await dispatchCli(["node", "dist/index.js", "resolve", "x", "--bogus"], a)).toBe(2);
     expect(await dispatchCli(["node", "dist/index.js", "resolve", "x", "--config", "/nonexistent.json"], a)).toBe(2);
-    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+    expect(a.err.join("")).toMatch(/^\/nonexistent\.json: not found$/m);
   });
 
   it("does not mistake a --library / --config VALUE named 'resolve' for the subcommand, and a package named 'doctor' can be resolved", async () => {
@@ -356,7 +356,7 @@ describe("dispatchCli warm (PAR-656)", () => {
     expect(await dispatchCli(["node", "dist/index.js", "warm", join(project, "nope")], a)).toBe(2);
     expect(a.err.join("")).toMatch(/is not a directory/);
     expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--config", "/nonexistent.json"], a)).toBe(2);
-    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+    expect(a.err.join("")).toMatch(/^\/nonexistent\.json: not found$/m);
     expect(a.out).toEqual([]);
   });
 
@@ -450,7 +450,7 @@ describe("CLI config discovery: no flag needed (PAR-657)", () => {
     const a = io();
     expect(await dispatchCli(["node", "dist/index.js", "doctor", "--offline"], a)).toBe(2);
     const err = a.err.join("");
-    expect(err).toMatch(/Could not load config: .*vibectx\.config\.json: libraries\[0\]\.urls: must be a non-empty array of https URLs/);
+    expect(err).toMatch(/^\.\/vibectx\.config\.json: libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/m);
     expect(err.trim().split("\n")).toHaveLength(1);
   });
 

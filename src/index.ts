@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadDiscoveredRegistry } from "./registry.js";
+import { ConfigError } from "./config.js";
 import { dispatchCli } from "./cli.js";
 import { startServer } from "./server.js";
 import { autowarmStatus } from "./autowarm.js";
@@ -33,8 +34,9 @@ if (cliExit !== undefined) {
       warn: (note) => process.stderr.write(`${note}\n`),
     });
   } catch (e) {
-    // One line, never a stack: this is what the client surfaces to the user.
-    process.stderr.write(`Could not load config: ${e instanceof Error ? e.message : String(e)}\n`);
+    // One line, never a stack: this is what the client surfaces to the user. A ConfigError
+    // already names the file and the field (D-22), so it is not prefixed again.
+    process.stderr.write(e instanceof ConfigError ? `${e.message}\n` : `could not load config: ${e instanceof Error ? e.message : String(e)}\n`);
     process.exit(2);
   }
   const transport = new StdioServerTransport();
