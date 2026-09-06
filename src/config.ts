@@ -213,9 +213,26 @@ function withKind(file: ConfigFile, kind: "file" | "other"): ConfigFile {
   return kind === "file" ? file : { ...file, error: "not a regular file" };
 }
 
-/** D-18 display rule: relative to cwd when beneath it, `~`-abbreviated when under home,
- *  absolute otherwise. Always POSIX separators, so the header reads the same everywhere. */
+/**
+ * D-18 display rule: relative to cwd when beneath it, `~`-abbreviated when under home,
+ * absolute otherwise. Always POSIX separators, so the header reads the same everywhere.
+ *
+ * S3: the result is cleaned and clipped HERE, at the one place a display path is built, so
+ * that every sink is safe by construction — the `list_libraries` header, the D-19 stderr
+ * line, the `doctor` table and `configIssues[].path`. A directory or file name is text this
+ * process did not write (anyone who can create a directory chooses it), and only the header
+ * used to clean it: a repository called `repo<ESC>[31m<RLO>evil` otherwise carried a
+ * terminal control sequence and a bidi override into three other sinks.
+ */
 export function displayPath(path: string, cwd: string, home?: string): string {
+  return clipText(rawDisplayPath(path, cwd, home), MAX_DISPLAY_PATH_CHARS);
+}
+
+/** Longest display path. A path is a label in a one-line message here, not a value to be
+ *  round-tripped, and 200 characters is well past any real repository path. ASSUMED. */
+export const MAX_DISPLAY_PATH_CHARS = 200;
+
+function rawDisplayPath(path: string, cwd: string, home?: string): string {
   const abs = fromCwd(cwd, path);
   const rel = relative(fromCwd(cwd), abs);
   if (rel !== "" && !rel.startsWith("..") && !isAbsolute(rel)) return `./${rel.split(sep).join("/")}`;

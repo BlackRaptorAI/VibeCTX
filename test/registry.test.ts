@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { formatDoctorTable, runDoctor } from "../src/doctor.js";
 import {
   DEFAULT_REGISTRY,
   installResolvedEntry,
@@ -773,5 +774,41 @@ describe("nearestLibraryName (R3: typo hint, edit distance ≤ 2 over names and 
     expect(nearestLibraryName(reg, "Prisma ")).toBeUndefined(); // folds to an exact name
     expect(nearestLibraryName(reg, "zzzzzzzz")).toBeUndefined();
     expect(nearestLibraryName(reg, "vitesst")).toBe("vitest");
+  });
+});
+
+describe("S3: a hostile directory name never rides out on a display path (PAR-657)", () => {
+  const ESC = "\u001b"; // C0 escape — starts a terminal control sequence
+  const RLO = "\u202e"; // RIGHT-TO-LEFT OVERRIDE — reverses everything printed after it
+
+  it("keeps ESC and bidi overrides out of the stderr line, the doctor row and configIssues[].path", async () => {
+    // A repository root whose own NAME carries a terminal escape and a right-to-left
+    // override. Every sink below prints that name, because the config file lives inside it.
+    const hostile = join(dir, `repo${ESC}[31m${RLO}evil`);
+    try {
+      mkdirSync(join(hostile, ".git"), { recursive: true });
+      mkdirSync(join(hostile, "sub"), { recursive: true });
+    } catch {
+      return; // a filesystem that refuses the name (Windows) has nothing to test here
+    }
+    // Invalid on purpose: a SKIPPED discovered file is what reaches all three sinks (D-19).
+    writeFileSync(join(hostile, "vibectx.config.json"), '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
+
+    const warnings: string[] = [];
+    // cwd is BELOW the repository root, so the display rule cannot shorten the name away.
+    const reg = loadDiscoveredRegistry({ cwd: join(hostile, "sub"), env: {}, home: join(dir, "home"), warn: (m) => warnings.push(m) });
+    const project = reg.config?.files.find((f) => f.scope === "project");
+    expect(project?.error).toBeDefined();
+    expect(project?.display).toContain("evil"); // still names the file — cleaned, never dropped
+
+    const report = await runDoctor(reg, { library: "react", offline: true });
+    const table = formatDoctorTable(report);
+    expect(report.configIssues).toHaveLength(1);
+    expect(table).toContain("✗ config ");
+
+    for (const sink of [warnings.join("\n"), project!.display!, report.configIssues![0].path, table]) {
+      expect(sink).not.toContain(ESC);
+      expect(sink).not.toContain(RLO);
+    }
   });
 });
