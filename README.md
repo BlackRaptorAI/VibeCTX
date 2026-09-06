@@ -169,10 +169,36 @@ manifest exists.
 directory>.json` in the cache directory — `{ schemaVersion: 1, dir, manifests,
 dependencies, warmedAt }`, atomically and validated on read. A file with an **older**
 `schemaVersion` is replaced; one with a **newer** `schemaVersion` (written by a newer
-vibectx) is left alone with a note on stderr — the same rule `resolved.json` follows. It
-feeds one decision, the 24-hour `unresolved (recent)` memo above; otherwise it is
-informational: `list_libraries` ends with one line, `Project deps (<dir>): N cached, M
-unresolved, K denied — warmed <time>`, when a record exists for the server's working directory.
+vibectx) is left alone with a note on stderr — the same rule `resolved.json` follows. The
+record is **best effort**: if it cannot be written (an unwritable cache directory, a full
+disk) the run still prints its table and still exits on the dependencies alone, with one
+stderr line and a `project record not written: <reason>` note. It feeds one decision, the
+24-hour `unresolved (recent)` memo above; otherwise it is informational.
+
+Validation on read is per field, because anything with write access to the cache directory
+can edit the file: a `url` that is not an https URL is dropped from its row; a `source` that
+is not a plain relative manifest path (`package.json`, `sub/requirements.txt` — never
+absolute, never containing `..`) drops the whole row, as do a bad `name`, `ecosystem`,
+`status` or `failedAt`; an over-long `library` is dropped from its row and an over-long
+`note` is truncated. Control, bidi and zero-width characters are stripped from every field.
+
+**The `list_libraries` summary line.** When a record exists for the server's working
+directory, `list_libraries` ends with `Project deps (<dir>): N cached, M unresolved, K
+denied — warmed <time>`. Two things to know about that line:
+
+- **`unresolved` is a bucket, not a status.** It counts every row that is not cached and not
+  denied — `unresolved`, `unresolved (recent)`, `unreachable` and `skipped (rate cap)`
+  together. So a run that hit the resolution cap, and one whose network was down, both read
+  as "unresolved" here. Run `vibectx warm` for the per-name breakdown; the summary is
+  deliberately one line. (Splitting the bucket is a queued follow-up.)
+- **It emits the absolute project directory** — the value of `dir` — to whatever model is
+  reading `list_libraries`. That is the path the server was started in; it is not secret, but
+  it is not nothing either.
+
+**A moved project gets a new record.** The file name is a hash of the absolute directory, so
+renaming or moving a project writes a fresh record at the new path and leaves the old one in
+place. Nothing prunes them today (a queued follow-up); they are inert, a few KB each, and
+`rm -rf` on the cache directory clears them.
 
 **Background revalidation on startup.** When the MCP server starts (never under `doctor`,
 `resolve` or `warm`), any *configured* library — default or config, not auto-resolved
@@ -357,6 +383,9 @@ npx -y @blackraptorai/vibectx --config ./vibectx.config.json
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
+Every file in there is written through a temp file and renamed into place, so a reader
+never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
+killed process left behind before they write anything.
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
