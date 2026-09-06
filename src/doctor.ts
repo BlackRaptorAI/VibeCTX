@@ -191,8 +191,9 @@ async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Pro
   };
 }
 
-/** Map with at most `limit` calls in flight; results in input order. */
-async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+/** Map with at most `limit` calls in flight; results in input order. Shared with `warm`
+ *  and the startup autowarm (PAR-656), which need the same bounded fan-out. */
+export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let next = 0;
   const worker = async () => {

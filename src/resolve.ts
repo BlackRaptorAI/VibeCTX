@@ -92,6 +92,9 @@ export interface ResolveOutcome {
   saveNote?: string;
   /** What was attempted, one phrase per step; the failure message is built from it. */
   attempts: string[];
+  /** True when the per-hour resolution cap refused this name before any fetch (L2) — so a
+   *  caller running many names (`warm`) can tell "try later" from "not resolvable". */
+  limited?: true;
   /** The text the tool / CLI shows. */
   text: string;
 }
@@ -356,7 +359,7 @@ export async function resolvePackage(
   }
   if (!takeResolutionSlot(now().getTime())) {
     attempts.push(`resolution limit reached (${MAX_RESOLUTIONS_PER_HOUR} per hour per process); try again later, or pin the library`);
-    return fail();
+    return { ...fail(), limited: true };
   }
 
   // Phase 1: gather metadata (at most MAX_METADATA_FETCHES), stopping early on a docs site.

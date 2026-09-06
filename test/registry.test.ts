@@ -103,6 +103,17 @@ describe("default registry: vibe-coder top-30 (PAR-654)", () => {
     expectAlias("firebase-js", "firebase");
     expectAlias("drizzle", "drizzle-orm");
     expectAlias("ai", "ai-sdk");
+    // PAR-656: the npm package name reaches the entry whose canonical name differs from it,
+    // so `vibectx warm` (which reads package.json) gets a curated hit, not a resolution.
+    expectAlias("react-dom", "react");
+    expectAlias("@supabase/supabase-js", "supabase");
+    expectAlias("@trpc/server", "trpc");
+    expectAlias("@trpc/client", "trpc");
+    expectAlias("@clerk/nextjs", "clerk");
+    expectAlias("@anthropic-ai/sdk", "anthropic-sdk");
+    expectAlias("@playwright/test", "playwright");
+    expectAlias("@sveltejs/kit", "sveltekit");
+    expectAlias("@tanstack/react-query", "tanstack-query");
     // Canonical already IS the common name — no alias needed, must resolve directly:
     for (const n of ["openai", "trpc", "tailwindcss", "drizzle-orm"]) expect(resolveLibrary(reg, n)?.name, n).toBe(n);
   });

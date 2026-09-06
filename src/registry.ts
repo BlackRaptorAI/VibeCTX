@@ -56,7 +56,11 @@ export interface LibraryEntry {
  * its own (`ai`), or not what people call the product (`next` → Next.js). Then `name` is the
  * product's widely used short name in lowercase (`supabase`, `trpc`, `clerk`, `anthropic-sdk`,
  * `playwright`, `sveltekit`, `tanstack-query`, `ai-sdk`, `next.js`). `aliases` carry the other
- * names agents actually send; they are shipped only where such a name is common.
+ * names agents actually send; they are shipped only where such a name is common. Since
+ * PAR-656 (`vibectx warm` reads package.json) every entry whose canonical name is not the
+ * npm package name also carries that package name as an alias (`@supabase/supabase-js`,
+ * `@trpc/server`, `@clerk/nextjs`, `@anthropic-ai/sdk`, `@playwright/test`, `@sveltejs/kit`,
+ * `@tanstack/react-query`; `react-dom` → react), so a manifest name is a curated hit.
  *
  * URL RULE. Candidates are probed in order: `{docs-base}/llms-full.txt`, `{docs-base}/llms.txt`,
  * then a curated fallback (a raw GitHub README or docs page). The docs base is the package's
@@ -87,6 +91,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "react",
+    aliases: ["react-dom"],
     urls: [
       "https://react.dev/llms-full.txt",
       "https://react.dev/llms.txt",
@@ -99,7 +104,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "supabase",
-    aliases: ["supabase-js"],
+    aliases: ["supabase-js", "@supabase/supabase-js"],
     urls: [
       "https://supabase.com/docs/llms-full.txt",
       "https://supabase.com/docs/llms.txt",
@@ -186,6 +191,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "trpc",
+    aliases: ["@trpc/server", "@trpc/client"],
     urls: [
       "https://trpc.io/llms-full.txt",
       "https://trpc.io/llms.txt",
@@ -237,6 +243,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "clerk",
+    aliases: ["@clerk/nextjs"],
     urls: [
       "https://clerk.com/llms-full.txt",
       "https://clerk.com/llms.txt",
@@ -281,7 +288,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "anthropic-sdk",
-    aliases: ["anthropic"],
+    aliases: ["anthropic", "@anthropic-ai/sdk"],
     urls: [
       "https://platform.claude.com/llms.txt",
       "https://docs.anthropic.com/llms-full.txt",
@@ -293,6 +300,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "playwright",
+    aliases: ["@playwright/test"],
     urls: [
       "https://playwright.dev/llms-full.txt",
       "https://playwright.dev/llms.txt",
@@ -336,7 +344,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "sveltekit",
-    aliases: ["svelte"],
+    aliases: ["svelte", "@sveltejs/kit"],
     urls: [
       "https://svelte.dev/llms-full.txt",
       "https://svelte.dev/llms.txt",
@@ -368,7 +376,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "tanstack-query",
-    aliases: ["react-query"],
+    aliases: ["react-query", "@tanstack/react-query"],
     urls: [
       "https://tanstack.com/query/llms-full.txt",
       "https://tanstack.com/query/llms.txt",
