@@ -64,6 +64,10 @@ const MAX_HEADING_LEVEL = 6;
  * H4 no longer loses the H2/H3 it lives under — both for ranking (ancestors are a
  * weak field, see rankSections) and for rendering. A `#` line inside a fenced code
  * block is code, not a heading; the fence scanner above is what tells them apart.
+ *
+ * D-38: BUMP `RETRIEVAL_VERSION` (src/tokenize.ts) WHEN YOU CHANGE THIS. The search index
+ * stores section ids and one length per section, so a different split means the ids on disk
+ * point at different text — and the content hash cannot see it.
  */
 export function splitSections(markdown: string): SplitSection[] {
   const lines = markdown.split("\n");
@@ -113,7 +117,10 @@ export const BM25_K1 = 1.2;
 /** D-24: Okapi BM25 length normalization. */
 export const BM25_B = 0.75;
 /** D-24 (BM25F-lite): a term in the section's own heading counts this many times.
- *  Ancestor-path headings and body text count once. */
+ *  Ancestor-path headings and body text count once.
+ *  D-38: BUMP `RETRIEVAL_VERSION` (src/tokenize.ts) WHEN YOU CHANGE THIS. The search index
+ *  stores the WEIGHTED frequencies, so a posting list written under one weighting scores
+ *  wrongly under another. */
 export const HEADING_WEIGHT = 3;
 
 /** ln(1 + (N − n + 0.5) / (n + 0.5)) — the standard non-negative BM25 IDF. */
@@ -181,7 +188,9 @@ export function queryIndex(query: string): { terms: string[]; index: Map<string,
   return { terms, index: new Map(terms.map((t, i) => [t, i])) };
 }
 
-/** Weigh each split section: own heading x HEADING_WEIGHT, ancestor path x1, body x1. */
+/** Weigh each split section: own heading x HEADING_WEIGHT, ancestor path x1, body x1.
+ *  D-38: BUMP `RETRIEVAL_VERSION` (src/tokenize.ts) WHEN YOU CHANGE THIS — `indexDocument` reproduces these
+ *  numbers term for term, and an index written by a different weighting is silently wrong. */
 export function weighSections(sections: SplitSection[], index: Map<string, number>): Weighted[] {
   return sections.map((s) =>
     weigh(

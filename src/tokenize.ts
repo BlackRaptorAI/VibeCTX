@@ -6,6 +6,30 @@
  * characters — no regex, no backtracking.
  */
 
+/**
+ * D-38 — THE RETRIEVAL VERSION. Bump this by one whenever you change ANY of:
+ *
+ *   1. `tokenize` or `stem` (this file) — the tokens a document is stored under;
+ *   2. `splitSections` (retrieval.ts) — which section a token belongs to, and how many there are;
+ *   3. `HEADING_WEIGHT` / `weighSections` (retrieval.ts) — the frequencies the postings hold.
+ *
+ * Why a version and not just the content hash the search index already keeps: the hash proves
+ * the DOCUMENT is unchanged, which is exactly why a change to the code above slips past it. An
+ * index built by yesterday's tokenizer describes the same bytes under different terms, so
+ * today's query looks up terms that are not there and the answer is silently EMPTY rather than
+ * visibly wrong. MEASURED by the PAR-659 schema gate: deleting the `ies→y` stemmer rule made a
+ * surviving index return zero groups where a freshly built one returns the right section.
+ *
+ * `readIndex` refuses a file whose `retrievalVersion` is not this one, exactly as it refuses a
+ * stale hash: the postings are rebuilt from the cache, never used. So bumping this costs one
+ * slower search per library and nothing else; NOT bumping it costs correctness.
+ *
+ * It lives HERE, in the leaf module, rather than beside the code it mostly guards, so that
+ * every module it versions can import it without a cycle — retrieval.ts imports this file, and
+ * search-index.ts imports both.
+ */
+export const RETRIEVAL_VERSION = 1;
+
 /** Longest token kept. A real identifier is far shorter; a 1 MB run of `x` is not a
  *  token, it is a denial-of-service payload, and dropping it keeps ranking linear. */
 export const MAX_TOKEN_CHARS = 64;
@@ -195,6 +219,11 @@ function stripSilentE(t: string): string | undefined {
  *     that merely end in `e`.
  * Queries and documents go through the same function, so a collision costs precision,
  * never a match.
+ *
+ * D-38: BUMP `RETRIEVAL_VERSION` (top of this file) WHEN YOU CHANGE ANY RULE HERE. The search
+ * index stores documents under their STEMS; change a rule and every posting list on disk is
+ * keyed to the old stems while queries arrive as the new ones, which the content hash cannot
+ * see. MEASURED: deleting the `ies→y` rule made a surviving index return zero groups.
  */
 export function stem(token: string): string {
   if (hasDigit(token)) return token;
@@ -240,6 +269,9 @@ export function stem(token: string): string {
  * because stemming would otherwise smuggle `does` through as `doe`; the
  * all-stopword fallback keeps a query like "how to do this" from tokenizing to
  * nothing at all.
+ *
+ * D-38: BUMP `RETRIEVAL_VERSION` (top of this file) WHEN YOU CHANGE THIS — the splitting
+ * rules and the stopword list included. The search index is keyed to this function's output.
  */
 export function tokenize(text: string): string[] {
   const raw = rawTokens(text);

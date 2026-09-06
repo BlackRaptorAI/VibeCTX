@@ -17,6 +17,7 @@ import {
   indexDocument,
   readIndex,
   writeIndex,
+  MAX_INDEX_FILE_BYTES,
   MAX_LAZY_INDEX_DOCS,
   type IndexedDocument,
 } from "./search-index.js";
@@ -386,7 +387,17 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   if (rebuilt.size > 0) {
     const merged = new Map(loaded.libraries);
     for (const [name, doc] of rebuilt) merged.set(name, doc);
-    base.indexWritten = writeIndex(merged, opts.warn);
+    base.indexWritten = writeIndex(merged, opts.warn, (shed) => {
+      // D-40: the file would have been bigger than the one `readIndex` accepts, so the biggest
+      // entries were left out rather than written into a file nothing could ever read again.
+      // The reader is told, because "this library is slower every time" is not a detail.
+      notes.push(
+        `${shed.length} librar${shed.length === 1 ? "y is" : "ies are"} not indexed (the index file would exceed its ${MAX_INDEX_FILE_BYTES}-byte limit): ${shed
+          .slice(0, MAX_NAMED_UNCACHED)
+          .map((n) => clipText(n, MAX_LIBRARY_CHARS))
+          .join(", ")}${shed.length > MAX_NAMED_UNCACHED ? ` and ${shed.length - MAX_NAMED_UNCACHED} more` : ""} — they are tokenized at query time on every search`,
+      );
+    });
     if (!base.indexWritten) notes.push("search index not updated; this search was answered by tokenizing the documents");
   }
 

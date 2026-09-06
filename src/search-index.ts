@@ -5,11 +5,11 @@ import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
 import { splitSections, HEADING_WEIGHT, type SplitSection } from "./retrieval.js";
-import { MAX_TOKEN_CHARS, tokenize } from "./tokenize.js";
+import { MAX_TOKEN_CHARS, RETRIEVAL_VERSION, tokenize } from "./tokenize.js";
 
 /**
- * PAR-659 — the inverted index behind cross-library `search`: `<cacheRoot>/index.json`,
- * shape `{ schemaVersion: 1, libraries: { "<name>": { url, fetchedAt, hash, lengths, postings } } }`.
+ * PAR-659 — the inverted index behind cross-library `search`: `<cacheRoot>/index.json`, shape
+ * `{ schemaVersion: 1, retrievalVersion: 1, libraries: { "<name>": { url, fetchedAt, hash, lengths, postings } } }`.
  *
  * D-33 — THE INDEX IS A DERIVED CACHE, NEVER A SOURCE OF TRUTH. It exists only so `search`
  * does not re-tokenize 30 × llms-full.txt on every call; every byte it holds can be rebuilt
@@ -25,12 +25,26 @@ import { MAX_TOKEN_CHARS, tokenize } from "./tokenize.js";
  * there are no words in the file to put there. What a planted index CAN do is mis-rank —
  * claim a term occurs where it does not — which is a quality bug, not a disclosure.
  *
- * The hash check is what closes the remaining gap. On read, an entry is used only when
- * sha256(cached document)[0..16) equals its `hash` AND its `url` is the URL being served AND
- * its `lengths` has exactly as many entries as the document has sections. Anything else —
- * a stale entry, a hand-edited one, a planted one, a document refreshed behind the index's
- * back — is IGNORED and the document is re-tokenized on the spot (slower, correct), then
- * written back best effort. A write failure is a note, never a failed search (D-13).
+ * TWO gates close the remaining gap, and the comment is exact about what each one does.
+ *
+ * (1) The CONTENT HASH. An entry is used only when sha256(cached document)[0..16) equals its
+ * `hash` AND its `url` is the URL being served. Anything else — a stale entry, a hand-edited
+ * one, a planted one, a document refreshed behind the index's back — is IGNORED and the
+ * document is re-tokenized on the spot (slower, correct), then written back best effort. A
+ * write failure is a note, never a failed search (D-13).
+ *
+ * (2) The RETRIEVAL VERSION (D-38). The hash proves the DOCUMENT is unchanged, which is
+ * precisely why a change to the tokenizer, the stemmer, `splitSections` or the field weights
+ * slips past it: same bytes, different tokens, and the postings on disk answer a query that no
+ * longer asks for them. The envelope therefore carries `retrievalVersion`, and a file whose
+ * version is not this build's is refused WHOLE — every library rebuilt, never used.
+ *
+ * What NEITHER gate constrains, stated rather than implied: `lengths` and the section ids
+ * inside `postings` are self-consistent but not tied to the document, so a hash-matching
+ * PLANTED index can claim sections the document does not have. `search` therefore counts and
+ * renders only sections `splitSections` actually produces, so a phantom section can be neither
+ * shown nor counted; the residue is mis-ranking, which D-33 already calls a quality bug rather
+ * than a disclosure.
  *
  * File discipline is the one every store in the cache directory shares (`atomic-store.ts`):
  * temp file + rename on write; validate-on-read against the rule each field actually has,
@@ -56,10 +70,14 @@ const FILE_NAME = "index.json";
  *  leaves headroom while keeping the file bounded. */
 export const MAX_INDEXED_DOC_BYTES = 8 * 1024 * 1024;
 
-/** Largest index file that is READ. Above it the file is refused whole and every document is
- *  tokenized at query time. ASSUMED: 30 libraries × a posting list for an 8 MiB document is
- *  far under this, so anything larger is a mistake or a plant, and parsing it would cost more
- *  than rebuilding it. */
+/** Largest index file that is READ — and, since D-40, the largest that is WRITTEN. Above it the
+ *  file is refused whole and every document is tokenized at query time. ASSUMED: 30 libraries ×
+ *  a posting list for an 8 MiB document is far under this, so anything larger is a mistake or a
+ *  plant, and parsing it would cost more than rebuilding it.
+ *
+ *  ONE constant on purpose: a write limit above the read limit is a cache that poisons itself,
+ *  which is exactly what PAR-659's security gate MEASURED before D-40 (a 74,686,064-byte file
+ *  written, then refused by every read, for ever). */
 export const MAX_INDEX_FILE_BYTES = 64 * 1024 * 1024;
 
 /** Documents one `search` call may tokenize (a cold cache, a refreshed library, a hash
@@ -221,6 +239,26 @@ function validLibraryKey(key: string): boolean {
 }
 
 /**
+ * `invalid JSON at position N` — the parser's own offset and NOTHING else (S2). Scanned by
+ * hand rather than by regex, and clipped, so the note is bounded whatever the parser said.
+ * Mirrors `jsonErrorMessage` in config.ts, which cannot be imported (that file is a different
+ * trust boundary and exports it to nobody).
+ */
+function jsonProblem(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e);
+  const marker = "at position ";
+  const at = raw.indexOf(marker);
+  if (at < 0) return "invalid JSON";
+  let digits = "";
+  for (let i = at + marker.length; i < raw.length && digits.length < 12; i++) {
+    const c = raw.charCodeAt(i);
+    if (c < 48 || c > 57) break;
+    digits += raw[i];
+  }
+  return digits.length > 0 ? `invalid JSON at position ${digits}` : "invalid JSON";
+}
+
+/**
  * Load the index. Never throws and never reports a failure as an error: a missing, oversized,
  * unparsable or foreign-version file simply loads as EMPTY with a `problem` line, and `search`
  * carries on by tokenizing what it needs.
@@ -244,7 +282,11 @@ export function readIndex(): LoadedIndex {
   try {
     parsed = JSON.parse(readFileSync(path, "utf8"));
   } catch (e) {
-    return { libraries: empty, problem: `search index unreadable (${e instanceof Error ? e.message : String(e)}); rebuilt as needed` };
+    // S2 / the D-22 precedent: the POSITION, and nothing from the file. Every V8 syntax-error
+    // message quotes a run of the offending source ("Unexpected token 'S', \"SUPERSECRE\"... is
+    // not valid JSON"), and this note is rendered into an MCP response — so a symlinked or
+    // hand-placed index.json would leak its first bytes to the model. The message is discarded.
+    return { libraries: empty, problem: `search index unreadable (${jsonProblem(e)}); rebuilt as needed` };
   }
   if (!isRecord(parsed) || !isRecord(parsed.libraries)) {
     return { libraries: empty, problem: "search index ignored: not a valid index file; rebuilt as needed" };
@@ -253,6 +295,15 @@ export function readIndex(): LoadedIndex {
     return {
       libraries: empty,
       problem: `search index ignored: schemaVersion ${String(parsed.schemaVersion)} (this version reads ${SEARCH_INDEX_SCHEMA_VERSION})`,
+    };
+  }
+  // D-38: postings written by a different tokenizer, stemmer, splitter or field weighting
+  // describe the same bytes under different terms — the hash cannot see it, so the version
+  // does. Refused WHOLE and rebuilt, exactly as a stale hash is.
+  if (parsed.retrievalVersion !== RETRIEVAL_VERSION) {
+    return {
+      libraries: empty,
+      problem: `search index ignored: built by retrieval version ${String(parsed.retrievalVersion)} (this build is ${RETRIEVAL_VERSION}); rebuilt as needed`,
     };
   }
   const libraries = new Map<string, IndexedDocument>();
@@ -272,12 +323,61 @@ export function readIndex(): LoadedIndex {
   return dropped > 0 ? { libraries, problem: `search index: ${dropped} invalid entr${dropped === 1 ? "y" : "ies"} dropped; rebuilt as needed` } : { libraries };
 }
 
-/** Serialise one entry with its keys in the documented order and its terms sorted, so two
- *  writes of the same data produce identical bytes (a diffable, cache-friendly file). */
+/** Serialise one entry with its keys in the documented order and its terms sorted. */
 function toRecord(doc: IndexedDocument): Record<string, unknown> {
   const postings: Record<string, number[]> = {};
   for (const term of [...doc.postings.keys()].sort()) postings[term] = doc.postings.get(term)!;
   return { url: doc.url, fetchedAt: doc.fetchedAt, hash: doc.hash, lengths: doc.lengths, postings };
+}
+
+/** The two halves of the envelope. Assembling the file from pre-serialised entries rather than
+ *  handing one big object to `JSON.stringify` is what lets the write cap PRICE each entry
+ *  without serialising the whole index twice; the bytes are identical either way, and
+ *  "writes byte-identical files for the same data" pins that. */
+const ENVELOPE_HEAD = `{"schemaVersion":${SEARCH_INDEX_SCHEMA_VERSION},"retrievalVersion":${RETRIEVAL_VERSION},"libraries":{`;
+const ENVELOPE_TAIL = "}}";
+
+/**
+ * D-40 — THE INDEX CAN NEVER POISON ITSELF. `writeIndex` refuses to emit a file larger than
+ * the `MAX_INDEX_FILE_BYTES` that `readIndex` refuses; when the payload is over, the LARGEST
+ * entries are shed until it is not, and the caller is told which libraries went and why.
+ *
+ * MEASURED before this existed: `search` over seven large documents wrote a 74,686,064-byte
+ * index that every later read then refused — permanently. Each subsequent search re-tokenized
+ * all seven documents and rewrote the same 74.7 MB, 21.5 s per search, for ever. The index is
+ * a cache whose whole purpose is to be cheaper than not having it; a cache that can write
+ * itself into a state it will not read is worse than no cache at all.
+ *
+ * Largest-first is the right shedding order for the same reason: the entries that push the
+ * file over are the ones whose absence costs the least per byte saved, and a shed library is
+ * not a lost library — `search` tokenizes it at query time and says so.
+ *
+ * Returns the file text to write and the names shed, largest first.
+ */
+function serialiseIndex(libraries: Map<string, IndexedDocument>): { text: string; shed: string[] } {
+  // Libraries sorted, terms sorted inside each record: two writes of the same data produce
+  // identical bytes (a diffable, cache-friendly file).
+  const sized = [...libraries.keys()].sort().map((name) => {
+    const key = JSON.stringify(name);
+    const value = JSON.stringify(toRecord(libraries.get(name)!));
+    // The entry as it sits in the object, plus its separating comma.
+    return { name, key, value, bytes: Buffer.byteLength(key, "utf8") + 1 + Buffer.byteLength(value, "utf8") + 1 };
+  });
+  const overhead = ENVELOPE_HEAD.length + ENVELOPE_TAIL.length;
+  let total = overhead + sized.reduce((n, e) => n + e.bytes, 0);
+  const shed: string[] = [];
+  if (total > MAX_INDEX_FILE_BYTES) {
+    // Largest first, ties by name, so the choice is deterministic across runs.
+    const dropped = new Set<string>();
+    for (const entry of [...sized].sort((a, b) => b.bytes - a.bytes || (a.name < b.name ? -1 : 1))) {
+      if (total <= MAX_INDEX_FILE_BYTES) break;
+      dropped.add(entry.name);
+      shed.push(entry.name);
+      total -= entry.bytes;
+    }
+    for (let i = sized.length - 1; i >= 0; i--) if (dropped.has(sized[i].name)) sized.splice(i, 1);
+  }
+  return { text: ENVELOPE_HEAD + sized.map((e) => `${e.key}:${e.value}`).join(",") + ENVELOPE_TAIL, shed };
 }
 
 /**
@@ -285,8 +385,15 @@ function toRecord(doc: IndexedDocument): Record<string, unknown> {
  * the file on disk belongs to a NEWER schema version — that file is not ours to rewrite (K2) —
  * and false when the write itself fails, because an unwritable cache must cost a slower search
  * and nothing else (D-13). Never throws.
+ *
+ * D-40: what is emitted is always small enough for `readIndex` to accept; `onShed` reports the
+ * libraries dropped to keep it so, for the caller that has somewhere to say it.
  */
-export function writeIndex(libraries: Map<string, IndexedDocument>, warn: (message: string) => void = (m) => process.stderr.write(m)): boolean {
+export function writeIndex(
+  libraries: Map<string, IndexedDocument>,
+  warn: (message: string) => void = (m) => process.stderr.write(m),
+  onShed?: (shed: string[]) => void,
+): boolean {
   const path = searchIndexPath();
   try {
     mkdirSync(cacheRoot(), { recursive: true });
@@ -297,9 +404,14 @@ export function writeIndex(libraries: Map<string, IndexedDocument>, warn: (messa
       );
       return false;
     }
-    const body: Record<string, unknown> = {};
-    for (const name of [...libraries.keys()].sort()) body[name] = toRecord(libraries.get(name)!);
-    writeAtomic(path, JSON.stringify({ schemaVersion: SEARCH_INDEX_SCHEMA_VERSION, libraries: body }, null, 0));
+    const { text, shed } = serialiseIndex(libraries);
+    if (shed.length > 0) {
+      warn(
+        `vibectx: search index would exceed the ${MAX_INDEX_FILE_BYTES}-byte limit; not indexing ${shed.length} librar${shed.length === 1 ? "y" : "ies"} (${shed.join(", ")}) — they are tokenized at query time instead\n`,
+      );
+      onShed?.(shed);
+    }
+    writeAtomic(path, text);
     return true;
   } catch (e) {
     warn(`vibectx: search index not written: ${e instanceof Error ? e.message : String(e)}\n`);

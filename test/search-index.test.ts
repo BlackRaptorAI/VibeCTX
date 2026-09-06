@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +13,13 @@ import {
   searchIndexPath,
   toIndexedDocument,
   writeIndex,
+  MAX_INDEX_FILE_BYTES,
   MAX_INDEXED_DOC_BYTES,
   SEARCH_INDEX_SCHEMA_VERSION,
   type IndexedDocument,
 } from "../src/search-index.js";
 import { queryIndex, splitSections, weighSections } from "../src/retrieval.js";
+import { RETRIEVAL_VERSION } from "../src/tokenize.js";
 
 /**
  * PAR-659 · D-33 — the index is a derived cache. These cases are the proof that nothing on
@@ -161,6 +163,70 @@ describe("search-index · file discipline (PAR-659, D-33)", () => {
     expect(readIndex().libraries.size).toBe(0);
   });
 
+  it("D-38: the envelope carries the retrieval version, and a file built by another one is refused WHOLE", () => {
+    writeIndex(one());
+    const onDisk = JSON.parse(readFileSync(searchIndexPath(), "utf8"));
+    expect(onDisk.retrievalVersion).toBe(RETRIEVAL_VERSION);
+    expect(readIndex().libraries.size).toBe(1);
+
+    // The same postings, the same hashes, the same documents — only the code that built them
+    // is claimed to be different. That is the case the CONTENT HASH cannot see.
+    plant({ ...onDisk, retrievalVersion: RETRIEVAL_VERSION + 1 });
+    expect(readIndex().libraries.size).toBe(0);
+    expect(readIndex().problem).toMatch(/retrieval version/);
+    plant({ ...onDisk, retrievalVersion: undefined });
+    expect(readIndex().libraries.size).toBe(0);
+  });
+
+  it("D-40: a payload over MAX_INDEX_FILE_BYTES sheds its largest entries instead of writing a file no read will accept", () => {
+    // MEASURED before D-40: `search` wrote a 74,686,064-byte index that every later read then
+    // refused, so every subsequent search re-tokenized seven documents and rewrote the same
+    // 74.7 MB — 21.5 s per search, for ever. The shape that produced it is a pathological
+    // vocabulary, which is what this builds directly: many distinct terms, little text.
+    const fat = (terms: number, seed: string): IndexedDocument => {
+      const postings = new Map<string, number[]>();
+      // Terms at the tokenizer's own MAX_TOKEN_CHARS, so the fixture reaches the 64 MiB cap in
+      // as few map entries as the shape allows.
+      for (let i = 0; i < terms; i++) postings.set(`${seed}${String(i).padStart(62, "0")}`, [0, 1]);
+      return { url: URL_, fetchedAt: AT, hash: documentHash(DOC), lengths: [terms], postings };
+    };
+    const libraries = new Map<string, IndexedDocument>();
+    libraries.set("small", one().get("hono")!);
+    for (let i = 0; i < 3; i++) libraries.set(`huge-${i}`, fat(320_000, `t${i}`));
+    const notes: string[] = [];
+    const shed: string[][] = [];
+    expect(writeIndex(libraries, (m) => notes.push(m), (s) => shed.push(s))).toBe(true);
+
+    expect(statSync(searchIndexPath()).size).toBeLessThanOrEqual(MAX_INDEX_FILE_BYTES);
+    expect(shed[0].length).toBeGreaterThan(0);
+    expect(notes.join("")).toMatch(/would exceed the \d+-byte limit/);
+    // The file it wrote is one it can READ BACK — the property D-40 exists for, and the one
+    // the 74.7 MB file did not have.
+    const back = readIndex();
+    expect(back.problem).toBeUndefined();
+    expect(back.libraries.size).toBe(libraries.size - shed[0].length);
+    // Largest first: the small entry survives whatever else goes.
+    expect(back.libraries.has("small")).toBe(true);
+    expect(shed[0].every((n) => n.startsWith("huge-"))).toBe(true);
+  }, 180_000);
+
+  it("S2: an unreadable index never reports a byte of the file", () => {
+    // MEASURED: a symlinked index.json leaked `SUPERSECRE…` into the MCP response, because V8's
+    // syntax-error message quotes a run of the offending source.
+    plant('{"schemaVersion":1,"libraries":SUPERSECRETTOKEN-abcdef}');
+    const leaky = readIndex().problem!;
+    expect(leaky).toMatch(/invalid JSON/);
+    expect(leaky).not.toContain("SUPERSECRET");
+    expect(leaky.length).toBeLessThan(120);
+    // Where the parser gives a position, the position is what is reported — and only that.
+    plant('{"schemaVersion" 1, "secret": "SUPERSECRETTOKEN"}');
+    const positioned = readIndex().problem!;
+    expect(positioned).toMatch(/invalid JSON at position \d+/);
+    expect(positioned).not.toContain("SUPERSECRET");
+    plant("");
+    expect(readIndex().problem).toMatch(/invalid JSON/);
+  });
+
   it("K2: a NEWER schemaVersion on disk is never overwritten", () => {
     plant({ schemaVersion: SEARCH_INDEX_SCHEMA_VERSION + 1, libraries: {} });
     const before = readFileSync(searchIndexPath(), "utf8");
@@ -232,6 +298,7 @@ describe("search-index · validate-on-read drops bad entries (PAR-659, D-33)", (
   it("one bad entry is dropped and the rest of the file survives", () => {
     plant({
       schemaVersion: SEARCH_INDEX_SCHEMA_VERSION,
+      retrievalVersion: RETRIEVAL_VERSION,
       libraries: { hono: valid, react: { ...valid, hash: "nope" }, React: valid },
     });
     const { libraries, problem } = readIndex();
