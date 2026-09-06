@@ -115,6 +115,18 @@ describe("splitSections — heading path and levels (D-25)", () => {
     expect(sections.find((s) => s.heading === "Three")).toMatchObject({ level: 3, path: ["One"] });
   });
 
+  it("clears a skipped level when a shallower heading resets the stack (Q3)", () => {
+    // "# A / ## B / ### C / # D / ### E": D resets levels 2..6, so E — which skips
+    // level 2 — must inherit D alone. Without the reset loop, E's path would still
+    // carry B from the earlier branch.
+    const sections = splitSections(
+      ["# A", "a", "## B", "b", "### C", "c", "# D", "d", "### E", "e"].join("\n"),
+    );
+    const byHeading = new Map(sections.map((s) => [s.heading, s]));
+    expect(byHeading.get("E")).toMatchObject({ level: 3, path: ["D"] });
+    expect(byHeading.get("C")).toMatchObject({ level: 3, path: ["A", "B"] });
+  });
+
   it("gives the synthetic intro section level 0 and an empty path", () => {
     expect(splitSections(DOC)[0]).toMatchObject({ heading: "(intro)", level: 0, path: [] });
   });
@@ -161,6 +173,51 @@ describe("splitSections — code fences (D-25)", () => {
     expect(splitSections(doc).map((s) => s.heading)).toEqual(["A", "B"]);
   });
 
+  /**
+   * R2 — a fence indented four or more spaces, and a tab-indented fence, are NOT
+   * recognised. That is CommonMark at the top level (four spaces is an indented code
+   * block, and a tab is four columns), and it is pinned as a known limitation rather
+   * than widened, for two reasons stated in the decision below the tests:
+   *   - MEASURED: 0 of the 802 fence lines in the 30 documents this sandbox can fetch
+   *     are indented four or more spaces or tab-indented, so widening buys nothing here;
+   *   - widening to "≤ 7 spaces" would make a genuine four-space indented code block
+   *     open a fence and swallow the headings after it — trading a rare miss for a
+   *     common one.
+   * The property that has to hold either way: an unrecognised fence must never turn
+   * its CODE into HEADINGS.
+   */
+  it("known limitation: an indented or tab-indented fence is not recognised, and its code still cannot become headings", () => {
+    const doc = [
+      "# Install",
+      "1. Run it:",
+      "",
+      "    ```bash",
+      "    # a shell comment, indented with its block",
+      "    npm install vibectx",
+      "    ```",
+      "",
+      "\t```bash",
+      "\t# another one, tab-indented",
+      "\t```",
+      "",
+      "## Usage",
+      "body",
+    ].join("\n");
+    // The limitation: neither fence opened, so neither block is a snippet.
+    expect(extractSnippets(doc)).toEqual([]);
+    // The property: the `#` lines inside them are indented with their block, and an ATX
+    // heading must start at column 0, so nothing in the code became a heading.
+    expect(splitSections(doc).map((s) => s.heading)).toEqual(["Install", "Usage"]);
+  });
+
+  it("known limitation: a column-0 '#' line inside an indented fence does become a heading", () => {
+    // The residual hole in the limitation above, pinned so it stays deliberate: the
+    // heading scanner is what protects indented code, and a code line that is NOT
+    // indented with its block is outside that protection.
+    const doc = ["# A", "    ```md", "# looks like a heading", "    ```", "text"].join("\n");
+    expect(splitSections(doc).map((s) => s.heading)).toEqual(["A", "looks like a heading"]);
+  });
+
   it("known limitation: a fence that is never closed runs to the end of the document", () => {
     // CommonMark says the same, and a stray fence breaks rendering everywhere else too,
     // so this is spec behaviour rather than a bug — pinned here so it stays deliberate.
@@ -172,7 +229,11 @@ describe("splitSections — code fences (D-25)", () => {
 });
 
 describe("rankSections — BM25 (D-24)", () => {
-  it("prefers the section holding the rare term over a long section full of a common one", () => {
+  it("prefers a short section over a long one repeating the same term (length normalization)", () => {
+    // Renamed from "prefers the section holding the rare term…" (Q1): the old name
+    // over-claimed. This document's win comes from length normalization — "Upsert" is
+    // short and "Common ground" is 400 tokens — and it passes with IDF forced to 1.
+    // The IDF contribution is falsified by the test below instead.
     const doc = [
       "# Common ground",
       "query ".repeat(400),
@@ -181,6 +242,38 @@ describe("rankSections — BM25 (D-24)", () => {
     ].join("\n");
     const ranked = rankSections(doc, "query upsert");
     expect(ranked[0].heading).toBe("Upsert");
+  });
+
+  /**
+   * Q1 — a test that fails when `idf()` is forced to return 1. Both candidate sections
+   * are the same length and neither heading matches, so term saturation and length
+   * normalization cannot separate them: the only thing that can is that "upsert" occurs
+   * in one section of twelve while "query" occurs in ten of them.
+   *
+   * The common-term section is placed FIRST in the document on purpose: with IDF forced
+   * to 1 the two score identically and the document-order tie-break puts "Beta" on top,
+   * so both the ordering and the margin below fail. MEASURED with `idf()` replaced by
+   * `() => 1`: 1.871 against 1.871, top-1 "Beta". With IDF: 4.041 against 0.229.
+   */
+  it("ranks the rare term's section over the common term's, which only IDF can do", () => {
+    const filler: string[] = [];
+    for (let i = 0; i < 10; i++) {
+      filler.push(`# Filler ${i}`, "The query builder returns query results for this entry.");
+    }
+    const equalLength = (word: string) => `${word} `.repeat(8).trim();
+    const doc = [
+      ...filler,
+      "# Beta",
+      equalLength("query"), // the common term: eleven of the twelve sections
+      "# Alpha",
+      equalLength("upsert"), // the rare term: this section only
+    ].join("\n");
+    const ranked = rankSections(doc, "query upsert");
+    expect(ranked[0].heading).toBe("Alpha");
+    // Same token count on both sides, so length normalization is neutral between them.
+    const beta = ranked.find((s) => s.heading === "Beta")!;
+    expect(ranked[0].body.split(/\s+/)).toHaveLength(beta.body.split(/\s+/).length);
+    expect(ranked[0].score).toBeGreaterThan(beta.score * 2);
   });
 
   it("boosts a term in the section's own heading over the same term in a body", () => {
@@ -319,6 +412,22 @@ describe("extractSnippets (D-26)", () => {
     expect(first.context).toBe("Create a Checkout Session and redirect the customer:");
   });
 
+  it("takes the NEAREST non-empty prose line above the fence, not the first one (Q4)", () => {
+    const doc = [
+      "# Client",
+      "This section explains three unrelated things first.",
+      "Here is a paragraph about configuration that is not about the call.",
+      "Create the client, then call it:", // <- the nearest one
+      "",
+      "",
+      "```ts",
+      "const client = new Client();",
+      "client.connect();",
+      "```",
+    ].join("\n");
+    expect(extractSnippets(doc)[0].context).toBe("Create the client, then call it:");
+  });
+
   it("falls back to the section heading when the fence opens the section", () => {
     const webhook = extractSnippets(DOC_WITH_CODE)[1];
     expect(webhook.lang).toBe("");
@@ -428,6 +537,32 @@ describe("rankSnippets + assembleSnippets (D-26)", () => {
     expect(rankSnippets(doc, "install").map((s) => s.code)).not.toContain("npm i vibectx");
     // Naming every token in the block keeps it.
     expect(rankSnippets(doc, "npm vibectx")[0].code).toBe("npm i vibectx");
+  });
+
+  /**
+   * Q2 — a test that fails when SNIPPET_CODE_WEIGHT is 0. Both blocks live in the SAME
+   * section, so the section's BM25 score is identical for both and cannot order them;
+   * only the code's own BM25 can. The matching block is deliberately the second one, so
+   * with the code term dropped the two tie and document order puts the wrong one first.
+   */
+  it("orders two blocks in one section by the code itself, not by the section (Q2)", () => {
+    const doc = [
+      "# Client calls",
+      "Read rows:",
+      "```ts",
+      "const rows = await client.findMany({ where: { active: true } });",
+      "console.log(rows);",
+      "```",
+      "Write a row:",
+      "```ts",
+      "const row = await client.upsert({ where: { id: 1 }, update: {}, create: {} });",
+      "console.log(row);",
+      "```",
+    ].join("\n");
+    const ranked = rankSnippets(doc, "upsert");
+    expect(ranked).toHaveLength(2); // both survive: the section itself matches
+    expect(ranked[0].code).toContain("client.upsert(");
+    expect(ranked[0].score).toBeGreaterThan(ranked[1].score);
   });
 
   it("breaks ties in document order and is deterministic", () => {
@@ -635,6 +770,27 @@ describe("rankLinks", () => {
       "https://fastify.dev/docs/Hooks.md", // 2 hits
       "https://fastify.dev/docs/Reference/Request.md", // 1 hit, earlier
       "https://fastify.dev/docs/Validation.md", // 1 hit, later
+    ]);
+  });
+
+  /**
+   * Q5 — rankLinks must use the D-23 tokenizer, not the legacy split-on-non-alphanumerics
+   * one. Both cases below score 0 under the legacy tokenizer, so the links would be
+   * dropped and the page never followed: `useQueries` is one opaque token there, and
+   * `routing` never meets `routes`.
+   */
+  it("matches an index link across camelCase and inflection (Q5)", () => {
+    const index = [
+      "- [useQueries reference](/docs/use-queries.md)",
+      "- [Routing](/docs/routing.md)",
+      "- [Deployment](/docs/deploy.md)",
+    ].join("\n");
+    const source = "https://example.com/llms.txt";
+    expect(rankLinks(index, "use queries", source, 5).map((l) => l.url)).toEqual([
+      "https://example.com/docs/use-queries.md",
+    ]);
+    expect(rankLinks(index, "routes", source, 5).map((l) => l.url)).toEqual([
+      "https://example.com/docs/routing.md",
     ]);
   });
 
