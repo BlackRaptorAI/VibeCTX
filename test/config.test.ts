@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -227,9 +227,34 @@ describe("discoverConfig: file kind (D-15)", () => {
     expect(readConfigFile(res.files[0].path).libraries[0].name).toBe("x");
   });
 
-  it("refuses a directory named vibectx.config.json with a clear message", () => {
+  it("D-19: a DISCOVERED path that is not a regular file is carried as a skipped file, not thrown", () => {
     mkdirSync(join(repo, CONFIG_FILENAME));
-    expect(() => discover()).toThrow(/vibectx\.config\.json: not a regular file/);
+    const res = discover();
+    expect(res.files).toEqual([{ path: join(repo, CONFIG_FILENAME), scope: "project", legacy: false, error: "not a regular file" }]);
+    expect(describeConfig(res, { cwd: repo, home })[0]).toBe(
+      "config: ./vibectx.config.json (project) — NOT LOADED: not a regular file",
+    );
+  });
+
+  it("refuses a directory an EXPLICIT --config names, with a clear message", () => {
+    mkdirSync(join(repo, "explicit.json"));
+    expect(() => readConfigFile(join(repo, "explicit.json"))).toThrow(/explicit\.json: not a regular file/);
+  });
+
+  it("reports an unreadable file by its errno, never by a stack or the system message (S1)", () => {
+    // A regular file whose read fails: /proc/self/mem stats as a zero-length regular file
+    // and answers EIO. Where /proc does not exist, a mode-000 file answers EACCES instead
+    // (and running as root, which can read it anyway, leaves nothing to assert).
+    if (existsSync("/proc/self/mem")) {
+      expect(() => readConfigFile("/proc/self/mem")).toThrow("/proc/self/mem: cannot be read (EIO)");
+    }
+    const path = write(repo, "locked.json", CONFIG("x", "https://x.example.com/llms.txt"));
+    chmodSync(path, 0o000);
+    try {
+      if (process.getuid?.() !== 0) expect(() => readConfigFile(path)).toThrow(/locked\.json: cannot be read \(EACCES\)$/);
+    } finally {
+      chmodSync(path, 0o600);
+    }
   });
 });
 

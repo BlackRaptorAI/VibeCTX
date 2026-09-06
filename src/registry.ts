@@ -614,7 +614,7 @@ export function loadRegistryFrom(resolution: ConfigResolution, opts: LoadRegistr
   }
   const files = resolution.files.map((f) => {
     const display = displayPath(f.path, cwd, home);
-    const error = skipped.get(f.path);
+    const error = f.error ?? skipped.get(f.path); // discovery's own verdict, else the loader's
     return error === undefined ? { ...f, display } : { ...f, display, error };
   });
   return { entries, config: { files, notes: resolution.notes } };
@@ -649,6 +649,7 @@ function buildEntries(files: readonly ConfigFile[], cwd: string, home: string): 
   const fileOf = new Map<string, ConfigSite>();
   const byDisplay = new Map<string, ConfigFile>();
   for (const file of files) {
+    if (file.error !== undefined) continue; // discovery already decided this one is unusable (D-19)
     const display = displayPath(file.path, cwd, home);
     byDisplay.set(display, file);
     try {

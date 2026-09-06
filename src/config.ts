@@ -159,30 +159,38 @@ function pickInDirectory(
 ): ConfigFile | undefined {
   const main = join(dir, mainName);
   const legacy = join(dir, LEGACY_CONFIG_FILENAME);
-  const hasMain = isRegularFile(main, show);
-  const hasLegacy = isRegularFile(legacy, show);
-  if (hasMain) {
-    if (hasLegacy) {
+  const mainKind = fileKind(main);
+  const legacyKind = fileKind(legacy);
+  if (mainKind !== "absent") {
+    if (legacyKind !== "absent") {
       notes.push(`${show(legacy)} is ignored: ${show(main)} in the same directory takes precedence`);
     }
-    return { path: main, scope, legacy: false };
+    return withKind({ path: main, scope, legacy: false }, mainKind);
   }
-  if (hasLegacy) {
-    notes.push(
-      `${show(legacy)} is deprecated: rename it to ${mainName} (the legacy name is accepted through 0.2.x)`,
-    );
-    return { path: legacy, scope, legacy: true };
+  if (legacyKind !== "absent") {
+    notes.push(`${show(legacy)} is deprecated: rename it to ${mainName} (the legacy name is accepted through 0.2.x)`);
+    return withKind({ path: legacy, scope, legacy: true }, legacyKind);
   }
   return undefined;
 }
 
-/** True for a regular file (symlinks are followed — the user's own tree). Anything else that
- *  exists under a config name is refused loudly rather than silently skipped (D-15). */
-function isRegularFile(path: string, show: (p: string) => string): boolean {
-  const st = statSync(path, { throwIfNoEntry: false });
-  if (st === undefined) return false;
-  if (!st.isFile()) throw new ConfigError(show(path), "not a regular file");
-  return true;
+/** `file` when a regular file (symlinks are followed — the user's own tree), `other` for a
+ *  directory / device / anything unreadable, `absent` when nothing is there. */
+function fileKind(path: string): "file" | "other" | "absent" {
+  try {
+    const st = statSync(path, { throwIfNoEntry: false });
+    if (st === undefined) return "absent";
+    return st.isFile() ? "file" : "other";
+  } catch {
+    return "other"; // it exists in some form we cannot inspect: reported, never silently skipped
+  }
+}
+
+/** D-19: a DISCOVERED path that is not a usable file is a skipped source, not a fatal error —
+ *  the layers below it still load. (An explicit `--config` naming one still fails in
+ *  `readConfigFile`, where the same check is fatal.) */
+function withKind(file: ConfigFile, kind: "file" | "other"): ConfigFile {
+  return kind === "file" ? file : { ...file, error: "not a regular file" };
 }
 
 /** D-18 display rule: relative to cwd when beneath it, `~`-abbreviated when under home,
@@ -327,6 +335,12 @@ function issueLocator(path: readonly (string | number)[], json: unknown): string
   return configLocator(index, String(field), entry?.name);
 }
 
+/** `EACCES`, `EIO`, … — the errno alone, never the system message (which repeats the path). */
+function errnoOf(e: unknown): string {
+  const code = (e as NodeJS.ErrnoException | undefined)?.code;
+  return typeof code === "string" && code.length > 0 ? clipText(code, 32) : "unknown error";
+}
+
 /** Drop a leading UTF-8 BOM (editors on Windows write one; JSON.parse rejects it). */
 function stripBom(text: string): string {
   return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
@@ -355,11 +369,24 @@ function jsonErrorMessage(text: string, err: unknown): string {
  * pass a cwd-relative form); everything it throws is a single line safe to print.
  */
 export function readConfigFile(path: string, display: string = path): { libraries: LibraryEntry[] } {
-  const st = statSync(path, { throwIfNoEntry: false });
+  let st;
+  try {
+    st = statSync(path, { throwIfNoEntry: false });
+  } catch (e) {
+    throw new ConfigError(display, `cannot be read (${errnoOf(e)})`);
+  }
   if (st === undefined) throw new ConfigError(display, "not found");
   if (!st.isFile()) throw new ConfigError(display, "not a regular file");
   if (st.size > MAX_CONFIG_BYTES) throw new ConfigError(display, "larger than 1 MiB");
-  const text = stripBom(readFileSync(path, "utf8"));
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (e) {
+    // Permissions, a vanished file, an I/O error: the errno is the whole story, and the
+    // system message would repeat the path (S1 keeps the line to one copy of it).
+    throw new ConfigError(display, `cannot be read (${errnoOf(e)})`);
+  }
+  const text = stripBom(raw);
   let json: unknown;
   try {
     json = JSON.parse(text);
