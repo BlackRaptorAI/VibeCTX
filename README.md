@@ -524,7 +524,10 @@ a flag that cannot be honoured should never be silently ignored.
 **Only directories you own are searched.** The walk-up stops at the first directory whose
 owner is not you, and reads no config from it — the same reasoning as git's `safe.directory`.
 On a shared machine, nobody else can leave a `.git` and a `vibectx.config.json` in a
-directory above yours and choose where your agent's documentation comes from.
+directory above yours and choose where your agent's documentation comes from. If a config
+*does* sit in the directory the check stopped at, it is named as ignored rather than passed
+over in silence (this is what you will see if your repository is owned by another account,
+or bind-mounted with a different uid — pass `--config` explicitly there).
 
 ### Upgrading from 0.1.x
 

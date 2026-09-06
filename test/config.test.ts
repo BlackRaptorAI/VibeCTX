@@ -167,6 +167,18 @@ describe("discoverConfig: the walk-up is confined to the repository (D-15)", () 
     expect(discover({ cwd: join(repo, "src"), ownerUid }).files.map((f) => f.path)).toEqual([own]);
   });
 
+  it("D-20: a config the owner check skipped is NAMED, never silently dropped", () => {
+    write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
+    const mine = process.getuid?.() ?? 0;
+    const res = discover({ cwd: join(repo, "src"), ownerUid: (dir) => (dir === repo ? mine + 1 : mine) });
+    expect(res.files).toEqual([]);
+    // A parent is not beneath cwd, so the display rule shows it absolute.
+    expect(res.notes).toEqual([`${join(repo, CONFIG_FILENAME)} is ignored: ${repo} is owned by another user`]);
+    // No config in the foreign directory: nothing to say, and no noise on every start.
+    rmSync(join(repo, CONFIG_FILENAME));
+    expect(discover({ cwd: join(repo, "src"), ownerUid: (dir) => (dir === repo ? mine + 1 : mine) }).notes).toEqual([]);
+  });
+
   it("D-20: a foreign-owned working directory yields no project config at all", () => {
     write(repo, CONFIG_FILENAME, CONFIG("planted", "https://planted.example.com/llms.txt"));
     const uid = vi.spyOn(process, "getuid").mockReturnValue((process.getuid?.() ?? 0) + 1);

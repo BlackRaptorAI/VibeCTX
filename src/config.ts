@@ -87,11 +87,24 @@ export function discoverConfig(opts: DiscoverConfigOptions): ConfigResolution {
   const userDir = userConfigDir(opts.env, home);
   const user = userDir === undefined ? undefined : pickInDirectory(userDir, "user", USER_CONFIG_FILENAME, notes, show);
   if (user) files.push(user); // lowest precedence first
-  for (const dir of projectDirs(opts.cwd, opts.ownerUid ?? directoryUid)) {
+  const walk = projectDirs(opts.cwd, opts.ownerUid ?? directoryUid);
+  for (const dir of walk.dirs) {
     const hit = pickInDirectory(dir, "project", CONFIG_FILENAME, notes, show);
     if (hit) {
       files.push(hit); // nearest wins; parents are NOT layered (monorepo layering is a follow-up)
       break;
+    }
+  }
+  // D-20 + D-18: if the walk stopped on a foreign-owned directory that DOES hold a config,
+  // say so. Silence would leave a team believing their committed file is in force — the
+  // failure mode D-19 exists to prevent — while a directory without one says nothing, so
+  // an ordinary start under /tmp stays quiet.
+  if (files.length === 0 && walk.foreign !== undefined) {
+    for (const name of [CONFIG_FILENAME, LEGACY_CONFIG_FILENAME]) {
+      if (fileKind(join(walk.foreign, name)) !== "absent") {
+        notes.push(`${show(join(walk.foreign, name))} is ignored: ${show(walk.foreign)} is owned by another user`);
+        break;
+      }
     }
   }
   return { files, notes };
@@ -133,18 +146,18 @@ function directoryUid(dir: string): number | undefined {
  * beside a `/tmp/x/vibectx.config.json` and wait for someone to run a server under it.
  * Where uids do not exist (Windows: no `process.getuid`) the check is skipped.
  */
-function projectDirs(cwd: string, ownerUid: (dir: string) => number | undefined): string[] {
+function projectDirs(cwd: string, ownerUid: (dir: string) => number | undefined): { dirs: string[]; foreign?: string } {
   const start = fromCwd(cwd);
   const mine = typeof process.getuid === "function" ? process.getuid() : undefined;
   const trusted = (dir: string): boolean => mine === undefined || ownerUid(dir) === mine;
   const dirs: string[] = [];
   let cur = start;
   for (;;) {
-    if (!trusted(cur)) return dirs;
+    if (!trusted(cur)) return { dirs, foreign: cur };
     dirs.push(cur);
-    if (existsSync(join(cur, ".git"))) return dirs;
+    if (existsSync(join(cur, ".git"))) return { dirs };
     const parent = dirname(cur);
-    if (parent === cur) return [start]; // no repository anywhere above: cwd only
+    if (parent === cur) return { dirs: [start] }; // no repository anywhere above: cwd only
     cur = parent;
   }
 }
