@@ -34,6 +34,7 @@ npx -y @blackraptorai/vibectx
 |---|---|
 | `list_libraries()` | Registry + per-library cache status |
 | `get_docs(library, topic?, maxTokens?, mode?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head |
+| `search(query, maxTokens?, libraries?)` | Search **every cached library at once** and get the best sections grouped by library — for when you don't know which library owns a concept. Cache-only and offline; see [Don't know which library? `search`](#dont-know-which-library-search) |
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved) |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
@@ -137,6 +138,99 @@ matches you get, in full:
 ```
 No code snippets matched "<topic>" in <library> docs (source: <url>). Try mode "sections" or broader terms.
 ```
+
+## Don't know which library? `search`
+
+`get_docs` needs a library name. Half the time you don't have one: *"how do I stream a
+response to the client"* could be Next.js, the AI SDK or Hono, and guessing wrong costs a
+round trip. `search` runs one query across **every document already in your cache** and
+groups the hits by library, so the answer to "which library documents this?" comes back
+with the section that proves it.
+
+```bash
+npx -y @blackraptorai/vibectx search "server-sent events streaming"
+npx -y @blackraptorai/vibectx search "server-sent events" --library hono --library ai-sdk
+npx -y @blackraptorai/vibectx search "revalidate" --max-tokens 1500 --json
+```
+
+~~~markdown
+# acme-pay
+Source: https://docs.acme-pay.example.com/llms-full.txt
+
+## Acme Pay > Webhooks > Listening for events
+
+Open a server-sent events stream to receive payment events as they happen:
+
+```js
+const events = acme.events.stream({ types: ['payment.succeeded'] });
+```
+
+# acme-edge
+Source: https://docs.acme-edge.example.com/llms-full.txt
+
+## Acme Edge > Streaming responses
+
+Return a `ReadableStream` from a handler and Acme Edge flushes each chunk as it is produced.
+
+Searched 2 of 2 configured libraries; 2 matched.
+~~~
+
+**Where that response came from.** `acme-pay` and `acme-edge` are made-up libraries on a
+[reserved documentation domain](https://datatracker.ietf.org/doc/html/rfc2606), and the block
+above is the real, unedited output of this code against a fixture — pinned by
+`test/search.test.ts` ("produces the README's search example verbatim"), which fails if the
+two ever drift. It is the *shape* of a response, not a capture from any vendor's site.
+
+**Cache-only, by design.** `search` never fetches, never resolves a new package name and
+never touches the network — so it is instant, deterministic, and works on a plane. The flip
+side is that it searches exactly what is already cached, which is why every response ends
+with how many libraries it looked at, out of how many are configured, and how to cache the
+rest:
+
+```
+Searched 5 of 30 configured libraries; 4 matched.
+Not cached, so not searched: supabase, tailwindcss, shadcn, stripe, expo, drizzle-orm, prisma, trpc and 17 more. Run `vibectx warm` in your project to cache your dependencies' docs, or call get_docs for one library.
+```
+
+So the pairing is: **`vibectx warm` once, then `search` freely.**
+
+**How results are put together.** Same tokenizer, same BM25 and the same field weighting as
+`get_docs` ([How ranking works](#how-ranking-works)) — but the corpus is every section of
+every cached document at once, so a rare term picks the right library out of thirty instead
+of the wordiest one. Libraries are ordered by their best section's score, sections within a
+library by score, ties by document order. The `maxTokens` budget (default 4000) is shared
+across libraries and spent **round-robin** — the best library's best section first, then the
+next library's best, and so on — because the question is *which library*, and one verbose
+library filling the whole response would defeat that. At most 8 libraries appear in one
+response. Each group carries its `Source:` line, and a cached copy past its TTL is marked
+stale with the `vibectx refresh` line that would fix it.
+
+`--library <name>` (repeatable; `libraries: [...]` over MCP) narrows the search; names and
+aliases both work, and an unknown one is *reported in the response* rather than failing the
+search. Exit codes: `0` something matched, `1` nothing matched, `2` usage or config error.
+
+### The search index
+
+To avoid re-reading and re-tokenizing every `llms-full.txt` on every query, `search` keeps a
+small inverted index at `<cache>/index.json`. Three things are worth knowing about it:
+
+- **It is a derived cache, never a source of truth.** It stores no document text at all —
+  only per-section token counts and, per term, which sections it occurs in. Bodies and
+  heading paths are read out of the cached document at query time. Every entry also carries
+  a content hash, and an entry whose hash does not match the cached document is ignored and
+  rebuilt. So a stale, hand-edited or planted index cannot make `search` return a single word
+  the cache does not hold — at worst it costs a slower query.
+- **It maintains itself.** `warm`, the startup autowarm, `get_docs` and `refresh` update it
+  whenever they write a library's primary document, and `refresh` invalidates that library's
+  entry first. Anything missing is rebuilt inside the next `search`. Deleting the file is
+  always safe: the next search rebuilds what it needs and answers the same way.
+- **What it costs is vocabulary, not bytes.** MEASURED on the build sandbox: over a 5.63 MB
+  fixture corpus in 12 documents, the file is 0.55 MB (10% of the corpus), a warm search takes
+  **44 ms**, and the one-off cold build takes ~300 ms. A pathological corpus in which every
+  token is globally unique is the other extreme — 146% of the corpus and 100 ms for 1.65 MB.
+  Both figures are printed by `test/search-perf.test.ts` on every run. Documents over 8 MiB
+  are not indexed at all; they are tokenized at query time and the response says so for that
+  library.
 
 ## Warm your project's docs
 
@@ -748,6 +842,11 @@ cache without touching the network (`unknown` until something is cached).
   links on the source document's host or the entry's `allowedHosts` are followed, checked
   again after redirects; skipped, oversize or unreachable links are reported in the
   response rather than dropped silently.
+- **Cross-library search:** `search(query)` runs one BM25 query over every cached
+  document and groups the hits by library, for the common case where the agent does not
+  know which library owns a concept. Cache-only and offline; backed by a derived,
+  self-maintaining index that stores no document text — see
+  [Don't know which library? `search`](#dont-know-which-library-search).
 - **Deterministic retrieval:** markdown heading-split + BM25 scoring over a camelCase-aware,
   lightly stemmed tokenizer — see [How ranking works](#how-ranking-works). No embeddings,
   no external calls at query time, same answer every run.

@@ -353,3 +353,73 @@ describe("runSearch · invalidation on refresh (PAR-659, D-34 — the done-when 
     expect(readIndex().libraries.get("hono")!.hash).not.toBe(documentHash(HONO_DOC));
   });
 });
+
+/**
+ * The README's `search` example is REAL output of this code against a fixture, not a capture
+ * from any vendor's documentation site — the same discipline the snippets example follows
+ * (PAR-658's honesty finding). `acme-pay` and `acme-edge` are made-up libraries on a
+ * reserved documentation domain (RFC 2606). If the renderer changes, this fails and the
+ * README must be regenerated.
+ */
+describe("the README's search example (PAR-659)", () => {
+  const PAY_URL = "https://docs.acme-pay.example.com/llms-full.txt";
+  const EDGE_URL = "https://docs.acme-edge.example.com/llms-full.txt";
+  const PAY = [
+    "# Acme Pay",
+    "",
+    "## Webhooks",
+    "",
+    "### Listening for events",
+    "",
+    "Open a server-sent events stream to receive payment events as they happen:",
+    "",
+    "```js",
+    "const events = acme.events.stream({ types: ['payment.succeeded'] });",
+    "```",
+  ].join("\n");
+  const EDGE = [
+    "# Acme Edge",
+    "",
+    "## Streaming responses",
+    "",
+    "Return a `ReadableStream` from a handler and Acme Edge flushes each chunk as it is produced.",
+    "",
+    "## Caching",
+    "",
+    "Set `cache-control` on the response to have the edge keep a copy.",
+  ].join("\n");
+
+  it("produces the README's search example verbatim", () => {
+    writeCache("acme-pay", PAY_URL, PAY);
+    writeCache("acme-edge", EDGE_URL, EDGE);
+    const reg: Registry = {
+      entries: new Map([
+        ["acme-pay", { name: "acme-pay", urls: [PAY_URL] }],
+        ["acme-edge", { name: "acme-edge", urls: [EDGE_URL] }],
+      ]),
+    };
+    expect(formatSearchResults(runSearch(reg, { query: "server-sent events streaming" }))).toBe(
+      [
+        "# acme-pay",
+        `Source: ${PAY_URL}`,
+        "",
+        "## Acme Pay > Webhooks > Listening for events",
+        "",
+        "Open a server-sent events stream to receive payment events as they happen:",
+        "",
+        "```js",
+        "const events = acme.events.stream({ types: ['payment.succeeded'] });",
+        "```",
+        "",
+        "# acme-edge",
+        `Source: ${EDGE_URL}`,
+        "",
+        "## Acme Edge > Streaming responses",
+        "",
+        "Return a `ReadableStream` from a handler and Acme Edge flushes each chunk as it is produced.",
+        "",
+        "Searched 2 of 2 configured libraries; 2 matched.",
+      ].join("\n"),
+    );
+  });
+});
