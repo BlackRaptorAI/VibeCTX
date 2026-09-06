@@ -180,7 +180,11 @@ can edit the file: a `url` that is not an https URL is dropped from its row; a `
 is not a plain relative manifest path (`package.json`, `sub/requirements.txt` — never
 absolute, never containing `..`) drops the whole row, as do a bad `name`, `ecosystem`,
 `status` or `failedAt`; an over-long `library` is dropped from its row and an over-long
-`note` is truncated. Control, bidi and zero-width characters are stripped from every field.
+`note` is truncated. `warmedAt` and `failedAt` must be strict ISO-8601 UTC instants of the
+form `2026-09-06T06:00:00.000Z` — `Date.parse` on its own accepts a "date" with a trailing
+parenthesised comment, and `warmedAt` is printed verbatim in the `list_libraries` summary
+line, so a bad `warmedAt` makes the whole record read as absent. Control, bidi and
+zero-width characters are stripped from every field.
 
 **The `list_libraries` summary line.** When a record exists for the server's working
 directory, `list_libraries` ends with `Project deps (<dir>): N cached, M unresolved, K

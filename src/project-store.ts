@@ -17,11 +17,13 @@ import { cleanText, type DependencyEcosystem } from "./project-deps.js";
  * boundary, so the file is written atomically (temp file + rename) and EVERY field is
  * re-validated on read against the rule that field has, not merely typechecked. In full
  * (K1): `schemaVersion` must equal ours, `dir` must equal the directory asked for,
- * `manifests` must be an array of strings, `warmedAt` must be a parseable date, and
- * `dependencies` must be an array — any of those failing makes the record absent. Then, per
- * row: `name` 1…214 characters, `ecosystem` exactly npm or pypi, `source` a relative
- * manifest path (no absolute path, no `..` segment), `status` one of WARM_STATUSES and
- * `failedAt` a parseable date when present — each of those failing drops the ROW; `library`
+ * `manifests` must be an array of bounded strings (each cleaned), `warmedAt` must be a strict
+ * ISO-8601 UTC instant (`Date.parse` alone accepts `2020-01-01 (‮evil)`, and that string
+ * lands verbatim in the list_libraries footer), and `dependencies` must be an array — any of
+ * those failing makes the record absent. Then, per row: `name` 1…214 characters, `ecosystem`
+ * exactly npm or pypi, `source` a relative manifest path (no absolute path, no `..` segment),
+ * `status` one of WARM_STATUSES and `failedAt` a strict ISO-8601 instant when present — each
+ * of those failing drops the ROW; `library`
  * over 214 characters and a `url` that is not an https URL passing `sanitizeRemoteUrl` drop
  * that FIELD; a `note` over 512 characters is truncated. Every surviving string passes
  * through `cleanText`. A corrupt file reads as absent. Upgrade policy (K2): a file whose
@@ -162,6 +164,37 @@ function validSource(value: unknown): value is string {
   return !value.split("/").includes("..");
 }
 
+/**
+ * A UTC ISO-8601 instant exactly as `Date.prototype.toISOString` writes it — the only shape
+ * anything here ever produces. `Date.parse` alone is far too lenient to validate a timestamp
+ * off a trust boundary: it accepts `2020-01-01 (‮evil)`, comment and bidi override and
+ * all, and that string is rendered verbatim in the list_libraries footer. Shape first, then
+ * `Date.parse` to reject a well-shaped impossibility like `2026-13-45T06:00:00Z`.
+ */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+function validIsoInstant(value: unknown): value is string {
+  return typeof value === "string" && ISO_INSTANT.test(value) && Number.isFinite(Date.parse(value));
+}
+
+/**
+ * `manifests` is descriptive — it is echoed, never opened — so each entry is bounded and
+ * CLEANED rather than dropped: losing an entry would misreport what the run read, while a
+ * bidi override in one must never survive into anything that renders it. An entry that is
+ * empty, over the cap, or empty once cleaned makes the record absent: our writer never
+ * produces one, so the file is not ours.
+ */
+function cleanManifests(value: unknown): string[] | undefined {
+  if (!isStringList(value)) return undefined;
+  const out: string[] = [];
+  for (const raw of value) {
+    if (raw.length === 0 || raw.length > MAX_SOURCE) return undefined;
+    const text = cleanText(raw);
+    if (text.length === 0) return undefined;
+    out.push(text);
+  }
+  return out;
+}
+
 /** One plain line of at most MAX_NOTE characters; truncated, never dropped — the reason a
  *  name failed is worth showing even when whatever wrote the file was over-generous. */
 function cleanNote(value: unknown): string | undefined {
@@ -180,7 +213,7 @@ function cleanNote(value: unknown): string | undefined {
  *   ecosystem  exactly "npm" or "pypi"          — row dropped otherwise
  *   source     a relative manifest path         — row dropped otherwise (see validSource)
  *   status     one of WARM_STATUSES             — row dropped otherwise (K3)
- *   failedAt   a parseable date when present    — row dropped otherwise
+ *   failedAt   a strict ISO-8601 instant when present — row dropped otherwise
  *   library    1…214 characters                 — FIELD dropped otherwise
  *   url        passes sanitizeRemoteUrl (https, no credentials, no forbidden host)
  *                                               — FIELD dropped otherwise
@@ -196,7 +229,7 @@ function toWarmRow(raw: unknown): WarmRow | undefined {
   if (ecosystem !== "npm" && ecosystem !== "pypi") return undefined;
   if (!validSource(source)) return undefined;
   if (typeof status !== "string" || !(WARM_STATUSES as readonly string[]).includes(status)) return undefined; // K3: unknown status → row dropped
-  if (failedAt !== undefined && (typeof failedAt !== "string" || Number.isNaN(Date.parse(failedAt)))) return undefined;
+  if (failedAt !== undefined && !validIsoInstant(failedAt)) return undefined;
   return makeWarmRow({
     name,
     ecosystem,
@@ -209,18 +242,26 @@ function toWarmRow(raw: unknown): WarmRow | undefined {
   });
 }
 
-/** Validate a parsed file into a ProjectRecord for `dir`; undefined when anything essential is off. */
+/**
+ * Validate a parsed file into a ProjectRecord for `dir`; undefined when anything essential is
+ * off. Every string here either reaches the list_libraries footer (`dir`, `warmedAt`) or is
+ * of the same kind as one that does (`manifests`), so each is checked against its actual
+ * rule: `warmedAt` a strict ISO-8601 instant (record absent otherwise) and `manifests`
+ * bounded and cleaned. `dir` must equal the directory asked for, so it is whatever the
+ * caller's own path is — it is cleaned at the render boundary, not refused here.
+ */
 export function toProjectRecord(parsed: unknown, dir: string): ProjectRecord | undefined {
   if (!isRecord(parsed) || parsed.schemaVersion !== PROJECT_RECORD_SCHEMA_VERSION) return undefined;
   if (parsed.dir !== normaliseProjectDir(dir)) return undefined;
-  if (!isStringList(parsed.manifests) || !Array.isArray(parsed.dependencies)) return undefined;
-  if (typeof parsed.warmedAt !== "string" || Number.isNaN(Date.parse(parsed.warmedAt))) return undefined;
+  const manifests = cleanManifests(parsed.manifests);
+  if (manifests === undefined || !Array.isArray(parsed.dependencies)) return undefined;
+  if (!validIsoInstant(parsed.warmedAt)) return undefined;
   const dependencies: WarmRow[] = [];
   for (const raw of parsed.dependencies) {
     const row = toWarmRow(raw);
     if (row) dependencies.push(row);
   }
-  return { schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir: parsed.dir, manifests: parsed.manifests, dependencies, warmedAt: parsed.warmedAt };
+  return { schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir: parsed.dir, manifests, dependencies, warmedAt: parsed.warmedAt };
 }
 
 /** The record for `dir`, or undefined when absent, corrupt, of another schema, or for another dir. */
@@ -265,7 +306,10 @@ export function writeProjectRecord(record: ProjectRecord, warn: (message: string
   return true;
 }
 
-/** The one line list_libraries appends when a record exists for the working directory. */
+/** The one line list_libraries appends when a record exists for the working directory. S3:
+ *  `dir` and `warmedAt` pass through `cleanText` here as well as being validated on read —
+ *  this function is the render boundary, and it must hold for any ProjectRecord it is handed,
+ *  not only for one that came back through `toProjectRecord`. */
 export function summariseProjectRecord(record: ProjectRecord): string {
   let cached = 0;
   let denied = 0;
@@ -275,5 +319,5 @@ export function summariseProjectRecord(record: ProjectRecord): string {
     else if (row.status === "denied (noise list)") denied += 1;
     else unresolved += 1;
   }
-  return `Project deps (${record.dir}): ${cached} cached, ${unresolved} unresolved, ${denied} denied — warmed ${record.warmedAt}`;
+  return `Project deps (${cleanText(record.dir)}): ${cached} cached, ${unresolved} unresolved, ${denied} denied — warmed ${cleanText(record.warmedAt)}`;
 }

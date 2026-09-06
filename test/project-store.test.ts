@@ -10,6 +10,7 @@ import {
   summariseProjectRecord,
   type ProjectRecord,
 } from "../src/project-store.js";
+import { listLibrariesText } from "../src/list-libraries.js";
 
 let dir: string;
 let project: string;
@@ -195,5 +196,43 @@ describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHE
       "utf8",
     );
     expect(readProjectRecord(project)?.dependencies).toEqual([{ ...rows[3], failedAt: "2026-09-06T05:00:00.000Z" }]);
+  });
+
+  it("K1/S3: warmedAt is a STRICT ISO-8601 instant and no record string can carry a bidi override into the list_libraries footer", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const RLO = "‮";
+    const write = (r: unknown) => writeFileSync(projectRecordPath(project), JSON.stringify(r), "utf8");
+
+    // Date.parse is lenient enough to accept a "date" with a trailing parenthesised comment,
+    // which is how a bidi override reaches the footer. Strict ISO-8601 or the record is absent.
+    write(record({ warmedAt: `2020-01-01 (${RLO}evil)` }));
+    expect(readProjectRecord(project)).toBeUndefined();
+    for (const bad of ["2026-09-06", "06 Sep 2026 06:00:00 GMT", "2026-09-06T06:00:00.000+01:00", "2026-13-45T06:00:00Z", ""]) {
+      write(record({ warmedAt: bad }));
+      expect(readProjectRecord(project), bad).toBeUndefined();
+    }
+    for (const good of ["2026-09-06T06:00:00Z", "2026-09-06T06:00:00.000Z"]) {
+      write(record({ warmedAt: good }));
+      expect(readProjectRecord(project)?.warmedAt, good).toBe(good);
+    }
+
+    // manifests are echoed, never opened: each entry is bounded and CLEANED, not dropped.
+    write(record({ manifests: [`package.json${RLO}`, "sub/requirements.txt"] }));
+    expect(readProjectRecord(project)?.manifests).toEqual(["package.json", "sub/requirements.txt"]);
+    write(record({ manifests: [RLO] })); // empty once cleaned: not ours
+    expect(readProjectRecord(project)).toBeUndefined();
+    write(record({ manifests: ["x".repeat(257)] }));
+    expect(readProjectRecord(project)).toBeUndefined();
+
+    // …and `dir`, plus warmedAt, are cleaned at the render boundary itself.
+    const summary = summariseProjectRecord({ ...record(), dir: `${project}${RLO}`, warmedAt: `2026-09-06T06:00:00.000Z${RLO}` });
+    expect(summary).not.toContain(RLO);
+
+    // The footer list_libraries actually prints never carries one.
+    write(record({ warmedAt: `2020-01-01 (${RLO}evil)` }));
+    const registry = { entries: new Map([["react", { name: "react", urls: ["https://react.dev/llms.txt"] }]]) };
+    const text = listLibrariesText(registry, { projectDir: project, warming: new Set<string>() });
+    expect(text).not.toContain(RLO);
+    expect(text).not.toContain("Project deps"); // the record was rejected outright
   });
 });
