@@ -259,3 +259,102 @@ describe("dispatchCli resolve (PAR-655)", () => {
     expect(spy).toHaveBeenCalledTimes(2);
   });
 });
+
+import { parseWarmArgs, WARM_USAGE } from "../src/cli.js";
+import { existsSync } from "node:fs";
+import { mkdtempSync as mkdtemp2 } from "node:fs";
+
+describe("parseWarmArgs (PAR-656)", () => {
+  it("takes an optional directory plus --offline / --json / --config", () => {
+    expect(parseWarmArgs([])).toEqual({ json: false, offline: false });
+    expect(parseWarmArgs(["./app"])).toEqual({ json: false, offline: false, dir: "./app" });
+    expect(parseWarmArgs(["--offline", "--json", "--config", "c.json", "/p"])).toEqual({ json: true, offline: true, config: "c.json", dir: "/p" });
+  });
+
+  it("rejects two directories, unknown flags and a flag missing its value", () => {
+    expect(() => parseWarmArgs(["a", "b"])).toThrow(/Unexpected argument "b"/);
+    expect(() => parseWarmArgs(["--bogus"])).toThrow(/Unknown option "--bogus"/);
+    expect(() => parseWarmArgs(["--config"])).toThrow(/--config requires a value/);
+    expect(() => parseWarmArgs(["--library", "x"])).toThrow(/Unknown option "--library"/);
+  });
+});
+
+describe("dispatchCli warm (PAR-656)", () => {
+  let project: string;
+  beforeEach(() => {
+    project = mkdtemp2(join(tmpdir(), "vibectx-cli-proj-"));
+  });
+  afterEach(() => {
+    rmSync(project, { recursive: true, force: true });
+  });
+
+  it("warms a directory: table on stdout, exit 0 when everything is cached, record written", async () => {
+    writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19" }, devDependencies: { eslint: "9" } }), "utf8");
+    const config = writeConfig([{ name: "react", urls: [REACT_URL] }]);
+    stubFetch({ [REACT_URL]: REACT_DOC });
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--config", config], a)).toBe(0);
+    const text = a.out.join("");
+    expect(text).toMatch(/^vibectx warm · /);
+    expect(text).toMatch(/\nreact\s+react\s+cached\s+https:\/\/react\.dev\/llms-full\.txt\n/);
+    expect(text).toContain("1/1 dependencies cached · 1 denied (noise list)");
+    expect(a.err).toEqual([]);
+    expect(existsSync(join(dir, "projects"))).toBe(true);
+  });
+
+  it("--json emits schemaVersion 1 first; --offline never fetches; exit 1 when something is not cached", async () => {
+    writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19", hono: "4" } }), "utf8");
+    writeCache("react", REACT_URL, REACT_DOC);
+    const spy = stubFetch({});
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "warm", "--offline", "--json", project], a)).toBe(1);
+    expect(spy).not.toHaveBeenCalled();
+    const report = JSON.parse(a.out.join(""));
+    expect(Object.keys(report).slice(0, 4)).toEqual(["schemaVersion", "generatedAt", "dir", "offline"]);
+    expect(report.schemaVersion).toBe(1);
+    expect(report.offline).toBe(true);
+    expect(report.dependencies.map((d: { name: string; status: string }) => [d.name, d.status])).toEqual([
+      ["react", "already fresh"],
+      ["hono", "unreachable"],
+    ]);
+  });
+
+  it("defaults the directory to the working directory", async () => {
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+    try {
+      writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19" } }), "utf8");
+      writeCache("react", REACT_URL, REACT_DOC);
+      stubFetch({});
+      const a = io();
+      expect(await dispatchCli(["node", "dist/index.js", "warm", "--offline"], a)).toBe(0);
+      expect(a.out.join("")).toContain(`vibectx warm · ${project}`);
+    } finally {
+      cwd.mockRestore();
+    }
+  });
+
+  it("exits 2 with usage on a bad flag, on a missing manifest, on a non-directory, and on a bad config", async () => {
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "warm", "--bogus"], a)).toBe(2);
+    expect(a.err.join("")).toContain(WARM_USAGE);
+    expect(await dispatchCli(["node", "dist/index.js", "warm", project], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/no dependency manifest in /);
+    expect(await dispatchCli(["node", "dist/index.js", "warm", join(project, "nope")], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/is not a directory/);
+    expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--config", "/nonexistent.json"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+    expect(a.out).toEqual([]);
+  });
+
+  it("the first subcommand token wins: `warm doctor` warms a directory named doctor; `doctor --library warm` is a doctor run; a --config VALUE named warm is not a subcommand", async () => {
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "warm", "doctor"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/doctor is not a directory/);
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--library", "warm", "--offline"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/Unknown library "warm"/);
+    expect(await dispatchCli(["node", "dist/index.js", "--config", "warm"], a)).toBeUndefined();
+    const spy = stubFetch({});
+    expect(await dispatchCli(["node", "dist/index.js", "resolve", "warm"], a)).toBe(1);
+    expect(spy).toHaveBeenCalled();
+  });
+});

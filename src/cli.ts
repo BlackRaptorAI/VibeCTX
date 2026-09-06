@@ -1,9 +1,10 @@
 import { loadRegistry } from "./registry.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
+import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
 
 /**
- * Subcommand dispatch for the `vibectx` binary: `doctor` and `resolve`; anything
+ * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve` and `warm`; anything
  * else falls through to the MCP stdio server in index.ts. Kept transport- and
  * process-free so the dispatcher is unit-testable.
  */
@@ -21,6 +22,13 @@ export interface ResolveCliArgs {
   config?: string;
 }
 
+export interface WarmCliArgs {
+  json: boolean;
+  offline: boolean;
+  dir?: string;
+  config?: string;
+}
+
 export interface CliIo {
   stdout(s: string): void;
   stderr(s: string): void;
@@ -28,6 +36,7 @@ export interface CliIo {
 
 export const DOCTOR_USAGE = "usage: vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]";
 export const RESOLVE_USAGE = "usage: vibectx resolve <package> [--npm | --pypi] [--config <path>]";
+export const WARM_USAGE = "usage: vibectx warm [dir] [--offline] [--json] [--config <path>]";
 
 /** Parse the arguments after `doctor`. Throws on anything not in DOCTOR_USAGE. */
 export function parseDoctorArgs(args: string[]): DoctorCliArgs {
@@ -93,6 +102,34 @@ export function parseResolveArgs(args: string[]): ResolveCliArgs {
   return parsed;
 }
 
+/** Parse the arguments after `warm`: an optional directory, `--offline`, `--json`, `--config`. */
+export function parseWarmArgs(args: string[]): WarmCliArgs {
+  const parsed: WarmCliArgs = { json: false, offline: false };
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    switch (arg) {
+      case "--json":
+        parsed.json = true;
+        break;
+      case "--offline":
+        parsed.offline = true;
+        break;
+      case "--config": {
+        const value = args[i + 1];
+        if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
+        parsed.config = value;
+        i += 1;
+        break;
+      }
+      default:
+        if (arg.startsWith("-")) throw new Error(`Unknown option "${arg}"`);
+        if (parsed.dir !== undefined) throw new Error(`Unexpected argument "${arg}"`);
+        parsed.dir = arg;
+    }
+  }
+  return parsed;
+}
+
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -147,10 +184,39 @@ export async function runResolveCli(args: string[], io: CliIo): Promise<number> 
   return text.startsWith("Could not resolve") ? 1 : 0;
 }
 
-const SUBCOMMANDS = new Set(["doctor", "resolve"]);
+/** Run `vibectx warm [dir]`; prints the table (or `--json`) on stdout.
+ *  Exit 0 every attempted dependency cached · 1 something not cached · 2 usage / config / no-manifest error. */
+export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
+  let parsed: WarmCliArgs;
+  try {
+    parsed = parseWarmArgs(args);
+  } catch (e) {
+    io.stderr(`${message(e)}\n${WARM_USAGE}\n`);
+    return 2;
+  }
+  let registry;
+  try {
+    registry = loadRegistry(parsed.config);
+  } catch (e) {
+    io.stderr(`Could not load config ${parsed.config}: ${message(e)}\n`);
+    return 2;
+  }
+  let report;
+  try {
+    report = await runWarm(registry, { dir: parsed.dir, offline: parsed.offline, warn: io.stderr });
+  } catch (e) {
+    io.stderr(`${message(e)}\n`);
+    return 2;
+  }
+  io.stdout(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatWarmTable(report)}\n`);
+  return warmExitCode(report);
+}
+
+const SUBCOMMANDS = new Set(["doctor", "resolve", "warm"]);
 
 /** Index of the first subcommand token in argv, skipping option VALUES so a library,
- *  package or config path named "doctor" / "resolve" is not mistaken for it; -1 when absent. */
+ *  package or config path named "doctor" / "resolve" / "warm" is not mistaken for it; -1 when
+ *  absent. The FIRST token wins: `warm doctor` warms a directory named doctor. */
 function findSubcommand(argv: string[]): number {
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
@@ -171,5 +237,12 @@ export async function dispatchCli(argv: string[], io: CliIo): Promise<number | u
   const at = findSubcommand(argv);
   if (at === -1) return undefined;
   const rest = [...argv.slice(2, at), ...argv.slice(at + 1)];
-  return argv[at] === "doctor" ? runDoctorCli(rest, io) : runResolveCli(rest, io);
+  switch (argv[at]) {
+    case "doctor":
+      return runDoctorCli(rest, io);
+    case "resolve":
+      return runResolveCli(rest, io);
+    default:
+      return runWarmCli(rest, io);
+  }
 }
