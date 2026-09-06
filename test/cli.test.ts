@@ -68,6 +68,33 @@ describe("dispatchCli", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
+  it("accepts --config <path> before the doctor token (the README's leading position)", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    const config = writeConfig([{ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }]);
+    const a = io();
+    const code = await dispatchCli(
+      ["node", "dist/index.js", "--config", config, "doctor", "--library", "react", "--offline"],
+      a,
+    );
+    expect(code).toBe(0);
+    expect(a.out.join("")).toContain("1/1 libraries healthy");
+    expect(a.err).toEqual([]);
+  });
+
+  it("a missing config before the doctor token is the doctor's exit 2, not a server-path crash", async () => {
+    const a = io();
+    const code = await dispatchCli(["node", "dist/index.js", "--config", "/nonexistent.json", "doctor"], a);
+    expect(code).toBe(2);
+    expect(a.err.join("")).toMatch(/Could not load config \/nonexistent\.json/);
+  });
+
+  it("does not mistake a --library or --config VALUE named 'doctor' for the subcommand", async () => {
+    const a = io();
+    expect(await dispatchCli(["node", "dist/index.js", "--config", "doctor"], a)).toBeUndefined();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--library", "doctor", "--offline"], a)).toBe(2);
+    expect(a.err.join("")).toMatch(/Unknown library "doctor"/);
+  });
+
   it("doctor --offline --json on the default registry with an empty cache: every library unreachable, exit 1, no fetch", async () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);

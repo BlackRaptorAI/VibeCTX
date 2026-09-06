@@ -82,9 +82,26 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   return doctorExitCode(report);
 }
 
+/** Index of the `doctor` subcommand token in argv, skipping option VALUES so a
+ *  library or config path named "doctor" is not mistaken for it; -1 when absent. */
+function findDoctorToken(argv: string[]): number {
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--config" || arg === "--library") {
+      i += 1;
+      continue;
+    }
+    if (arg === "doctor") return i;
+  }
+  return -1;
+}
+
 /** `argv` is process.argv. Returns an exit code when a subcommand ran, or
- *  undefined when the caller should start the MCP server as before. */
+ *  undefined when the caller should start the MCP server as before. The `doctor`
+ *  token may come before or after `--config <path>` (the README shows `--config`
+ *  leading); without a `doctor` token anywhere, argv is left to the server path. */
 export async function dispatchCli(argv: string[], io: CliIo): Promise<number | undefined> {
-  if (argv[2] !== "doctor") return undefined;
-  return runDoctorCli(argv.slice(3), io);
+  const at = findDoctorToken(argv);
+  if (at === -1) return undefined;
+  return runDoctorCli([...argv.slice(2, at), ...argv.slice(at + 1)], io);
 }
