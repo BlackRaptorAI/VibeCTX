@@ -203,13 +203,13 @@ describe("dispatchCli resolve (PAR-655)", () => {
   it("resolves a name, prints the report on stdout and exits 0", async () => {
     stubFetch({
       "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
-      "https://raw.githubusercontent.com/elysiajs/elysia/main/README.md": "# Elysia",
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia",
     });
     const a = io();
     expect(await dispatchCli(["node", "dist/index.js", "resolve", "elysia"], a)).toBe(0);
     const text = a.out.join("");
     expect(text).toMatch(/^Resolved "elysia" via npm/);
-    expect(text).toContain("chosen: https://raw.githubusercontent.com/elysiajs/elysia/main/README.md (readme, 8 chars)");
+    expect(text).toContain("chosen: https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md (readme, 8 chars)");
     expect(a.err).toEqual([]);
     expect(JSON.parse(readFileSync(join(dir, "resolved.json"), "utf8")).entries[0].name).toBe("elysia");
   });

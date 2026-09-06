@@ -185,14 +185,18 @@ describe("parsePyPiMetadata", () => {
 describe("synthesizeCandidates (order, dedupe, bounds)", () => {
   const base = (m: Partial<PackageMetadata>): PackageMetadata => ({ source: "npm", metadataUrl: NPM_HONO, ...m });
 
-  it("homepage only: origin+path then origin, llms-full before llms, then README main then master", () => {
+  it("homepage only: origin+path then origin, llms-full before llms, then the README variants at HEAD", () => {
+    // HEAD is GitHub's default-branch ref on raw.githubusercontent.com (MEASURED 2026-09-06), so no
+    // main/master guess; the filename variants cover express (Readme.md), resend (readme.md), django (README.rst).
     expect(synthesizeCandidates(base({ homepage: "https://tanstack.com/query", repository: { owner: "TanStack", repo: "query" } }))).toEqual([
       "https://tanstack.com/query/llms-full.txt",
       "https://tanstack.com/query/llms.txt",
       "https://tanstack.com/llms-full.txt",
       "https://tanstack.com/llms.txt",
-      "https://raw.githubusercontent.com/TanStack/query/main/README.md",
-      "https://raw.githubusercontent.com/TanStack/query/master/README.md",
+      "https://raw.githubusercontent.com/TanStack/query/HEAD/README.md",
+      "https://raw.githubusercontent.com/TanStack/query/HEAD/readme.md",
+      "https://raw.githubusercontent.com/TanStack/query/HEAD/Readme.md",
+      "https://raw.githubusercontent.com/TanStack/query/HEAD/README.rst",
     ]);
   });
 
@@ -214,21 +218,23 @@ describe("synthesizeCandidates (order, dedupe, bounds)", () => {
     ]);
   });
 
-  it("caps llms candidates at 8 and README candidates at 2", () => {
+  it("caps llms candidates at 8 and README candidates at 4", () => {
     const out = synthesizeCandidates(
       base({ homepage: "https://a.example.com/x/y", docsUrl: "https://b.example.com/d/e", repository: { owner: "o", repo: "r" } }),
     );
     expect(out.filter((u) => u.includes("llms"))).toHaveLength(MAX_LLMS_CANDIDATES);
     expect(out.filter((u) => u.startsWith("https://raw.githubusercontent.com/"))).toHaveLength(MAX_README_CANDIDATES);
     expect(MAX_LLMS_CANDIDATES).toBe(8);
-    expect(MAX_README_CANDIDATES).toBe(2);
+    expect(MAX_README_CANDIDATES).toBe(4);
     expect(MAX_METADATA_FETCHES).toBe(2);
   });
 
   it("README-only when there is no docs base; empty when there is nothing", () => {
     expect(synthesizeCandidates(base({ repository: { owner: "o", repo: "r" } }))).toEqual([
-      "https://raw.githubusercontent.com/o/r/main/README.md",
-      "https://raw.githubusercontent.com/o/r/master/README.md",
+      "https://raw.githubusercontent.com/o/r/HEAD/README.md",
+      "https://raw.githubusercontent.com/o/r/HEAD/readme.md",
+      "https://raw.githubusercontent.com/o/r/HEAD/Readme.md",
+      "https://raw.githubusercontent.com/o/r/HEAD/README.rst",
     ]);
     expect(synthesizeCandidates(base({}))).toEqual([]);
   });
@@ -244,25 +250,27 @@ describe("synthesizeCandidates (order, dedupe, bounds)", () => {
 });
 
 describe("resolvePackage (chain: registry metadata → llms probes → README; stop at first usable)", () => {
-  it("npm hit, llms probes miss, README on main wins; persists; caches the document under the entry name", async () => {
+  it("npm hit, llms probes miss, README.md at HEAD wins; persists; caches the document under the entry name", async () => {
     const spy = stubFetch({
       [NPM_HONO]: honoNpm,
-      "https://raw.githubusercontent.com/honojs/hono/main/README.md": "# Hono\n\nUltrafast web framework.\n\n## Middleware\n\nUse app.use().",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/README.md": "# Hono\n\nUltrafast web framework.\n\n## Middleware\n\nUse app.use().",
     });
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(true);
     expect(out.source).toBe("npm");
-    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/main/README.md");
+    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/HEAD/README.md");
     expect(out.kind).toBe("readme");
     expect(out.candidates).toEqual([
       "https://hono.dev/llms-full.txt",
       "https://hono.dev/llms.txt",
-      "https://raw.githubusercontent.com/honojs/hono/main/README.md",
-      "https://raw.githubusercontent.com/honojs/hono/master/README.md",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/README.md",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst",
     ]);
-    // 1 metadata + 3 probes; the master README was never requested.
+    // 1 metadata + 3 probes; the later README variants were never requested.
     expect(spy).toHaveBeenCalledTimes(4);
-    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://raw.githubusercontent.com/honojs/hono/master/README.md");
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://raw.githubusercontent.com/honojs/hono/HEAD/readme.md");
     expect(out.entry).toMatchObject({
       name: "hono",
       urls: out.candidates,
@@ -277,15 +285,17 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     expect(out.text).toContain("hono.dev, docs.hono.dev");
   });
 
-  it("README main 404 → master is tried and wins", async () => {
+  it("README.md 404 → the other filename variants are tried in order (Readme.md, README.rst)", async () => {
     const spy = stubFetch({
       [NPM_HONO]: honoNpm,
-      "https://raw.githubusercontent.com/honojs/hono/master/README.md": "# Hono on master",
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md": "# Hono (express-style casing)",
     });
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(true);
-    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/master/README.md");
-    expect(spy).toHaveBeenCalledTimes(5);
+    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md");
+    expect(spy).toHaveBeenCalledTimes(1 + 2 + 3);
+    stubFetch({ [NPM_HONO]: honoNpm, "https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst": "Hono\n====\n\nrst readme" });
+    expect((await resolvePackage("hono")).chosen).toBe("https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst");
   });
 
   it("stops at the first llms candidate that serves a real document and classifies it", async () => {
@@ -304,12 +314,12 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
       const u = String(url);
       if (u === NPM_HONO) return new Response(JSON.stringify(honoNpm), { status: 200, headers: { "content-type": "application/json" } });
       if (u.endsWith("llms.txt")) return new Response("<!doctype html><html>404</html>", { status: 200, headers: { "content-type": "text/html" } });
-      if (u.endsWith("/main/README.md")) return new Response("# Hono", { status: 200, headers: { "content-type": "text/plain" } });
+      if (u.endsWith("/HEAD/README.md")) return new Response("# Hono", { status: 200, headers: { "content-type": "text/plain" } });
       return new Response("nope", { status: 404 });
     });
     vi.stubGlobal("fetch", spy);
     const out = await resolvePackage("hono");
-    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/main/README.md");
+    expect(out.chosen).toBe("https://raw.githubusercontent.com/honojs/hono/HEAD/README.md");
   });
 
   it("npm 404 → PyPI; docs URL probes come first; entry keeps the folded input name", async () => {
@@ -330,25 +340,81 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     expect(out.entry?.allowedHosts).toEqual(["www.python-httpx.org"]);
     expect(out.entry?.resolved).toMatchObject({ source: "pypi", docsUrl: "https://www.python-httpx.org/" });
     expect(out.entry?.resolved?.homepage).toBeUndefined(); // github.com homepage is the repository, not a docs host
-    expect(out.candidates.at(-2)).toBe("https://raw.githubusercontent.com/encode/httpx/main/README.md");
+    expect(out.candidates.at(-4)).toBe("https://raw.githubusercontent.com/encode/httpx/HEAD/README.md");
   });
 
-  it("prefers npm when both ecosystems know the name; ecosystem: 'pypi' forces PyPI and skips npm entirely", async () => {
+  it("npm with a real homepage wins outright: PyPI is never consulted (1 metadata fetch)", async () => {
+    const spy = stubFetch({
+      [NPM_HONO]: honoNpm,
+      "https://pypi.org/pypi/hono/json": { info: { project_urls: { Documentation: "https://hono.example.org" } } },
+      "https://raw.githubusercontent.com/honojs/hono/HEAD/README.md": "# Hono",
+    });
+    const out = await resolvePackage("hono");
+    expect(out.source).toBe("npm");
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://pypi.org/pypi/hono/json");
+  });
+
+  it("docs-site preference: npm knows the name but only as a repo, PyPI has a docs site → PyPI wins (2 metadata fetches)", async () => {
+    // MEASURED 2026-09-06: `httpx` and `fastapi` both exist on npm as unrelated README-only packages.
     const spy = stubFetch({
       [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
       [PYPI_HTTPX]: httpxPyPi,
-      "https://raw.githubusercontent.com/JacksonTian/httpx/main/README.md": "# httpx (node)",
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx (node)",
       "https://www.python-httpx.org/llms.txt": "# HTTPX (python)",
     });
-    const npmFirst = await resolvePackage("httpx");
-    expect(npmFirst.source).toBe("npm");
-    expect(npmFirst.chosen).toBe("https://raw.githubusercontent.com/JacksonTian/httpx/main/README.md");
+    const out = await resolvePackage("httpx");
+    expect(out.source).toBe("pypi");
+    expect(out.chosen).toBe("https://www.python-httpx.org/llms.txt");
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls.slice(0, 2)).toEqual([NPM_HTTPX, PYPI_HTTPX]);
+    expect(urls).not.toContain("https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md");
+  });
+
+  it("both README-only → npm (first in order); npm README-only and PyPI unknown → npm", async () => {
+    const spy = stubFetch({
+      [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
+      [PYPI_HTTPX]: { info: { project_urls: { Source: "https://github.com/encode/httpx" } } },
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx (node)",
+    });
+    expect((await resolvePackage("httpx")).source).toBe("npm");
+    expect(spy.mock.calls.map((c) => String(c[0])).slice(0, 2)).toEqual([NPM_HTTPX, PYPI_HTTPX]);
+    stubFetch({
+      [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx (node)",
+    });
+    expect((await resolvePackage("httpx")).source).toBe("npm");
+  });
+
+  it("npm's security-holder placeholder counts as no package (MEASURED: `django` on npm)", async () => {
+    stubFetch({
+      "https://registry.npmjs.org/django/latest": { description: "security holding package", repository: { url: "git+https://github.com/npm/security-holder.git" } },
+      "https://pypi.org/pypi/django/json": { info: { project_urls: { Documentation: "https://docs.djangoproject.com/" } } },
+      "https://docs.djangoproject.com/llms.txt": "# Django",
+    });
+    const out = await resolvePackage("Django");
+    expect(out.source).toBe("pypi");
+    expect(out.chosen).toBe("https://docs.djangoproject.com/llms.txt");
+    stubFetch({
+      "https://registry.npmjs.org/django/latest": { repository: { url: "git+https://github.com/npm/security-holder.git" } },
+    });
+    const none = await resolvePackage("django");
+    expect(none.ok).toBe(false);
+    expect(none.text).toContain("npm: name is held by npm's security-holder placeholder");
+  });
+
+  it("ecosystem: 'pypi' forces PyPI and skips npm entirely; a later explicit resolution replaces the persisted record", async () => {
+    const spy = stubFetch({
+      [NPM_HTTPX]: { homepage: "https://httpx-node.example.com" },
+      [PYPI_HTTPX]: httpxPyPi,
+      "https://httpx-node.example.com/llms.txt": "# httpx (node)",
+      "https://www.python-httpx.org/llms.txt": "# HTTPX (python)",
+    });
+    expect((await resolvePackage("httpx")).source).toBe("npm");
     spy.mockClear();
     const forced = await resolvePackage("httpx", { ecosystem: "pypi" });
     expect(forced.source).toBe("pypi");
     expect(forced.chosen).toBe("https://www.python-httpx.org/llms.txt");
     expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain(NPM_HTTPX);
-    // The later explicit resolution replaces the persisted record for that name.
     const [persisted] = readResolvedEntries();
     expect(persisted.resolved?.source).toBe("pypi");
   });
@@ -375,7 +441,7 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
   it("scoped npm names are URL-encoded in the metadata URL and not offered to PyPI", async () => {
     const spy = stubFetch({
       "https://registry.npmjs.org/@tanstack%2Freact-query/latest": { homepage: "https://tanstack.com/query", repository: "https://github.com/TanStack/query" },
-      "https://raw.githubusercontent.com/TanStack/query/main/README.md": "# TanStack Query",
+      "https://raw.githubusercontent.com/TanStack/query/HEAD/README.md": "# TanStack Query",
     });
     const out = await resolvePackage("@tanstack/react-query");
     expect(out.ok).toBe(true);
@@ -411,8 +477,8 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     const spy = stubFetch({ [NPM_HONO]: honoNpm });
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(false);
-    expect(spy).toHaveBeenCalledTimes(1 + 4);
-    expect(out.text).toContain('Could not resolve "hono": npm metadata found (homepage https://hono.dev/, repository github.com/honojs/hono); none of 4 candidate URLs served a document: https://hono.dev/llms-full.txt, https://hono.dev/llms.txt, https://raw.githubusercontent.com/honojs/hono/main/README.md, https://raw.githubusercontent.com/honojs/hono/master/README.md. Add it to vibectx.config.json');
+    expect(spy).toHaveBeenCalledTimes(1 + 6);
+    expect(out.text).toContain('Could not resolve "hono": npm metadata found (homepage https://hono.dev/, repository github.com/honojs/hono); none of 6 candidate URLs served a document: https://hono.dev/llms-full.txt, https://hono.dev/llms.txt, https://raw.githubusercontent.com/honojs/hono/HEAD/README.md, https://raw.githubusercontent.com/honojs/hono/HEAD/readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst. Add it to vibectx.config.json');
     expect(existsSync(join(dir, "resolved.json"))).toBe(false);
     expect(existsSync(join(dir, "hono"))).toBe(false);
   });
@@ -493,7 +559,7 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
   it("an unknown name is resolved, adopted into the live registry and reported", async () => {
     stubFetch({
       [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
-      "https://raw.githubusercontent.com/JacksonTian/httpx/main/README.md": "# httpx",
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx",
     });
     const reg = registry();
     const text = await resolveToolText(reg, "httpx");
@@ -513,11 +579,11 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     stubFetch({
       [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
       [PYPI_HTTPX]: httpxPyPi,
-      "https://raw.githubusercontent.com/JacksonTian/httpx/main/README.md": "# httpx",
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx",
       "https://www.python-httpx.org/llms.txt": "# HTTPX",
     });
     const reg = registry();
-    await resolveToolText(reg, "httpx");
+    await resolveToolText(reg, "httpx", "npm");
     expect(reg.entries.get("httpx")?.resolved?.source).toBe("npm");
     const text = await resolveToolText(reg, "httpx", "pypi");
     expect(text).toContain('Resolved "httpx" via PyPI');

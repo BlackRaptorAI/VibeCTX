@@ -381,14 +381,14 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
   it("an unknown library is resolved implicitly (PAR-655): metadata → document → docs, and the entry joins the live registry", async () => {
     const spy = stubFetch({
       "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
-      "https://raw.githubusercontent.com/elysiajs/elysia/main/README.md": "# Elysia\n\n## Middleware\n\nUse .onBeforeHandle() for middleware.",
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia\n\n## Middleware\n\nUse .onBeforeHandle() for middleware.",
     });
     const reg: Registry = { entries: new Map(registry.entries) };
     const out = await getDocsToolText(reg, { library: "Elysia", topic: "middleware" });
-    expect(out).toContain("Source: https://raw.githubusercontent.com/elysiajs/elysia/main/README.md");
+    expect(out).toContain("Source: https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md");
     expect(out).toContain("onBeforeHandle");
     expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
-    expect(spy).toHaveBeenCalledTimes(1 + 3); // metadata, two llms probes, README main
+    expect(spy).toHaveBeenCalledTimes(1 + 3); // metadata, two llms probes, README.md at HEAD
     // Second call: served from the adopted entry and the cache — no new fetch.
     spy.mockClear();
     expect(await getDocsToolText(reg, { library: "elysia", topic: "middleware" })).toContain("onBeforeHandle");
