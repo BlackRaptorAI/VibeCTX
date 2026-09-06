@@ -55,7 +55,25 @@ import {
  * correctness: the document is tokenized on the spot and the file rewritten best effort.
  */
 
-/** Bumped when a `--json` key is renamed, removed or changes meaning. New keys may be appended. */
+/**
+ * Bumped when a `--json` key is renamed, removed or CHANGES MEANING. Adding a key is not a bump.
+ *
+ * WHERE a key is added is not part of the contract. A JSON object's keys are unordered by the
+ * standard, so this promise is about the SET of keys and what each one means; the emitted order
+ * is stable and pinned by a test only because a diffable file is worth having. Read keys by
+ * NAME — `maxTokens` sits between `query` and `groups`, and `requested` between `configured`
+ * and `searched`, precisely because a reader that cares about position was never supported.
+ *
+ * Version 1 is the first SHIPPED shape, and that is why it is still 1 after this round. Two
+ * things happened to the shape in the branch that introduced `search` (PAR-659): `configured`
+ * changed from the post-filter scope to the registry's size (N1), and `maxTokens` / `requested`
+ * were added mid-object. A meaning change is exactly what a version bump is for — but `search`
+ * and its `--json` had not been released when it happened (0.1.3 shipped without the tool), so
+ * there was no consumer of version 1 to protect and nothing to distinguish a "version 1" from.
+ * Bumping to 2 would have named a version nobody could ever have read, and left the first
+ * released shape called 2 for no reason a reader could reconstruct. Recorded here rather than
+ * left to be inferred: the NEXT change to `configured`'s meaning is a bump, unconditionally.
+ */
 export const SEARCH_SCHEMA_VERSION = 1;
 
 /** The same default budget `get_docs` uses, for the same reason: ~4000 tokens is a large but
@@ -364,7 +382,10 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
     groups: [],
     // N1: `configured` is the REGISTRY's size, whether or not a filter narrowed this call.
     // "Searched 1 of 1 configured library" after naming two libraries was true of the filter
-    // and false of the reader's question.
+    // and false of the reader's question. That is a CHANGE OF MEANING against the first cut of
+    // this key, which is what `SEARCH_SCHEMA_VERSION` exists to signal — it stayed 1 only
+    // because it happened in-branch, before `search --json` was released to anyone (the note on
+    // the constant records why, and that the next such change is a bump).
     configured: registry.entries.size,
     requested: scope.length,
     searched: 0,

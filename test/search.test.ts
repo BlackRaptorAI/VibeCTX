@@ -23,6 +23,7 @@ import {
   runSearch,
   searchExitCode,
   searchToolText,
+  DEFAULT_SEARCH_BUDGET_TOKENS,
   MAX_QUERY_CHARS,
   MAX_RENDERED_LIBRARIES,
   SEARCH_SCHEMA_VERSION,
@@ -405,6 +406,50 @@ describe("runSearch · what the response tells the agent (PAR-659, D-35)", () =>
     expect(searchExitCode(search({ query: "streaming" }))).toBe(0);
     expect(searchExitCode(search({ query: "kubernetes" }))).toBe(1);
     expect(search({ query: "streaming" }).schemaVersion).toBe(SEARCH_SCHEMA_VERSION);
+  });
+
+  it("the `--json` contract is version 1's KEY SET, read by name — position is not part of it", () => {
+    // The schema gate's question, answered where a reader will find it. `SEARCH_SCHEMA_VERSION`
+    // is bumped when a key is renamed, removed or changes meaning. Two things happened to this
+    // shape in PAR-659's own branch — `configured` changed from the post-filter scope to the
+    // registry's size, and `maxTokens` / `requested` were added MID-OBJECT — and the version
+    // stayed 1 because `search --json` had not shipped: 0.1.3 released without the tool, so
+    // there was no consumer of version 1 to protect. The next change to a key's meaning is a
+    // bump, and this case is what would notice it.
+    warmAll();
+    const out = search({ query: "streaming" });
+    expect(out.schemaVersion).toBe(1);
+    // Sorted on purpose: what version 1 promises is the SET of keys and what each one means.
+    // A key added between two others is an ADDITION, not a rename — the emitted order is pinned
+    // separately (test/cli.test.ts, "stable key order") because a diffable file is worth having,
+    // never because a reader may depend on it.
+    expect(Object.keys(out).sort()).toEqual(
+      [
+        "configured",
+        "fromIndex",
+        "generatedAt",
+        "groups",
+        "indexWritten",
+        "matchedLibraries",
+        "maxTokens",
+        "notes",
+        "query",
+        "requested",
+        "schemaVersion",
+        "searched",
+        "searchedLibraries",
+        "tokenized",
+        "uncached",
+        "unknown",
+      ],
+    );
+    // The two keys inserted mid-object carry the meanings the version-1 shape documents.
+    expect(out.maxTokens).toBe(DEFAULT_SEARCH_BUDGET_TOKENS);
+    expect(out.requested).toBe(registry().entries.size);
+    // …and `configured` is the REGISTRY's size even under a filter — the meaning that changed.
+    const filtered = search({ query: "streaming", libraries: ["hono"] });
+    expect(filtered.configured).toBe(registry().entries.size);
+    expect(filtered.requested).toBe(1);
   });
 });
 

@@ -220,6 +220,13 @@ search. A filtered search reports both numbers — `Searched 1 of 2 requested li
 is. `query` is capped at 1000 characters. Exit codes: `0` something matched, `1` nothing
 matched, `2` usage or config error.
 
+`--json` emits `{ schemaVersion: 1, generatedAt, query, maxTokens, groups, configured,
+requested, searched, searchedLibraries, matchedLibraries, unknown, uncached, fromIndex,
+tokenized, indexWritten, notes }`. `schemaVersion` is bumped when a key is renamed, removed
+or changes meaning; adding a key is not a bump, and **where** a key is added is not part of
+the contract — read keys by name. The emitted order is stable (and pinned by a test) because
+a diffable file is worth having, not because a reader may depend on it.
+
 ### The search index
 
 To avoid re-reading and re-tokenizing every `llms-full.txt` on every query, `search` keeps a
