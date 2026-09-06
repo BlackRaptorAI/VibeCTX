@@ -217,8 +217,9 @@ the same trade `get_docs` makes for an over-long snippet.
 aliases both work, and an unknown one is *reported in the response* rather than failing the
 search. A filtered search reports both numbers — `Searched 1 of 2 requested libraries
 (30 configured)` — so narrowing the search can never make your cache look emptier than it
-is. `query` is capped at 1000 characters. Exit codes: `0` something matched, `1` nothing
-matched, `2` usage or config error.
+is. `query` is capped at 1000 characters — a longer one is clipped rather than refused, and
+said so twice: on stderr for the terminal and in `notes` for `--json`. Exit codes: `0`
+something matched, `1` nothing matched, `2` usage or config error.
 
 `--json` emits `{ schemaVersion: 1, generatedAt, query, maxTokens, groups, configured,
 requested, searched, searchedLibraries, matchedLibraries, unknown, uncached, fromIndex,

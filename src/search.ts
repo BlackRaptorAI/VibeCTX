@@ -200,6 +200,16 @@ export interface SearchOptions {
   maxTokens?: number;
   /** Restrict to these libraries, by canonical name or alias. */
   libraries?: string[];
+  /**
+   * D-41 — the caller ALREADY clipped this query to MAX_QUERY_CHARS and wants it accounted for
+   * here. The CLI clips at parse time (a shell can paste a megabyte, and the person at the
+   * terminal is told on stderr straight away), which means `runSearch` receives a query that is
+   * exactly at the bound and cannot tell it apart from one that was typed that long. A `--json`
+   * consumer reads STDOUT and nothing else, so without this the payload described a search of a
+   * query the caller never sent. The note is emitted here, once, in the wording every other
+   * bounded-input note uses.
+   */
+  queryClipped?: boolean;
   /** Where index-write notes go (default: stderr). */
   warn?: (message: string) => void;
   /** Test seam: the wall clock for `generatedAt`. */
@@ -370,7 +380,7 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   // D-41: bound the query before anything is built out of it. A clip, not an error — the
   // first 1000 characters of a pasted essay are still a searchable question.
   const query = opts.query.length > MAX_QUERY_CHARS ? opts.query.slice(0, MAX_QUERY_CHARS) : opts.query;
-  if (query.length < opts.query.length) {
+  if (query.length < opts.query.length || opts.queryClipped) {
     notes.push(`the query was clipped to its first ${MAX_QUERY_CHARS} characters`);
   }
 

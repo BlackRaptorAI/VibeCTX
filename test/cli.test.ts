@@ -650,6 +650,32 @@ describe("dispatchCli search (PAR-659)", () => {
     expect(parsed.searchedLibraries).toEqual(["hono"]);
   });
 
+  it("D-41: a clipped query is reported in the `--json` payload, not only on stderr", async () => {
+    // The schema gate's finding: the CLI clips an over-long query and says so on STDERR, so a
+    // `--json` consumer reading stdout — the only stream it is told to read — saw a search of a
+    // query it never sent, with nothing in the payload to say the tail was dropped. The note
+    // belongs where the machine reader is looking, in the same `notes` array every other
+    // bounded-input note already uses.
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const o = io();
+    const long = `streaming ${"x".repeat(MAX_QUERY_CHARS * 2)}`;
+    const code = await dispatchCli(["node", "vibectx", "search", long, "--json", "--config", config()], o);
+    expect(code).toBe(0);
+    const parsed = JSON.parse(o.out.join(""));
+    expect(parsed.notes).toContain(`the query was clipped to its first ${MAX_QUERY_CHARS} characters`);
+    // Said once, in both places a reader might be: the terminal still gets its line.
+    expect(o.err.join("")).toMatch(/clipped to its first 1000 characters/);
+    expect(parsed.notes.filter((n: string) => n.includes("clipped")).length).toBe(1);
+    // The search itself is unchanged: the clipped query still matched, and the query carried in
+    // the payload is the clipped one it actually ran.
+    expect(parsed.groups[0].library).toBe("hono");
+    expect(parsed.query.length).toBeLessThanOrEqual(200);
+    // …and the human-readable form carries the same note in its footer.
+    const human = io();
+    await dispatchCli(["node", "vibectx", "search", long, "--config", config()], human);
+    expect(human.out.join("")).toMatch(/note: the query was clipped to its first 1000 characters/);
+  });
+
   it("`search warm` searches for the word warm rather than dispatching to warm", async () => {
     writeCache("hono", HONO_URL, HONO_DOC);
     const o = io();

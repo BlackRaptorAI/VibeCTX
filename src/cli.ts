@@ -331,6 +331,11 @@ export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
     query: parsed.query,
     maxTokens: parsed.maxTokens,
     libraries: parsed.libraries.length > 0 ? parsed.libraries : undefined,
+    // The clip happened at parse time, so `runSearch` cannot see it: the query it receives is
+    // exactly at the bound. Carried in so the note lands in `outcome.notes` — a `--json`
+    // consumer reads stdout and would otherwise have no way to know its tail was dropped, and
+    // the stderr line above is for the person at the terminal, not for the machine.
+    queryClipped: parsed.clipped,
     warn: io.stderr,
   });
   io.stdout(parsed.json ? `${JSON.stringify(outcome, null, 2)}\n` : `${formatSearchResults(outcome)}\n`);
