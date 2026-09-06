@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getDocs } from "../src/get-docs.js";
+import { getDocs, getDocsDetailed } from "../src/get-docs.js";
 import { writeCache } from "../src/cache.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
@@ -228,6 +228,67 @@ describe("getDocs index following", () => {
     expect(out).toContain("Table of contents:\n# Fastify\n## Reference\n### Request\n\n---\n\n");
     expect(out).not.toContain("#### Too deep");
     expect(out.endsWith("\n\n---\n\n# Fastify\nIntro text")).toBe(true); // 20-char head, period cut
+  });
+
+  it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Request](/docs/Request.md)",
+        "- [Request mirror](https://mirror.example.net/Request.md)",
+        "- [Request big](/docs/Big.md)",
+        "- [Request gone](/docs/Gone.md)",
+      ].join("\n"),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.endsWith("/Request.md")) {
+          return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          });
+        }
+        if (u.endsWith("/Big.md")) {
+          return new Response("x", {
+            status: 200,
+            headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) },
+          });
+        }
+        return new Response("nope", { status: 404 });
+      }),
+    );
+    const out = await getDocsDetailed(entry, { topic: "request hostname" });
+    expect(out.source).toEqual({ url: INDEX_URL, stale: false });
+    expect(out.isIndex).toBe(true);
+    expect(out.followed).toEqual(["https://fastify.dev/docs/Request.md"]);
+    expect(out.dropped).toEqual({ outsideOrigin: 1, tooLarge: 1, unavailable: 1 });
+    expect(out.matched).toBeGreaterThan(0);
+    // The best section came from the followed page, not from the index's own link list.
+    expect(out.returnedFromFollowed).toBeGreaterThan(0);
+    expect(out.text).toBe(await getDocs(entry, { topic: "request hostname" }));
+  });
+
+  it("reports no source and zero matches structurally when nothing is reachable or cached", async () => {
+    stubFetch({});
+    const out = await getDocsDetailed({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"] }, { topic: "x" });
+    expect(out.source).toBeUndefined();
+    expect(out.isIndex).toBe(false);
+    expect(out.matched).toBe(0);
+    expect(out.followed).toEqual([]);
+    expect(out.text).toContain('Could not fetch docs for "ghost"');
+  });
+
+  it("marks a stale-served source as stale and counts an answer from the index itself as not from followed pages", async () => {
+    seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    stubFetch({}); // followed page 404s; the index line itself still matches "request"
+    const stale = { ...entry, ttlHours: 0 };
+    const out = await getDocsDetailed(stale, { topic: "request" });
+    expect(out.source).toEqual({ url: INDEX_URL, stale: true });
+    expect(out.matched).toBeGreaterThan(0);
+    expect(out.returnedFromFollowed).toBe(0);
+    expect(out.dropped.unavailable).toBe(1);
   });
 
   it("does not follow links when the document is prose", async () => {

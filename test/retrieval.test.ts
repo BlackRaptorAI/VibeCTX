@@ -3,6 +3,7 @@ import {
   splitSections,
   rankSections,
   assemble,
+  selectSections,
   looksLikeIndex,
   rankLinks,
   extractLinks,
@@ -56,6 +57,18 @@ describe("assemble", () => {
     const out = assemble(ranked, 10); // tiny budget
     expect(out.length).toBeGreaterThan(0);
     expect(out).toContain("Configuration");
+  });
+
+  it("selectSections returns exactly the sections assemble renders, in order", () => {
+    const ranked = rankSections(DOC, "configuration cache plugins streaming");
+    expect(ranked.length).toBeGreaterThan(2);
+    const chosen = selectSections(ranked, 30); // room for roughly two small sections
+    expect(chosen.length).toBeGreaterThanOrEqual(1);
+    expect(chosen.length).toBeLessThan(ranked.length);
+    expect(chosen).toEqual(ranked.slice(0, chosen.length));
+    const rendered = assemble(ranked, 30);
+    for (const s of chosen) expect(rendered).toContain(`## ${s.heading}`);
+    for (const s of ranked.slice(chosen.length)) expect(rendered).not.toContain(`## ${s.heading}`);
   });
 });
 

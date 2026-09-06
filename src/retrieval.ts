@@ -59,18 +59,35 @@ export function rankSections(markdown: string, query: string): Section[] {
     .sort((a, b) => b.score - a.score);
 }
 
+function renderSection(s: Section): string {
+  return `## ${s.heading}\n\n${s.body}`;
+}
+
+/** The leading run of `sections` that fits a rough token budget (~4 chars per
+ *  token); always at least one section. This is exactly what `assemble` renders,
+ *  exposed so callers can reason about which sections were returned. */
+export function selectSections(sections: Section[], maxTokens: number): Section[] {
+  const budget = maxTokens * 4;
+  const chosen: Section[] = [];
+  let used = 0;
+  for (const s of sections) {
+    const chunk = renderSection(s);
+    if (used + chunk.length > budget && chosen.length > 0) break;
+    chosen.push(s);
+    used += chunk.length;
+  }
+  return chosen;
+}
+
 /** Assemble top sections under a rough token budget (~4 chars per token). */
 export function assemble(sections: Section[], maxTokens: number): string {
   const budget = maxTokens * 4;
-  const parts: string[] = [];
-  let used = 0;
-  for (const s of sections) {
-    const chunk = `## ${s.heading}\n\n${s.body}`;
-    if (used + chunk.length > budget && parts.length > 0) break;
-    parts.push(chunk.length > budget ? chunk.slice(0, budget) : chunk);
-    used += chunk.length;
-  }
-  return parts.join("\n\n---\n\n");
+  return selectSections(sections, maxTokens)
+    .map((s) => {
+      const chunk = renderSection(s);
+      return chunk.length > budget ? chunk.slice(0, budget) : chunk;
+    })
+    .join("\n\n---\n\n");
 }
 
 /** Non-image markdown link `[title](href)`; href may be absolute or relative.
