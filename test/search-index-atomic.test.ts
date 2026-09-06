@@ -44,7 +44,7 @@ const { indexDocument, indexCachedDocument, readIndex, resetSearchIndexMemo, sea
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-index-atomic-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   calls.length = 0;
   faults.mkdir = false;
   faults.rename = false;
@@ -52,7 +52,7 @@ beforeEach(() => {
   resetSearchIndexMemo();
 });
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 

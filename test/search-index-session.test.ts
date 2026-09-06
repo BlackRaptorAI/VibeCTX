@@ -50,7 +50,7 @@ let project: string;
 beforeEach(() => {
   cache = mkdtempSync(join(tmpdir(), "vibectx-session-cache-"));
   project = mkdtempSync(join(tmpdir(), "vibectx-session-proj-"));
-  process.env.DOCS_CACHE_DIR = cache;
+  process.env.VIBECTX_CACHE_DIR = cache;
   resetSearchIndexMemo();
   reads.index = 0;
   vi.stubGlobal(
@@ -62,7 +62,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(cache, { recursive: true, force: true });
   rmSync(project, { recursive: true, force: true });
   vi.unstubAllGlobals();

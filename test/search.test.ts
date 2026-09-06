@@ -41,7 +41,7 @@ let fetchSpy: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-search-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   resetSearchIndexMemo();
   fetchSpy = vi.fn(() => {
     throw new Error("search must never touch the network (D-35)");
@@ -50,7 +50,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -540,7 +540,7 @@ describe("runSearch · what the response tells the agent (PAR-659, D-35)", () =>
   it("searchToolText never throws, even when the cache root cannot be read", () => {
     warmAll();
     expect(searchToolText(registry(), { query: "streaming" })).toContain("Source:");
-    process.env.DOCS_CACHE_DIR = join(dir, "does", "not", "exist");
+    process.env.VIBECTX_CACHE_DIR = join(dir, "does", "not", "exist");
     expect(searchToolText(registry(), { query: "streaming" })).toContain("No sections matched");
   });
 

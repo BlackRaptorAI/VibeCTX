@@ -18,11 +18,11 @@ let project: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-projstore-"));
   project = mkdtempSync(join(tmpdir(), "vibectx-proj-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
   rmSync(project, { recursive: true, force: true });
 });

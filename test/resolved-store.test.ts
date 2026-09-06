@@ -17,11 +17,11 @@ let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-resolved-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 

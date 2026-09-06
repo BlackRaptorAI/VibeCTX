@@ -89,7 +89,7 @@ let indexBytes = 0;
 
 beforeAll(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-search-perf-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   resetSearchIndexMemo();
   const entries = new Map<string, { name: string; urls: string[] }>();
   for (let i = 0; i < LIBRARY_COUNT; i++) {
@@ -104,7 +104,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -199,8 +199,8 @@ describe("D-37 · search performance over a ≥ 5 MB corpus (PAR-659)", () => {
 describe("D-37 · what the index costs is VOCABULARY, measured (PAR-659)", () => {
   it("a corpus of globally unique tokens: the index is larger than the documents, and the search still answers", () => {
     const local = mkdtempSync(join(tmpdir(), "vibectx-search-vocab-"));
-    const previous = process.env.DOCS_CACHE_DIR;
-    process.env.DOCS_CACHE_DIR = local;
+    const previous = process.env.VIBECTX_CACHE_DIR;
+    process.env.VIBECTX_CACHE_DIR = local;
     resetSearchIndexMemo();
     try {
       const docs = 6;
@@ -249,8 +249,8 @@ describe("D-37 · what the index costs is VOCABULARY, measured (PAR-659)", () =>
       expect(size).toBeLessThan(64 * 1024 * 1024);
     } finally {
       rmSync(local, { recursive: true, force: true });
-      if (previous === undefined) delete process.env.DOCS_CACHE_DIR;
-      else process.env.DOCS_CACHE_DIR = previous;
+      if (previous === undefined) delete process.env.VIBECTX_CACHE_DIR;
+      else process.env.VIBECTX_CACHE_DIR = previous;
       resetSearchIndexMemo();
     }
   }, 120_000);

@@ -290,7 +290,7 @@ npx -y @blackraptorai/vibectx warm
 ```
 
 ```
-vibectx warm · /Users/me/my-app · cache /Users/me/.docs-cache-mcp
+vibectx warm · /Users/me/my-app · cache /Users/me/.vibectx
 manifests: package.json
 
 dependency             library      status               url
@@ -484,12 +484,12 @@ Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
     …
   chosen: https://raw.githubusercontent.com/fastapi/fastapi/HEAD/README.md (readme, 22,568 chars)
   followed-link hosts: fastapi.tiangolo.com (plus the source document's own host; https only)
-  saved to ~/.docs-cache-mcp/resolved.json — get_docs("fastapi") works now; pin or override it in vibectx.config.json.
+  saved to ~/.vibectx/resolved.json — get_docs("fastapi") works now; pin or override it in vibectx.config.json.
 ```
 
 (A real run, re-verified on 2026-09-06 line by line, including the 22,568-char figure.
 Two things are presentation, not output: candidates 5 and 6 are elided at the `…`, and the
-last line shows the default cache directory in place of the `DOCS_CACHE_DIR` the run used.
+last line shows the default cache directory in place of the `VIBECTX_CACHE_DIR` the run used.
 The first two candidates report `no document` because that sandbox cannot reach
 `fastapi.tiangolo.com` — from a machine that can, `llms.txt` may well win instead.)
 
@@ -522,7 +522,7 @@ hour**; beyond that, unknown names get a "resolution limit reached" line until t
 window slides (pin the library in config if you hit it).
 
 **Where it persists.** Successful resolutions are written to `resolved.json` in the
-cache directory (`~/.docs-cache-mcp/`, or `DOCS_CACHE_DIR`) via a temp file and rename —
+cache directory (`~/.vibectx/`, or `VIBECTX_CACHE_DIR`) via a temp file and rename —
 an internal file of shape `{ "schemaVersion": 1, "entries": [{ name, urls, description?,
 resolved: { source, resolvedAt, metadataUrl, homepage?, docsUrl? } }] }`. On startup they
 are merged **below** the defaults and your config: a real registry or config entry always
@@ -643,11 +643,27 @@ A `vibectx.config.json` committed to your repo is picked up with **no flag at al
 
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
-`~/.docs-cache-mcp/` (override with `DOCS_CACHE_DIR`). Default TTL is 7 days.
+`~/.vibectx/` (override with `VIBECTX_CACHE_DIR`). Default TTL is 7 days.
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
 killed process left behind before they write anything — but only once it is at least a
 minute old, so a second vibectx sharing the cache never has its in-flight write deleted.
+
+**Upgrading from `~/.docs-cache-mcp`.** The cache used to live at `~/.docs-cache-mcp` and
+the override used to be called `DOCS_CACHE_DIR`. Both still work, and you do not have to do
+anything:
+
+- `VIBECTX_CACHE_DIR` wins. `DOCS_CACHE_DIR` is still read through `0.2.x`, with one
+  deprecation note on stderr the first time a process uses it.
+- With neither set, the first run **renames** `~/.docs-cache-mcp` to `~/.vibectx` once and
+  says so on stderr. A rename, never a copy — so there is never a moment with two
+  divergent caches.
+- If `~/.vibectx` already exists, nothing is migrated and nothing is overwritten; the old
+  directory is left exactly where it is for you to delete.
+- If the rename fails (a different filesystem, permissions), vibectx keeps using
+  `~/.docs-cache-mcp` for that run and says so once. Nothing is copied and no cached
+  document is lost.
+
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
@@ -730,7 +746,7 @@ there is never a question of which file an agent is answering from:
 
 ```
 config: ./vibectx.config.json (project) · ~/.config/vibectx/config.json (user)
-Cache dir: /Users/you/.docs-cache-mcp
+Cache dir: /Users/you/.vibectx
 ```
 
 or `config: --config ./x.json`, or `config: none (shipped defaults)`.

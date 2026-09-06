@@ -19,11 +19,11 @@ import { loadDiscoveredRegistry } from "../src/registry.js";
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-server-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   resetAutowarm();
 });
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
   // Q2 (PAR-657): the done-when case spies process.cwd(); restoring it here means a failure

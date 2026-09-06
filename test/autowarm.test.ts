@@ -22,12 +22,12 @@ let dir: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-autowarm-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   resetAutowarm();
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
   vi.unstubAllGlobals();
 });
@@ -275,7 +275,7 @@ describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
     const reg: Registry = { entries: new Map([["react", { name: "react", urls: [REACT_URL] }]]) };
     // A cache root whose parent is a FILE: mkdirSync throws ENOTDIR, so every index write fails.
     writeFileSync(join(dir, "blocked"), "not a directory", "utf8");
-    process.env.DOCS_CACHE_DIR = join(dir, "blocked", "cache");
+    process.env.VIBECTX_CACHE_DIR = join(dir, "blocked", "cache");
     const notes: string[] = [];
     const summary = await startAutowarm(reg, {
       warn: (m) => notes.push(m),

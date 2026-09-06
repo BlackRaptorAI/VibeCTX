@@ -23,11 +23,11 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-registry-"));
   // loadRegistry also merges <cacheRoot>/resolved.json (PAR-655); point it at an empty dir
   // so a developer's real cache cannot change entry counts here.
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 

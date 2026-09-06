@@ -25,11 +25,11 @@ const { writeCache, touchCache, readCache } = await import("../src/cache.js");
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "docs-cache-atomic-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   calls.length = 0;
 });
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(dir, { recursive: true, force: true });
 });
 

@@ -25,7 +25,7 @@ let previousEnv: Partial<Record<(typeof ENV_KEYS)[number], string>>;
  */
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-cli-"));
-  process.env.DOCS_CACHE_DIR = dir;
+  process.env.VIBECTX_CACHE_DIR = dir;
   sandbox = join(dir, "sandbox");
   mkdirSync(sandbox, { recursive: true });
   previousEnv = {};
@@ -40,7 +40,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   for (const key of ENV_KEYS) {
     if (previousEnv[key] === undefined) delete process.env[key];
     else process.env[key] = previousEnv[key];

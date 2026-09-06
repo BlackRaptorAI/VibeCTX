@@ -16,13 +16,13 @@ let project: string;
 beforeEach(() => {
   cache = mkdtempSync(join(tmpdir(), "vibectx-warm-cache-"));
   project = mkdtempSync(join(tmpdir(), "vibectx-warm-proj-"));
-  process.env.DOCS_CACHE_DIR = cache;
+  process.env.VIBECTX_CACHE_DIR = cache;
   resetResolutionWindow();
   resetSearchIndexMemo();
 });
 
 afterEach(() => {
-  delete process.env.DOCS_CACHE_DIR;
+  delete process.env.VIBECTX_CACHE_DIR;
   rmSync(cache, { recursive: true, force: true });
   rmSync(project, { recursive: true, force: true });
   vi.unstubAllGlobals();
