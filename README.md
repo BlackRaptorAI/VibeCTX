@@ -110,8 +110,11 @@ Per library it reports:
 
 **Exit code** `0` when every checked library is healthy; `1` when any is
 `unreachable`, `index-only` with zero links followed, has a probe with `no match`,
-or has a cache older than 2× its TTL; `2` for a usage, config or unknown-library
-error. `--offline` reports anything not cached as `unreachable`.
+or has a cache older than 2× its TTL (inclusive; not applied when `ttlHours` is `0`);
+`2` for a usage, config or unknown-library error. `--offline` reports anything not
+cached as `unreachable`. A library whose check itself fails (unreadable cache file,
+permission error) is reported `unreachable` with `error: <message>` as its reason and
+never stops the rest of the table. At most three libraries are checked at a time.
 
 `--json` emits `{ generatedAt, libraries: [{ library, kind, url, cacheAgeHours, stale,
 ttlHours, probes: [{ query, derived, status, followed, dropped }], followed, dropped,
