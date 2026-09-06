@@ -93,6 +93,70 @@ describe("buildServer", () => {
   });
 });
 
+describe('get_docs mode over the transport (D-26)', () => {
+  const STRIPE_URL = "https://docs.stripe.com/llms-full.txt";
+  const STRIPE_DOC = [
+    "# Stripe",
+    "## Checkout",
+    "### Create a Checkout Session",
+    "Create the session server-side, then redirect:",
+    "```js",
+    "const session = await stripe.checkout.sessions.create({",
+    "  mode: 'payment',",
+    "});",
+    "```",
+  ].join("\n");
+  const stripeRegistry = (): Registry => ({
+    entries: new Map([["stripe", { name: "stripe", urls: [STRIPE_URL], description: "Stripe" }]]),
+  });
+
+  it('mode "snippets" returns fenced code with its heading path and context line', async () => {
+    writeCache("stripe", STRIPE_URL, STRIPE_DOC);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, call } = await connect(stripeRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("get_docs", { library: "stripe", topic: "checkout session create", mode: "snippets" });
+    expect(out).toContain("### Stripe > Checkout > Create a Checkout Session");
+    expect(out).toContain("Create the session server-side, then redirect:");
+    expect(out).toContain("```js\nconst session = await stripe.checkout.sessions.create({");
+    await client.close();
+  });
+
+  it("the default is sections mode, byte for byte", async () => {
+    writeCache("stripe", STRIPE_URL, STRIPE_DOC);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, call } = await connect(stripeRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const args = { library: "stripe", topic: "checkout session create" };
+    expect(await call("get_docs", args)).toBe(await call("get_docs", { ...args, mode: "sections" }));
+    expect(await call("get_docs", args)).toContain("## Stripe > Checkout > Create a Checkout Session");
+    await client.close();
+  });
+
+  it("an unknown mode is rejected by the schema, not silently treated as sections", async () => {
+    writeCache("stripe", STRIPE_URL, STRIPE_DOC);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, call } = await connect(stripeRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    // The SDK reports a schema violation as an error result, not a thrown transport error.
+    const out = await call("get_docs", { library: "stripe", topic: "checkout", mode: "code" });
+    expect(out).toContain("Input validation error");
+    expect(out).toContain("mode");
+    expect(out).not.toContain("Source:");
+    await client.close();
+  });
+
+  it("get_docs advertises mode as an enum of exactly sections and snippets", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = buildServer(stripeRegistry());
+    await server.connect(serverTransport);
+    const client = new Client({ name: "probe", version: "0" });
+    await client.connect(clientTransport);
+    const getDocs = (await client.listTools()).tools.find((t) => t.name === "get_docs")!;
+    const props = getDocs.inputSchema.properties as Record<string, { enum?: string[] }>;
+    expect(Object.keys(props).sort()).toEqual(["library", "maxTokens", "mode", "topic"]);
+    expect(props.mode.enum).toEqual(["sections", "snippets"]);
+    await client.close();
+  });
+});
+
 describe("startServer + autowarm over an in-memory transport", () => {
   it("autowarm starts only after connect; a tool call answers while its fetch is held open and shows warming…", async () => {
     writeCache("react", REACT_URL, "# React fresh");

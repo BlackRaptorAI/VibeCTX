@@ -41,7 +41,7 @@ export function buildServer(registry: Registry): McpServer {
     "get_docs",
     {
       description:
-        "Get official documentation for a library. With a topic, returns the best-matching sections (following index links when the source is an llms.txt index); without one, returns the document head and section list. An unknown name is resolved automatically from npm / PyPI metadata (llms.txt, then the GitHub README) — any package name works.",
+        'Get official documentation for a library. With a topic, returns the best-matching sections ranked by BM25 (following index links when the source is an llms.txt index); with mode "snippets", returns just the runnable code blocks from those sections, each with its heading path and one line of context. Without a topic, returns the document head and section list. An unknown name is resolved automatically from npm / PyPI metadata (llms.txt, then the GitHub README) — any package name works.',
       inputSchema: {
         library: z.string().describe("Library name (or alias) from list_libraries, or any npm / PyPI package name"),
         topic: z.string().optional().describe("What you need docs about"),
@@ -49,9 +49,16 @@ export function buildServer(registry: Registry): McpServer {
           .number()
           .optional()
           .describe("Approximate response budget (default 4000)"),
+        // D-26: an enum, so an unknown mode is a schema error the client sees rather than
+        // a silent fall back to sections.
+        mode: z
+          .enum(["sections", "snippets"])
+          .optional()
+          .describe('"sections" (default) for prose, "snippets" for code blocks only. Needs a topic.'),
       },
     },
-    async ({ library, topic, maxTokens }) => text(await getDocsToolText(registry, { library, topic, maxTokens })),
+    async ({ library, topic, maxTokens, mode }) =>
+      text(await getDocsToolText(registry, { library, topic, maxTokens, mode })),
   );
 
   server.registerTool(

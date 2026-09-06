@@ -11,6 +11,9 @@ import {
   assemble,
   selectSections,
   splitSections,
+  rankSnippets,
+  assembleSnippets,
+  selectSnippets,
   looksLikeIndex,
   rankLinks,
   extractLinks,
@@ -18,12 +21,19 @@ import {
   MAX_FOLLOWED_BYTES,
 } from "./retrieval.js";
 
+/** D-26: what a topic search returns — whole matching sections (the default), or just
+ *  the runnable code blocks inside them. */
+export type GetDocsMode = "sections" | "snippets";
+
 export interface GetDocsArgs {
   topic?: string;
   /** Approximate response budget in tokens (default 4000). */
   maxTokens?: number;
   /** Cache-only: never touch the network (doctor --offline). */
   offline?: boolean;
+  /** "sections" (default) or "snippets" (D-26). Only meaningful with a topic: without
+   *  one, both modes return the table of contents and the document head. */
+  mode?: GetDocsMode;
 }
 
 /** What get_docs did, as data — the text plus the accounting behind its notes,
@@ -35,7 +45,8 @@ export interface GetDocsOutcome {
   source?: { url: string; stale: boolean };
   /** looksLikeIndex(primary document). */
   isIndex: boolean;
-  /** Sections that matched the topic across the primary document plus followed pages (0 without a topic). */
+  /** Sections — or, in snippets mode, code blocks — that matched the topic across the
+   *  primary document plus followed pages (0 without a topic). */
   matched: number;
   /** Of the sections actually returned under the budget, how many came from a followed page
    *  rather than the primary document. > 0 means following links is what produced the answer. */
@@ -193,37 +204,59 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   if (failed.length) notes.push(`Could not fetch ${failed.length} index links: ${failed.join(", ")}`);
   const noteBlock = notes.length ? `\n${notes.join("\n")}` : "";
 
-  const ranked = rankSections(corpus, topic);
-  if (ranked.length === 0) {
-    const sep = noteBlock ? `${noteBlock}\n` : " ";
+  // Everything above this line is identical for both modes (D-26): the same document,
+  // the same followed links, the same notes. Only the ranking and the rendering differ.
+  const noMatch = (what: string, advice: string): GetDocsOutcome => ({
+    text: `${prefix}No ${what} matched "${topic}" in ${entry.name} docs (source: ${doc.url}).${
+      noteBlock ? `${noteBlock}\n` : " "
+    }${advice}`,
+    source,
+    isIndex,
+    matched: 0,
+    returnedFromFollowed: 0,
+    followed,
+    dropped,
+  });
+
+  /** How many of the rendered chunks came from a followed page rather than the primary
+   *  document. A body-less section is never counted: the "# <link title>" marker
+   *  get_docs prefixes to each followed page matches the topic by construction without
+   *  carrying any answer. Only computed when something was actually followed. */
+  const fromFollowed = (chosen: { heading: string; body: string }[]): number => {
+    if (followed.length === 0) return 0;
+    const primaryKeys = new Set(splitSections(doc.content).map(sectionKey));
+    return chosen.filter((s) => s.body.trim().length > 0 && !primaryKeys.has(sectionKey(s))).length;
+  };
+
+  if ((args.mode ?? "sections") === "snippets") {
+    const snippets = rankSnippets(corpus, topic);
+    if (snippets.length === 0) {
+      return noMatch("code snippets", 'Try mode "sections" or broader terms.');
+    }
+    const corpusSections = splitSections(corpus);
     return {
-      text: `${prefix}No sections matched "${topic}" in ${entry.name} docs (source: ${doc.url}).${sep}Try broader terms or call get_docs without a topic for the table of contents.`,
+      text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${assembleSnippets(snippets, budget)}`,
       source,
       isIndex,
-      matched: 0,
-      returnedFromFollowed: 0,
+      matched: snippets.length,
+      returnedFromFollowed: fromFollowed(
+        selectSnippets(snippets, budget).map((s) => corpusSections[s.sectionIndex]),
+      ),
       followed,
       dropped,
     };
   }
-  const body = assemble(ranked, budget);
-  // Section origin: a returned section is "from a followed page" when it has content and
-  // no section of the primary document has the same heading and body. Body-less sections
-  // are excluded because the "# <link title>" marker prefixed to each followed page matches
-  // the topic by construction without carrying any answer. Only computed when something was followed.
-  let returnedFromFollowed = 0;
-  if (followed.length > 0) {
-    const primaryKeys = new Set(splitSections(doc.content).map(sectionKey));
-    returnedFromFollowed = selectSections(ranked, budget).filter(
-      (s) => s.body.trim().length > 0 && !primaryKeys.has(sectionKey(s)),
-    ).length;
+
+  const ranked = rankSections(corpus, topic);
+  if (ranked.length === 0) {
+    return noMatch("sections", "Try broader terms or call get_docs without a topic for the table of contents.");
   }
   return {
-    text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${body}`,
+    text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${assemble(ranked, budget)}`,
     source,
     isIndex,
     matched: ranked.length,
-    returnedFromFollowed,
+    returnedFromFollowed: fromFollowed(selectSections(ranked, budget)),
     followed,
     dropped,
   };

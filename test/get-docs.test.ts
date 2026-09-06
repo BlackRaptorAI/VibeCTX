@@ -387,6 +387,101 @@ describe("getDocs index following", () => {
   });
 });
 
+describe('getDocs mode: "snippets" (D-26)', () => {
+  const STRIPE_URL = "https://docs.stripe.com/llms-full.txt";
+  const stripe = { name: "stripe", urls: [STRIPE_URL] };
+  const STRIPE_DOC = [
+    "# Stripe",
+    "## Checkout",
+    "### Create a Checkout Session",
+    "Create the session server-side, then redirect the customer:",
+    "```js",
+    "const session = await stripe.checkout.sessions.create({",
+    "  line_items: [{ price: 'price_123', quantity: 1 }],",
+    "  mode: 'payment',",
+    "});",
+    "```",
+    "## Payment intents",
+    "Confirm a payment intent:",
+    "```js",
+    "const intent = await stripe.paymentIntents.confirm('pi_123', {",
+    "  payment_method: 'pm_123',",
+    "});",
+    "```",
+  ].join("\n");
+
+  it("returns the fenced code block with its heading path and context line, and the Source line", async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    const spy = stubFetch({});
+    const out = await getDocs(stripe, { topic: "checkout session create", mode: "snippets" });
+    expect(spy).not.toHaveBeenCalled();
+    expect(out).toContain(`Source: ${STRIPE_URL}`);
+    expect(out).toContain("### Stripe > Checkout > Create a Checkout Session");
+    expect(out).toContain("Create the session server-side, then redirect the customer:");
+    expect(out).toContain("```js\nconst session = await stripe.checkout.sessions.create({");
+    expect(out).not.toContain("## Checkout\n"); // sections-mode rendering is not used
+  });
+
+  it("the default mode is unchanged: sections-mode prose, not code blocks", async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    stubFetch({});
+    const sections = await getDocs(stripe, { topic: "checkout session create" });
+    expect(sections).toContain("## Stripe > Checkout > Create a Checkout Session");
+    expect(sections).toBe(await getDocs(stripe, { topic: "checkout session create", mode: "sections" }));
+    expect(sections).not.toBe(await getDocs(stripe, { topic: "checkout session create", mode: "snippets" }));
+  });
+
+  it("counts matched snippets, not sections, and keeps source / isIndex reporting", async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    stubFetch({});
+    const out = await getDocsDetailed(stripe, { topic: "stripe create", mode: "snippets" });
+    expect(out.matched).toBe(2); // two code blocks, not the four sections
+    expect(out.source).toEqual({ url: STRIPE_URL, stale: false });
+    expect(out.isIndex).toBe(false);
+    expect(out.returnedFromFollowed).toBe(0);
+  });
+
+  it('says so when no code block matches, and points at mode "sections"', async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    stubFetch({});
+    const out = await getDocsDetailed(stripe, { topic: "quantum blockchain", mode: "snippets" });
+    expect(out.text).toBe(
+      `No code snippets matched "quantum blockchain" in stripe docs (source: ${STRIPE_URL}). ` +
+        'Try mode "sections" or broader terms.',
+    );
+    expect(out.matched).toBe(0);
+  });
+
+  it("follows index links in snippets mode and reports the snippet that came from the followed page", async () => {
+    seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    stubFetch({
+      "https://fastify.dev/docs/Request.md": [
+        "# Request",
+        "## request.hostname",
+        "Read the hostname off the request:",
+        "```js",
+        "fastify.get('/', (request, reply) => {",
+        "  reply.send(request.hostname);",
+        "});",
+        "```",
+      ].join("\n"),
+    });
+    const out = await getDocsDetailed(entry, { topic: "request hostname", mode: "snippets" });
+    expect(out.followed).toEqual(["https://fastify.dev/docs/Request.md"]);
+    expect(out.text).toContain("Followed index links: https://fastify.dev/docs/Request.md");
+    expect(out.text).toContain("reply.send(request.hostname);");
+    expect(out.returnedFromFollowed).toBeGreaterThan(0);
+  });
+
+  it("carries the stale prefix into snippets mode", async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    stubFetch({}); // revalidation fails, the stale copy is served
+    const out = await getDocs({ ...stripe, ttlHours: 0 }, { topic: "checkout session create", mode: "snippets" });
+    expect(out.split("\n")[0]).toMatch(/^> /); // the staleNote prefix
+    expect(out).toContain("stripe.checkout.sessions.create(");
+  });
+});
+
 describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-library text, PAR-654)", () => {
   const REACT_URL = "https://react.dev/llms-full.txt";
   const registry: Registry = {
