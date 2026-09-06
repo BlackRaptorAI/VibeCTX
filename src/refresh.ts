@@ -1,4 +1,4 @@
-import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { resolvePackage } from "./resolve.js";
 
@@ -23,7 +23,12 @@ export async function refreshToolText(registry: Registry, library?: string): Pro
     if (entry.resolved) {
       const out = await resolvePackage(entry.name, { ecosystem: entry.resolved.source });
       if (out.ok && out.entry) {
-        registry.entries.set(out.entry.name, out.entry);
+        if (!installResolvedEntry(registry, out.entry)) {
+          results.push(
+            `${entry.name}: not replaced — "${out.entry.name}" is a curated entry (default, config or alias); a resolved record cannot override it`,
+          );
+          continue;
+        }
         results.push(
           `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${out.chosen} (${(out.chars ?? 0).toLocaleString()} chars)`,
         );

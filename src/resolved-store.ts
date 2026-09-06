@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { cacheRoot } from "./cache.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, pypiNameError } from "./package-names.js";
+import { MAX_URLS_PER_ENTRY } from "./limits.js";
 import type { LibraryEntry, ResolvedMeta } from "./registry.js";
 
 /**
@@ -18,7 +19,6 @@ import type { LibraryEntry, ResolvedMeta } from "./registry.js";
 
 export const RESOLVED_SCHEMA_VERSION = 1;
 const FILE_NAME = "resolved.json";
-const MAX_URLS = 10;
 const MAX_DESCRIPTION = 200;
 const METADATA_HOSTS = new Set(["registry.npmjs.org", "pypi.org"]);
 
@@ -29,7 +29,11 @@ export function resolvedStorePath(): string {
 /** Keep a description to one plain line of at most 200 characters. */
 export function cleanDescription(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const oneLine = value.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim();
+  const oneLine = value
+    .replace(/[\u0000-\u001f\u007f]/g, " ") // control characters
+    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "") // zero-width and bidi controls (L1)
+    .replace(/\s+/g, " ")
+    .trim();
   if (oneLine.length === 0) return undefined;
   return oneLine.length > MAX_DESCRIPTION ? `${oneLine.slice(0, MAX_DESCRIPTION - 1)}…` : oneLine;
 }
@@ -42,10 +46,11 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 export function toResolvedEntry(record: unknown): LibraryEntry | undefined {
   if (!isRecord(record)) return undefined;
   const { name, urls, description, resolved } = record;
-  if (typeof name !== "string" || (npmNameError(name) !== undefined && pypiNameError(name) !== undefined)) return undefined;
+  if (typeof name !== "string" || name !== name.trim().toLowerCase()) return undefined; // S2: keys are folded; "React" can never shadow "react"
+  if (npmNameError(name) !== undefined && pypiNameError(name) !== undefined) return undefined;
   if (!Array.isArray(urls) || urls.length === 0) return undefined;
   const cleanUrls: string[] = [];
-  for (const u of urls.slice(0, MAX_URLS)) {
+  for (const u of urls.slice(0, MAX_URLS_PER_ENTRY)) {
     const ok = sanitizeRemoteUrl(u);
     if (ok === undefined) return undefined; // a bad URL in the probe list is not skipped: the whole record is untrusted
     cleanUrls.push(ok);
@@ -95,21 +100,28 @@ function toRecord(e: LibraryEntry): Record<string, unknown> {
 /**
  * Persist one resolution: read the current file, replace-or-append by name, write to
  * a temp file in the same directory and rename over the original (readers see the old
- * or the new file, never a partial one). Two processes saving at the same instant can
- * still lose one another's *record* (last writer wins) — acceptable for a single-user
- * local tool; the file is never corrupt.
+ * or the new file, never a partial one). Returns false (with a note via `warn`) when
+ * the file belongs to another schema version. Two processes saving at the same instant
+ * can still lose one another's *record* (last writer wins) — acceptable for a
+ * single-user local tool; the file is never corrupt.
  */
-export function saveResolvedEntry(entry: LibraryEntry): void {
+export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) => void = (m) => process.stderr.write(m)): boolean {
   if (!entry.resolved) throw new Error(`saveResolvedEntry: "${entry.name}" is not a resolved entry`);
   const valid = toResolvedEntry(toRecord(entry));
   if (!valid) throw new Error(`saveResolvedEntry: "${entry.name}" does not pass resolved-record validation`);
   const dir = cacheRoot();
   mkdirSync(dir, { recursive: true });
+  const path = resolvedStorePath();
+  const foreign = foreignSchemaVersion(path);
+  if (foreign !== undefined) {
+    // K2: a file written by a newer vibectx is not ours to rewrite; the resolution stays in memory.
+    warn(`vibectx: not saving "${valid.name}" — ${path} has schemaVersion ${foreign} (this version writes ${RESOLVED_SCHEMA_VERSION}); delete the file or upgrade\n`);
+    return false;
+  }
   const entries = readResolvedEntries();
   const at = entries.findIndex((e) => e.name === valid.name);
   if (at === -1) entries.push(valid);
   else entries[at] = valid;
-  const path = resolvedStorePath();
   const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
   const body = JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: entries.map(toRecord) }, null, 2);
   try {
@@ -119,4 +131,16 @@ export function saveResolvedEntry(entry: LibraryEntry): void {
     rmSync(tmp, { force: true });
     throw e;
   }
+  return true;
+}
+
+/** The on-disk file's schemaVersion when it parses and is not ours; undefined when absent, corrupt or ours. */
+function foreignSchemaVersion(path: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (isRecord(parsed) && parsed.schemaVersion !== undefined && parsed.schemaVersion !== RESOLVED_SCHEMA_VERSION) return String(parsed.schemaVersion);
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }

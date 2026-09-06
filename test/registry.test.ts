@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_REGISTRY,
+  installResolvedEntry,
   loadRegistry,
   resolveLibrary,
   unknownLibraryMessage,
@@ -447,5 +448,42 @@ describe("loadRegistry merges persisted resolutions BELOW defaults and config (P
   it("can be told to skip persisted resolutions", () => {
     writeResolved([resolvedRecord("elysia", "https://elysiajs.com/llms.txt")]);
     expect(loadRegistry(undefined, { includeResolved: false }).entries.size).toBe(30);
+  });
+
+  it("S2: planted `React` / `NextJS` records neither load nor shadow the curated entries", () => {
+    writeResolved([
+      { ...resolvedRecord("react", "https://evil.example.com/react.txt"), name: "React" },
+      { ...resolvedRecord("nextjs", "https://evil.example.com/next.txt"), name: "NextJS" },
+    ]);
+    const reg = loadRegistry();
+    expect(reg.entries.size).toBe(30);
+    expect(reg.entries.has("React")).toBe(false);
+    expect(resolveLibrary(reg, "React")?.urls[0]).toBe("https://nextjs.org/llms-full.txt".replace("nextjs.org/llms-full", "react.dev/llms-full"));
+    expect(resolveLibrary(reg, "React")?.resolved).toBeUndefined();
+    expect(resolveLibrary(reg, "NextJS")?.name).toBe("next.js");
+  });
+});
+
+describe("installResolvedEntry (S2: a resolved entry can never replace a curated one)", () => {
+  it("refuses when the name maps to a default, a default alias, a config entry or a config alias; installs otherwise", () => {
+    const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["mine-alias"] }]));
+    const meta = { source: "npm" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/x/latest" };
+    for (const name of ["react", "next", "mine", "mine-alias"]) {
+      expect(installResolvedEntry(reg, { name, urls: ["https://evil.example.com/x"], resolved: meta }), name).toBe(false);
+    }
+    expect(reg.entries.get("react")?.urls[0]).toBe("https://react.dev/llms-full.txt");
+    expect(reg.entries.get("mine")?.urls).toEqual(["u"]);
+    expect(installResolvedEntry(reg, { name: "fresh", urls: ["https://fresh.example.com/x"], resolved: meta })).toBe(true);
+    expect(installResolvedEntry(reg, { name: "fresh", urls: ["https://fresh.example.com/y"], resolved: { ...meta, source: "pypi" } })).toBe(true); // replaces a resolved one
+    expect(reg.entries.get("fresh")?.resolved?.source).toBe("pypi");
+    expect(installResolvedEntry(reg, { name: "plain", urls: ["u"] })).toBe(false); // not a resolved entry
+  });
+
+  it("even a hostile exact-case key already in the map cannot be promoted onto the curated key", () => {
+    const reg = loadRegistry();
+    const meta = { source: "npm" as const, resolvedAt: "2026-09-06T05:00:00.000Z", metadataUrl: "https://registry.npmjs.org/react/latest" };
+    reg.entries.set("React", { name: "React", urls: ["https://evil.example.com/x"], resolved: meta }); // simulates a bypassed loader
+    expect(installResolvedEntry(reg, { name: "react", urls: ["https://evil.example.com/y"], resolved: meta })).toBe(false);
+    expect(reg.entries.get("react")?.urls[0]).toBe("https://react.dev/llms-full.txt");
   });
 });

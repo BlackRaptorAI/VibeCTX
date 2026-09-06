@@ -1,4 +1,12 @@
-import { resolveLibrary, type LibraryEntry, type Registry, type ResolvedMeta } from "./registry.js";
+import { installResolvedEntry, resolveLibrary, type LibraryEntry, type Registry, type ResolvedMeta } from "./registry.js";
+import {
+  MAX_METADATA_FETCHES,
+  MAX_LLMS_CANDIDATES,
+  MAX_README_CANDIDATES,
+  README_VARIANTS,
+} from "./limits.js";
+
+export { MAX_METADATA_FETCHES, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES, README_VARIANTS, MAX_URLS_PER_ENTRY, MAX_FETCHES_PER_RESOLUTION, MAX_RESOLUTIONS_PER_HOUR } from "./limits.js";
 import { fetchUrl, getLibraryDoc } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, normalisePyPiName, pypiNameError } from "./package-names.js";
@@ -37,13 +45,6 @@ import { classifySourceKind, type SourceKind } from "./source-kind.js";
 
 export type Ecosystem = "npm" | "pypi";
 
-export const MAX_METADATA_FETCHES = 2;
-export const MAX_LLMS_CANDIDATES = 8;
-/** README filename variants tried at GitHub's `HEAD` ref (the default branch, whatever
- *  its name — MEASURED 2026-09-06 on raw.githubusercontent.com). raw is case-sensitive:
- *  express ships `Readme.md`, resend `readme.md`, django `README.rst`. */
-export const README_VARIANTS = ["README.md", "readme.md", "Readme.md", "README.rst"] as const;
-export const MAX_README_CANDIDATES = README_VARIANTS.length;
 /** Registry metadata documents above this are treated as "no metadata". PyPI's JSON
  *  lists every release; boto3's is 3.3 MB (MEASURED 2026-09-06). ASSUMED headroom. */
 export const METADATA_MAX_BYTES = 8 * 1024 * 1024;
@@ -398,19 +399,20 @@ export async function resolvePackage(
  * e.g. to switch ecosystem) and reported.
  */
 export async function resolveToolText(registry: Registry, name: string, ecosystem?: Ecosystem): Promise<string> {
+  // S2: judge "already curated" on the folded key too, so an exact-case resolved entry
+  // sitting beside a curated one ("React" next to "react") cannot slip past.
   const existing = resolveLibrary(registry, name);
-  if (existing && !existing.resolved) {
+  const curated = existing && !existing.resolved ? existing : resolveLibrary(registry, name.trim().toLowerCase());
+  if (curated && !curated.resolved) {
+    const existingCurated = curated;
     return [
-      `"${name}" is already in the registry as "${existing.name}" — nothing to resolve.`,
+      `"${name}" is already in the registry as "${existingCurated.name}" — nothing to resolve.`,
       "  urls (probed in order):",
-      ...existing.urls.map((u, i) => `    ${i + 1}. ${u}`),
-      `  Use get_docs("${existing.name}"); override the entry in vibectx.config.json to change its sources.`,
+      ...existingCurated.urls.map((u, i) => `    ${i + 1}. ${u}`),
+      `  Use get_docs("${existingCurated.name}"); override the entry in vibectx.config.json to change its sources.`,
     ].join("\n");
   }
   const out = await resolvePackage(name, { ecosystem });
-  if (out.ok && out.entry) {
-    if (existing) registry.entries.delete(existing.name);
-    registry.entries.set(out.entry.name, out.entry);
-  }
+  if (out.ok && out.entry) installResolvedEntry(registry, out.entry); // refuses a curated key (S2); replaces a resolved one
   return out.text;
 }

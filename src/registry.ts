@@ -523,13 +523,19 @@ export function loadRegistry(configPath?: string, opts: { includeResolved?: bool
   return { entries };
 }
 
-/** Add a just-resolved entry to a live registry unless a real entry or alias already owns
- *  the name (mirrors the load-time precedence). Returns the entry that now answers to it. */
-export function adoptResolvedEntry(registry: Registry, entry: LibraryEntry): LibraryEntry {
-  const existing = resolveLibrary(registry, entry.name);
-  if (existing) return existing;
+/**
+ * Install a just-resolved entry into a live registry (S2). Refused — nothing changes —
+ * when the entry is not marked resolved, or when `resolveLibrary` maps its name to a
+ * curated entry (default, config, or either's alias): a resolved record can replace only
+ * another resolved record. Mirrors the load-time precedence. Returns whether it was installed.
+ */
+export function installResolvedEntry(registry: Registry, entry: LibraryEntry): boolean {
+  if (!entry.resolved) return false;
+  const owner = resolveLibrary(registry, entry.name);
+  if (owner && !owner.resolved) return false;
+  if (owner && owner.name !== entry.name) registry.entries.delete(owner.name);
   registry.entries.set(entry.name, entry);
-  return entry;
+  return true;
 }
 
 /** The text every tool returns for a name that resolves to nothing. Lists canonical names

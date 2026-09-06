@@ -87,6 +87,6 @@ describe("listLibrariesText (PAR-707: kind bracket)", () => {
     };
     const text = listLibrariesText(withResolved);
     expect(text).toMatch(/- \*\*zod\*\* — Zod \[not cached\] \[unknown\]$/m);
-    expect(text).toMatch(/- \*\*elysia\*\* — Ergonomic framework \[not cached\] \[unknown\] \[resolved\]$/m);
+    expect(text).toMatch(/- \*\*elysia\*\* — \(package-supplied\) Ergonomic framework \[not cached\] \[unknown\] \[resolved\]$/m);
   });
 });

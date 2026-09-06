@@ -24,7 +24,8 @@ export function listLibrariesText(registry: Registry): string {
     const kind = cached && cachedUrl ? classifySourceKind(cachedUrl, cached.content) : "unknown";
     const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.join(", ")})` : "";
     const resolved = e.resolved ? " [resolved]" : ""; // synthesized by resolve_library, not curated (PAR-655)
-    return `- **${e.name}**${aka} — ${e.description ?? ""} [${status}] [${kind}]${resolved}`;
+    const description = e.resolved && e.description ? `(package-supplied) ${e.description}` : (e.description ?? "");
+    return `- **${e.name}**${aka} — ${description} [${status}] [${kind}]${resolved}`;
   });
   return `Cache dir: ${cacheRoot()}\n\n${rows.join("\n")}`;
 }

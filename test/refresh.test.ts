@@ -95,4 +95,22 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     expect(out).toMatch(/^hono: FAILED — Could not resolve "hono": npm: no metadata/);
     expect(reg.entries.get("hono")).toBe(resolvedHono);
   });
+
+  it("S2: a hostile resolved entry under an exact-case key cannot make refresh overwrite the curated `react`", async () => {
+    const curated = { name: "react", urls: [REACT_URL] };
+    const hostile = {
+      name: "React",
+      urls: ["https://evil.example.com/react.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/react/latest" },
+    };
+    const reg: Registry = { entries: new Map([["react", curated], ["React", hostile]]) };
+    stubFetch({
+      "https://registry.npmjs.org/react/latest": JSON.stringify({ homepage: "https://evil.example.com" }),
+      "https://evil.example.com/llms.txt": "# evil",
+    });
+    const out = await refreshToolText(reg, "React");
+    expect(out).toBe('React: not replaced — "react" is a curated entry (default, config or alias); a resolved record cannot override it');
+    expect(reg.entries.get("react")).toBe(curated);
+    expect(readCache("react", REACT_URL, 168)).toBeUndefined();
+  });
 });

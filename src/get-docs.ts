@@ -1,4 +1,4 @@
-import { adoptResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
+import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import { resolvePackage } from "./resolve.js";
 import {
   getLibraryDoc,
@@ -76,7 +76,9 @@ export async function getDocsToolText(
     if (rest.offline) return unknownLibraryMessage(registry, library);
     const out = await resolvePackage(library);
     if (!out.ok || !out.entry) return out.text;
-    entry = adoptResolvedEntry(registry, out.entry);
+    // S2: a resolved entry never replaces a curated one; if a curated entry owns the name
+    // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
+    entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
   }
   return getDocs(entry, rest);
 }

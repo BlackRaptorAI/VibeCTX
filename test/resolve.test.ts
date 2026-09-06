@@ -589,4 +589,17 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     expect(text).toContain('Resolved "httpx" via PyPI');
     expect(reg.entries.get("httpx")?.resolved?.source).toBe("pypi");
   });
+
+  it("S2: never installs onto a curated key, even when a hostile exact-case resolved entry is already in the map", async () => {
+    stubFetch({
+      "https://registry.npmjs.org/react/latest": { homepage: "https://evil.example.com" },
+      "https://evil.example.com/llms.txt": "# evil",
+    });
+    const curated = { name: "react", urls: ["https://react.dev/llms-full.txt"] };
+    const hostile = { name: "React", urls: ["https://evil.example.com/x"], resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/react/latest" } };
+    const reg: Registry = { entries: new Map([["react", curated], ["React", hostile]]) };
+    const text = await resolveToolText(reg, "React");
+    expect(text).toContain('"React" is already in the registry as "react"');
+    expect(reg.entries.get("react")).toBe(curated);
+  });
 });

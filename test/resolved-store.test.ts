@@ -7,8 +7,10 @@ import {
   saveResolvedEntry,
   resolvedStorePath,
   toResolvedEntry,
+  cleanDescription,
   RESOLVED_SCHEMA_VERSION,
 } from "../src/resolved-store.js";
+import { MAX_URLS_PER_ENTRY, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES } from "../src/limits.js";
 import type { LibraryEntry } from "../src/registry.js";
 
 let dir: string;
@@ -154,16 +156,49 @@ describe("resolved store (<cacheRoot>/resolved.json)", () => {
     expect(e.probeQueries).toBeUndefined();
   });
 
-  it("caps and single-lines the description, and caps the number of urls at 10", () => {
+  it("caps and single-lines the description, and caps the number of urls at the resolver bound (K1)", () => {
+    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
     const e = toResolvedEntry({
       name: "hono",
-      urls: Array.from({ length: 12 }, (_, i) => `https://hono.dev/${i}.txt`),
+      urls: Array.from({ length: MAX_URLS_PER_ENTRY + 1 }, (_, i) => `https://hono.dev/${i}.txt`),
       description: `line one\nline two ${"x".repeat(500)}`,
       resolved: hono.resolved,
     });
-    expect(e?.urls).toHaveLength(10);
+    expect(e?.urls).toHaveLength(MAX_URLS_PER_ENTRY);
     expect(e?.description).not.toContain("\n");
     expect(e?.description?.length).toBeLessThanOrEqual(200);
+  });
+
+  it("round-trips an entry with the full 12-URL candidate list intact (K1)", () => {
+    const urls = Array.from({ length: MAX_URLS_PER_ENTRY }, (_, i) => `https://hono.dev/c${i}/llms.txt`);
+    saveResolvedEntry({ ...hono, urls });
+    expect(readResolvedEntries()[0].urls).toEqual(urls);
+    expect(urls).toHaveLength(12);
+  });
+
+  it("S2: rejects a record whose name is not already trimmed and lower-cased (a planted `React` cannot shadow `react`)", () => {
+    for (const name of ["React", "NextJS", " hono", "hono ", "Next.js", "HTTPX"]) {
+      expect(toResolvedEntry({ name, urls: hono.urls, resolved: hono.resolved }), name).toBeUndefined();
+    }
+    expect(toResolvedEntry({ name: "next.js", urls: hono.urls, resolved: hono.resolved })?.name).toBe("next.js");
+  });
+
+  it("K2: does not overwrite a resolved.json of another schema version; the save is refused with a note", () => {
+    const foreign = JSON.stringify({ schemaVersion: 2, entries: [{ future: true }] });
+    writeFileSync(join(dir, "resolved.json"), foreign, "utf8");
+    const notes: string[] = [];
+    expect(saveResolvedEntry(hono, (m) => notes.push(m))).toBe(false);
+    expect(readFileSync(join(dir, "resolved.json"), "utf8")).toBe(foreign);
+    expect(notes.join("")).toMatch(/schemaVersion 2/);
+    // A corrupt (unparseable) file is not "another version": it is replaced.
+    writeFileSync(join(dir, "resolved.json"), "{{{", "utf8");
+    expect(saveResolvedEntry(hono, (m) => notes.push(m))).toBe(true);
+    expect(readResolvedEntries()).toEqual([hono]);
+  });
+
+  it("L1: cleanDescription strips bidi and zero-width characters as well as control characters", () => {
+    expect(cleanDescription("\u202Eevil\u200B text\u2066\u2069\u200F\u200D ok\u0007")).toBe("evil text ok");
+    expect(cleanDescription("\u200B\u200B")).toBeUndefined();
   });
 
   it("refuses to save an entry that is not a resolved entry", () => {
