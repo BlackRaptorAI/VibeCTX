@@ -7,11 +7,11 @@ import {
   LINKED_PAGE_MAX_BYTES,
 } from "./fetcher.js";
 import {
-  rankSections,
+  rankSplitSections,
   assemble,
   selectSections,
   splitSections,
-  rankSnippets,
+  rankSplitSnippets,
   assembleSnippets,
   selectSnippets,
   looksLikeIndex,
@@ -19,6 +19,7 @@ import {
   extractLinks,
   followLimit,
   MAX_FOLLOWED_BYTES,
+  type SplitSection,
 } from "./retrieval.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
@@ -150,7 +151,15 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   }
 
   // Topic given: if the doc is an index of links, pull the best-matching pages too.
-  let corpus = doc.content;
+  //
+  // D-31: the primary document and each followed page are split into sections
+  // SEPARATELY and the section LISTS concatenated. Concatenating the TEXT and splitting
+  // once meant an unclosed fence in one document swallowed everything appended after it
+  // — the next page's sections, its heading path and its answer with them. Each page
+  // still keeps the "# <link title>" marker as its own root heading, so its heading
+  // paths read under the page they came from.
+  const primarySections = splitSections(doc.content);
+  const followedSections: SplitSection[] = [];
   const followed: string[] = [];
   const failed: string[] = [];
   const tooLarge: string[] = [];
@@ -172,7 +181,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
       const result = await fetchLinkedPage(entry.name, link.url, doc.url, entry.ttlHours, args.offline, entry);
       switch (result.status) {
         case "ok":
-          corpus += `\n\n# ${link.title}\n\n${result.page.content}`;
+          followedSections.push(...splitSections(`# ${link.title}\n\n${result.page.content}`));
           followed.push(link.url);
           followedBytes += result.page.content.length;
           break;
@@ -224,16 +233,17 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
    *  carrying any answer. Only computed when something was actually followed. */
   const fromFollowed = (chosen: { heading: string; body: string }[]): number => {
     if (followed.length === 0) return 0;
-    const primaryKeys = new Set(splitSections(doc.content).map(sectionKey));
+    const primaryKeys = new Set(primarySections.map(sectionKey));
     return chosen.filter((s) => s.body.trim().length > 0 && !primaryKeys.has(sectionKey(s))).length;
   };
 
+  const corpusSections = [...primarySections, ...followedSections];
+
   if ((args.mode ?? "sections") === "snippets") {
-    const snippets = rankSnippets(corpus, topic);
+    const snippets = rankSplitSnippets(corpusSections, topic);
     if (snippets.length === 0) {
       return noMatch("code snippets", 'Try mode "sections" or broader terms.');
     }
-    const corpusSections = splitSections(corpus);
     return {
       text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${assembleSnippets(snippets, budget)}`,
       source,
@@ -247,7 +257,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     };
   }
 
-  const ranked = rankSections(corpus, topic);
+  const ranked = rankSplitSections(corpusSections, topic);
   if (ranked.length === 0) {
     return noMatch("sections", "Try broader terms or call get_docs without a topic for the table of contents.");
   }

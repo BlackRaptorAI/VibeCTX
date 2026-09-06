@@ -203,9 +203,18 @@ function weighSections(sections: SplitSection[], index: Map<string, number>): We
  * the "No sections matched" path is unchanged. Ties keep document order.
  */
 export function rankSections(markdown: string, query: string): Section[] {
+  return rankSplitSections(splitSections(markdown), query);
+}
+
+/**
+ * `rankSections` over sections that were already split — the form get_docs uses, because
+ * D-31 splits the primary document and every followed page SEPARATELY and concatenates
+ * the section lists. Splitting once over concatenated text let an unclosed fence in one
+ * document swallow the next one whole.
+ */
+export function rankSplitSections(sections: SplitSection[], query: string): Section[] {
   const { terms, index } = queryIndex(query);
   if (terms.length === 0) return [];
-  const sections = splitSections(markdown);
   const docs = weighSections(sections, index);
   const idfs = idfsOver(docs, terms.length);
   const avg = averageLength(docs);
@@ -342,7 +351,12 @@ function fenceLang(info: string): string {
  * document does in practice.
  */
 export function extractSnippets(markdown: string): Snippet[] {
-  const sections = splitSections(markdown);
+  return extractSnippetsFrom(splitSections(markdown));
+}
+
+/** `extractSnippets` over sections that were already split (D-31). `sectionIndex` refers
+ *  to the list passed in. */
+export function extractSnippetsFrom(sections: SplitSection[]): Snippet[] {
   const snippets: Snippet[] = [];
   for (let sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
     const section = sections[sectionIndex];
@@ -396,15 +410,19 @@ function hitsExactly(code: string, terms: string[]): boolean {
  * Blocks scoring 0 are dropped, mirroring `rankSections`; ties keep document order.
  */
 export function rankSnippets(markdown: string, query: string): Snippet[] {
+  return rankSplitSnippets(splitSections(markdown), query);
+}
+
+/** `rankSnippets` over sections that were already split (D-31). */
+export function rankSplitSnippets(sections: SplitSection[], query: string): Snippet[] {
   const { terms, index } = queryIndex(query);
   if (terms.length === 0) return [];
-  const sections = splitSections(markdown);
   const sectionDocs = weighSections(sections, index);
   const sectionIdfs = idfsOver(sectionDocs, terms.length);
   const sectionAvg = averageLength(sectionDocs);
   const sectionScores = sectionDocs.map((d) => bm25(d, sectionIdfs, sectionAvg));
 
-  const candidates = extractSnippets(markdown).filter(
+  const candidates = extractSnippetsFrom(sections).filter(
     (s) => nonEmptyLineCount(s.code) >= MIN_SNIPPET_LINES || hitsExactly(s.code, terms),
   );
   if (candidates.length === 0) return [];

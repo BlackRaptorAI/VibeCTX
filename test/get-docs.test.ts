@@ -284,6 +284,47 @@ describe("getDocs index following", () => {
     expect(out.returnedFromFollowed).toBe(0);
   });
 
+  /**
+   * K1 / D-31 — the primary document and every followed page are split SEPARATELY and
+   * their section lists concatenated. Before, the texts were concatenated and split
+   * once, so an unclosed fence in the index swallowed whatever was appended after it:
+   * the followed page's sections, its `# <link title>` marker and all.
+   */
+  it("(D-31) an unclosed fence in the primary document cannot swallow a followed page", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Request](/docs/Request.md): the request object",
+        "- [Reply](/docs/Reply.md): the reply object",
+        "- [Hooks](/docs/Hooks.md): lifecycle hooks",
+        "```", // never closed: everything after this is code, in THIS document
+        "request",
+      ].join("\n"),
+    );
+    stubFetch({
+      "https://fastify.dev/docs/Request.md":
+        "## request.hostname\n\nThe hostname of the incoming request.\n\n## request.id\n\nThe request id.",
+    });
+    const out = await getDocsDetailed(entry, { topic: "request hostname" });
+    expect(out.followed).toEqual(["https://fastify.dev/docs/Request.md"]);
+    expect(out.text).toContain("request.hostname");
+    expect(out.matched).toBeGreaterThan(1); // the followed page's sections are counted
+    expect(out.returnedFromFollowed).toBeGreaterThan(0);
+    // No section's heading path mixes the two documents: the followed page's sections
+    // sit under its own "# Request" marker, never under the index's headings.
+    expect(out.text).toContain("## Request > request.hostname");
+    expect(out.text).not.toContain("Fastify > request.hostname");
+  });
+
+  it("(D-31) keeps the link-title marker as the followed page's root heading", async () => {
+    seedIndex(["# Fastify", "- [Routing guides](/docs/Guides.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    stubFetch({
+      "https://fastify.dev/docs/Guides.md": "## Getting started\n\nInstall the framework and write a route.",
+    });
+    const out = await getDocsDetailed(entry, { topic: "routing getting started" });
+    expect(out.text).toContain("## Routing guides > Getting started");
+  });
+
   it("reports no source and zero matches structurally when nothing is reachable or cached", async () => {
     stubFetch({});
     const out = await getDocsDetailed({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"] }, { topic: "x" });
