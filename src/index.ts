@@ -97,10 +97,11 @@ async function startServer(): Promise<void> {
       description:
         "Read the project's dependency manifests (package.json, pyproject.toml, requirements*.txt; lockfiles when the manifest is absent) and cache every dependency's primary docs so get_docs answers for the whole stack offline. Unknown names are resolved from npm / PyPI; build/lint tooling is skipped as noise. Same table as `vibectx warm`.",
       inputSchema: {
-        dir: z.string().optional().describe("Project directory (default: the server's working directory)"),
+        dir: z.string().optional().describe("Project directory: the server's working directory (default) or one beneath it"),
+        force: z.boolean().optional().describe("Retry names reported unresolved within the last 24 h"),
       },
     },
-    async ({ dir }) => text(await warmToolText(registry, dir)),
+    async ({ dir, force }) => text(await warmToolText(registry, dir, { force })),
   );
 
   const transport = new StdioServerTransport();

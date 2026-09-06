@@ -206,3 +206,18 @@ describe("resolved store (<cacheRoot>/resolved.json)", () => {
     expect(existsSync(join(dir, "resolved.json"))).toBe(false);
   });
 });
+
+describe("K2 (PAR-656) — resolved.json upgrade policy aligned with the project store", () => {
+  it("a LOWER schemaVersion is replaced on save without a note; a HIGHER one stays protected", () => {
+    writeFileSync(join(dir, "resolved.json"), JSON.stringify({ schemaVersion: 0, entries: [] }), "utf8");
+    const notes: string[] = [];
+    expect(saveResolvedEntry(hono, (m) => notes.push(m))).toBe(true);
+    expect(notes).toEqual([]);
+    expect(readResolvedEntries()).toEqual([hono]);
+    const future = JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION + 1, entries: [] });
+    writeFileSync(join(dir, "resolved.json"), future, "utf8");
+    expect(saveResolvedEntry(hono, (m) => notes.push(m))).toBe(false);
+    expect(readFileSync(join(dir, "resolved.json"), "utf8")).toBe(future);
+    expect(notes.join("")).toMatch(/newer schemaVersion 2/);
+  });
+});

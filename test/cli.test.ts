@@ -358,3 +358,22 @@ describe("dispatchCli warm (PAR-656)", () => {
     expect(spy).toHaveBeenCalled();
   });
 });
+
+describe("warm --force and the JSON row order (PAR-656 R3 / K1)", () => {
+  it("parses --force; --json rows keep the documented key order", async () => {
+    expect(parseWarmArgs(["--force"])).toEqual({ json: false, offline: false, force: true });
+    const project = mkdtemp2(join(tmpdir(), "vibectx-cli-proj-"));
+    try {
+      writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19", "zz-nothing": "1" } }), "utf8");
+      writeCache("react", REACT_URL, REACT_DOC);
+      stubFetch({});
+      const a = io();
+      expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--json", "--force"], a)).toBe(1);
+      const report = JSON.parse(a.out.join(""));
+      expect(Object.keys(report.dependencies[0])).toEqual(["name", "ecosystem", "source", "library", "status", "url"]);
+      expect(Object.keys(report.dependencies[1])).toEqual(["name", "ecosystem", "source", "status", "note", "failedAt"]);
+    } finally {
+      rmSync(project, { recursive: true, force: true });
+    }
+  });
+});

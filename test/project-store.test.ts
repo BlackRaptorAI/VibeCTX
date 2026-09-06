@@ -117,3 +117,36 @@ describe("project record store (<cacheRoot>/projects/<hash>.json, PAR-656)", () 
     expect(existsSync(join(dir, "projects"))).toBe(false); // summarising never writes
   });
 });
+
+describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHER one is protected", () => {
+  it("lower: ignored on read, replaced on write, no note", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    writeFileSync(projectRecordPath(project), JSON.stringify({ schemaVersion: 0, dir: project, legacy: true }), "utf8");
+    expect(readProjectRecord(project)).toBeUndefined();
+    const notes: string[] = [];
+    expect(writeProjectRecord(record(), (m) => notes.push(m))).toBe(true);
+    expect(notes).toEqual([]);
+    expect(readProjectRecord(project)).toEqual(record());
+  });
+
+  it("higher: ignored on read, refused on write with a stderr note", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const future = JSON.stringify({ schemaVersion: PROJECT_RECORD_SCHEMA_VERSION + 1, dir: project });
+    writeFileSync(projectRecordPath(project), future, "utf8");
+    const notes: string[] = [];
+    expect(writeProjectRecord(record(), (m) => notes.push(m))).toBe(false);
+    expect(readFileSync(projectRecordPath(project), "utf8")).toBe(future);
+    expect(notes.join("")).toMatch(/newer schemaVersion 2/);
+  });
+
+  it("K3: an unknown status is dropped on read; failedAt must be a date when present", () => {
+    mkdirSync(join(dir, "projects"), { recursive: true });
+    const rows = record().dependencies;
+    writeFileSync(
+      projectRecordPath(project),
+      JSON.stringify({ ...record(), dependencies: [{ ...rows[3], failedAt: "2026-09-06T05:00:00.000Z" }, { ...rows[3], name: "bad-date", failedAt: "yesterday" }, { ...rows[0], status: "unresolved (soon)" }] }),
+      "utf8",
+    );
+    expect(readProjectRecord(project)?.dependencies).toEqual([{ ...rows[3], failedAt: "2026-09-06T05:00:00.000Z" }]);
+  });
+});

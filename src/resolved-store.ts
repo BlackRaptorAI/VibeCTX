@@ -101,7 +101,7 @@ function toRecord(e: LibraryEntry): Record<string, unknown> {
  * Persist one resolution: read the current file, replace-or-append by name, write to
  * a temp file in the same directory and rename over the original (readers see the old
  * or the new file, never a partial one). Returns false (with a note via `warn`) when
- * the file belongs to another schema version. Two processes saving at the same instant
+ * the file belongs to a NEWER schema version; an older one is replaced. Two processes saving at the same instant
  * can still lose one another's *record* (last writer wins) — acceptable for a
  * single-user local tool; the file is never corrupt.
  */
@@ -112,10 +112,11 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   const dir = cacheRoot();
   mkdirSync(dir, { recursive: true });
   const path = resolvedStorePath();
-  const foreign = foreignSchemaVersion(path);
-  if (foreign !== undefined) {
-    // K2: a file written by a newer vibectx is not ours to rewrite; the resolution stays in memory.
-    warn(`vibectx: not saving "${valid.name}" — ${path} has schemaVersion ${foreign} (this version writes ${RESOLVED_SCHEMA_VERSION}); delete the file or upgrade\n`);
+  const newer = newerSchemaVersion(path);
+  if (newer !== undefined) {
+    // K2: a file written by a NEWER vibectx is not ours to rewrite; the resolution stays in memory.
+    // An OLDER schemaVersion is ours to replace (aligned with the project store, PAR-656).
+    warn(`vibectx: not saving "${valid.name}" — ${path} has a newer schemaVersion ${newer} (this version writes ${RESOLVED_SCHEMA_VERSION}); upgrade vibectx or delete the file\n`);
     return false;
   }
   const entries = readResolvedEntries();
@@ -134,11 +135,12 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   return true;
 }
 
-/** The on-disk file's schemaVersion when it parses and is not ours; undefined when absent, corrupt or ours. */
-function foreignSchemaVersion(path: string): string | undefined {
+/** The on-disk file's schemaVersion when it parses and is NEWER than ours; undefined when
+ *  absent, corrupt, ours, or older (an older file is replaced on the next save). */
+function newerSchemaVersion(path: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (isRecord(parsed) && parsed.schemaVersion !== undefined && parsed.schemaVersion !== RESOLVED_SCHEMA_VERSION) return String(parsed.schemaVersion);
+    if (isRecord(parsed) && typeof parsed.schemaVersion === "number" && parsed.schemaVersion > RESOLVED_SCHEMA_VERSION) return String(parsed.schemaVersion);
   } catch {
     return undefined;
   }

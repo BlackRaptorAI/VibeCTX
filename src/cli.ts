@@ -25,6 +25,8 @@ export interface ResolveCliArgs {
 export interface WarmCliArgs {
   json: boolean;
   offline: boolean;
+  /** Retry names the project record marks unresolved within the last 24 h (R3). */
+  force?: true;
   dir?: string;
   config?: string;
 }
@@ -36,7 +38,7 @@ export interface CliIo {
 
 export const DOCTOR_USAGE = "usage: vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]";
 export const RESOLVE_USAGE = "usage: vibectx resolve <package> [--npm | --pypi] [--config <path>]";
-export const WARM_USAGE = "usage: vibectx warm [dir] [--offline] [--json] [--config <path>]";
+export const WARM_USAGE = "usage: vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]";
 
 /** Parse the arguments after `doctor`. Throws on anything not in DOCTOR_USAGE. */
 export function parseDoctorArgs(args: string[]): DoctorCliArgs {
@@ -113,6 +115,9 @@ export function parseWarmArgs(args: string[]): WarmCliArgs {
         break;
       case "--offline":
         parsed.offline = true;
+        break;
+      case "--force":
+        parsed.force = true;
         break;
       case "--config": {
         const value = args[i + 1];
@@ -203,7 +208,7 @@ export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
   }
   let report;
   try {
-    report = await runWarm(registry, { dir: parsed.dir, offline: parsed.offline, warn: io.stderr });
+    report = await runWarm(registry, { dir: parsed.dir, offline: parsed.offline, force: parsed.force === true, warn: io.stderr });
   } catch (e) {
     io.stderr(`${message(e)}\n`);
     return 2;

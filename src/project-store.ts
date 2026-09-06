@@ -12,12 +12,22 @@ import type { DependencyEcosystem } from "./project-deps.js";
  * dislikes) is in the file name.
  *
  * Same discipline as resolved.json: atomic write (temp file + rename), every field
- * re-validated on read, a corrupt file reads as absent, a file with another
- * `schemaVersion` is ignored on read and never overwritten. A record whose `dir` does
- * not equal the directory asked for is treated as absent (the hash is not the identity;
- * the path is). Informational only — nothing reads a record to decide what to fetch.
+ * re-validated on read, a corrupt file reads as absent. Upgrade policy (K2): a file whose
+ * `schemaVersion` is LOWER than ours is ignored on read and replaced on write (an older
+ * vibectx wrote it; this version owns the format now); a HIGHER one is ignored on read and
+ * never overwritten (a newer vibectx owns it — refuse, with a note on stderr). A record
+ * whose `dir` does not equal the directory asked for is treated as absent (the hash is not
+ * the identity; the path is).
+ *
+ * The record is read for one decision only (R3): a dependency it shows `unresolved` with a
+ * `failedAt` inside the last 24 h is reported `unresolved (recent)` on the next run without
+ * spending a resolution slot, unless `--force`. Nothing else consults it.
  */
 
+/** Bumped when a key is renamed, removed or changes meaning — and when a WarmStatus value is
+ *  added or removed (K3): a reader validates `status` against WARM_STATUSES and drops rows
+ *  with an unknown one, so a new value under the same version would silently lose rows for
+ *  older readers. Version 1 is the first shipped shape (0.2.0). */
 export const PROJECT_RECORD_SCHEMA_VERSION = 1;
 
 export type WarmStatus =
@@ -25,6 +35,7 @@ export type WarmStatus =
   | "already fresh"
   | "resolved+cached"
   | "unresolved"
+  | "unresolved (recent)"
   | "denied (noise list)"
   | "skipped (rate cap)"
   | "unreachable";
@@ -34,6 +45,7 @@ export const WARM_STATUSES: readonly WarmStatus[] = [
   "already fresh",
   "resolved+cached",
   "unresolved",
+  "unresolved (recent)",
   "denied (noise list)",
   "skipped (rate cap)",
   "unreachable",
@@ -55,6 +67,9 @@ export interface WarmRow {
   url?: string;
   /** One plain phrase of detail: why unresolved, that a stale copy was kept, … */
   note?: string;
+  /** ISO time of the resolution failure behind an `unresolved` / `unresolved (recent)` row —
+   *  the memo's clock (R3); carried over unchanged while the memo holds. */
+  failedAt?: string;
 }
 
 export interface ProjectRecord {
@@ -85,18 +100,44 @@ export function projectRecordPath(dir: string): string {
   return join(cacheRoot(), "projects", `${hash}.json`);
 }
 
+/** Build a row with its keys in the documented order (K1): name, ecosystem, source,
+ *  library?, status, url?, note?, failedAt?. Every writer goes through here. */
+export function makeWarmRow(fields: {
+  name: string;
+  ecosystem: DependencyEcosystem;
+  source: string;
+  library?: string;
+  status: WarmStatus;
+  url?: string;
+  note?: string;
+  failedAt?: string;
+}): WarmRow {
+  const { name, ecosystem, source, library, status } = fields;
+  const row: WarmRow = library !== undefined ? { name, ecosystem, source, library, status } : { name, ecosystem, source, status };
+  if (fields.url !== undefined) row.url = fields.url;
+  if (fields.note !== undefined) row.note = fields.note;
+  if (fields.failedAt !== undefined) row.failedAt = fields.failedAt;
+  return row;
+}
+
 function toWarmRow(raw: unknown): WarmRow | undefined {
   if (!isRecord(raw)) return undefined;
-  const { name, ecosystem, source, library, status, url, note } = raw;
+  const { name, ecosystem, source, library, status, url, note, failedAt } = raw;
   if (typeof name !== "string" || name.length === 0 || name.length > 214) return undefined;
   if (ecosystem !== "npm" && ecosystem !== "pypi") return undefined;
   if (typeof source !== "string") return undefined;
-  if (typeof status !== "string" || !(WARM_STATUSES as readonly string[]).includes(status)) return undefined;
-  const row: WarmRow = { name, ecosystem, source, status: status as WarmStatus };
-  if (typeof library === "string") row.library = library;
-  if (typeof url === "string") row.url = url;
-  if (typeof note === "string") row.note = note;
-  return row;
+  if (typeof status !== "string" || !(WARM_STATUSES as readonly string[]).includes(status)) return undefined; // K3: unknown status → row dropped
+  if (failedAt !== undefined && (typeof failedAt !== "string" || Number.isNaN(Date.parse(failedAt)))) return undefined;
+  return makeWarmRow({
+    name,
+    ecosystem,
+    source,
+    library: typeof library === "string" ? library : undefined,
+    status: status as WarmStatus,
+    url: typeof url === "string" ? url : undefined,
+    note: typeof note === "string" ? note : undefined,
+    failedAt: typeof failedAt === "string" ? failedAt : undefined,
+  });
 }
 
 /** Validate a parsed file into a ProjectRecord for `dir`; undefined when anything essential is off. */
@@ -124,11 +165,12 @@ export function readProjectRecord(dir: string): ProjectRecord | undefined {
   return toProjectRecord(parsed, dir);
 }
 
-/** The on-disk file's schemaVersion when it parses and is not ours; undefined when absent, corrupt or ours. */
-function foreignSchemaVersion(path: string): string | undefined {
+/** The on-disk file's schemaVersion when it parses and is NEWER than ours (K2); undefined when
+ *  absent, corrupt, ours, or older (older files are ours to replace). */
+function newerSchemaVersion(path: string): string | undefined {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-    if (isRecord(parsed) && parsed.schemaVersion !== undefined && parsed.schemaVersion !== PROJECT_RECORD_SCHEMA_VERSION) {
+    if (isRecord(parsed) && typeof parsed.schemaVersion === "number" && parsed.schemaVersion > PROJECT_RECORD_SCHEMA_VERSION) {
       return String(parsed.schemaVersion);
     }
   } catch {
@@ -140,16 +182,16 @@ function foreignSchemaVersion(path: string): string | undefined {
 /**
  * Write the record for `record.dir` via a temp file and rename (readers see the old or the
  * new file, never a partial one). Returns false, with a note via `warn`, when the file on
- * disk belongs to another schema version — that file is not ours to rewrite.
+ * disk belongs to a NEWER schema version — that file is not ours to rewrite (K2).
  */
 export function writeProjectRecord(record: ProjectRecord, warn: (message: string) => void = (m) => process.stderr.write(m)): boolean {
   const dir = normaliseProjectDir(record.dir);
   const path = projectRecordPath(dir);
   mkdirSync(join(cacheRoot(), "projects"), { recursive: true });
-  const foreign = foreignSchemaVersion(path);
-  if (foreign !== undefined) {
+  const newer = newerSchemaVersion(path);
+  if (newer !== undefined) {
     warn(
-      `vibectx: not writing the project record for ${dir} — ${path} has schemaVersion ${foreign} (this version writes ${PROJECT_RECORD_SCHEMA_VERSION}); delete the file or upgrade\n`,
+      `vibectx: not writing the project record for ${dir} — ${path} has a newer schemaVersion ${newer} (this version writes ${PROJECT_RECORD_SCHEMA_VERSION}); upgrade vibectx or delete the file\n`,
     );
     return false;
   }

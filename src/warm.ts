@@ -1,10 +1,11 @@
-import { installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
+import { resolve, sep } from "node:path";
+import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { mapLimit } from "./doctor.js";
-import { discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type ProjectDependency } from "./project-deps.js";
-import { CACHED_STATUSES, normaliseProjectDir, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
+import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
+import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
 
 export type { WarmRow, WarmStatus } from "./project-store.js";
 
@@ -27,7 +28,24 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
  *      → `resolved+cached` (the entry joins the live registry and resolved.json, and the
  *      chosen document is already cached); the per-hour resolution cap is NOT bypassed —
  *      once it is hit the remaining unknown names are `skipped (rate cap)` and the run goes
- *      on; anything else → `unresolved` with the resolver's attempt summary.
+ *      on; anything else → `unresolved` with the resolver's attempt summary and a
+ *      `failedAt` clock.
+ *   5. negative memo (R3): a name the project record shows `unresolved` with `failedAt` in
+ *      the last RECENT_FAILURE_HOURS is `unresolved (recent)` — no resolution slot spent, the
+ *      original `failedAt` carried over so the window never slides — unless `force`. The
+ *      memo never applies to a name the registry now knows.
+ *
+ * D-11 (oversight, 2026-09-06): registry entries match by name regardless of ecosystem.
+ * When the manifest's ecosystem differs from the entry's evident one — a default entry is
+ * the npm package by the NAMING RULE; a resolved entry is `resolved.source`; a config entry
+ * has none — the row carries `curated entry is the <npm|pypi> package` (or `resolved entry
+ * is …`), so a Python project asking for `stripe` sees it got stripe-node. An `ecosystem`
+ * field on entries is a queued follow-up.
+ *
+ * D-10 (oversight, 2026-09-06): the MCP tool (`warmToolText`) accepts only the server's
+ * working directory or a directory beneath it; the CLI is unrestricted (the user typed it).
+ *
+ * Every table cell passes through `cleanText` before rendering (S3).
  *
  * Only the PRIMARY document is cached: index links are not followed during warm (get_docs
  * follows them on demand, per topic). A resolved entry already in the registry is warmed
@@ -48,8 +66,12 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
 /** Names warmed at once. Bounds fan-out to remote hosts (same reasoning as DOCTOR_CONCURRENCY). */
 export const WARM_CONCURRENCY = 4;
 
-/** Bumped when a key is renamed, removed or changes meaning; new keys may be appended. */
+/** Bumped when a key is renamed, removed or changes meaning, and when a WarmStatus value is
+ *  added or removed (K3: readers drop rows with an unknown status). New keys may be appended. */
 export const WARM_SCHEMA_VERSION = 1;
+
+/** How long an `unresolved` outcome in the project record short-circuits the next run (R3). ASSUMED. */
+export const RECENT_FAILURE_HOURS = 24;
 
 export interface WarmReport {
   schemaVersion: typeof WARM_SCHEMA_VERSION;
@@ -82,6 +104,8 @@ export interface WarmOptions {
   concurrency?: number;
   /** Where the resolver's save notes go (default stderr). */
   warn?: (message: string) => void;
+  /** Retry names the project record marks `unresolved` within RECENT_FAILURE_HOURS (R3). */
+  force?: boolean;
 }
 
 const DEFAULT_TTL_HOURS = 168;
@@ -105,8 +129,28 @@ function cachedState(entry: LibraryEntry): { freshUrl?: string; stale?: { url: s
 
 type Outcome = Pick<WarmRow, "status" | "url" | "note">;
 
-/** One run's per-entry memo, so names sharing an entry share one fetch. */
-type RunState = { entryJobs: Map<string, Promise<Outcome>> };
+/** One run's state: the per-entry memo (names sharing an entry share one fetch) and the
+ *  recent-failure memo read from the previous project record. */
+type RunState = { entryJobs: Map<string, Promise<Outcome>>; recent: Map<string, WarmRow>; nowMs: number };
+
+const memoKey = (ecosystem: DependencyEcosystem, name: string) => `${ecosystem}:${name}`;
+
+/** D-11: the ecosystem an entry evidently belongs to, when that can be known. */
+function evidentEcosystem(entry: LibraryEntry): DependencyEcosystem | undefined {
+  if (entry.resolved) return entry.resolved.source;
+  // A shipped default (or its D-06 alias-trimmed copy, which shares the same `urls` array) is
+  // the npm package by the NAMING RULE; a config entry — even one overriding a default's
+  // name — brings its own urls and has no evident ecosystem.
+  return DEFAULT_REGISTRY.some((d) => d.urls === entry.urls) ? "npm" : undefined;
+}
+
+function ecosystemNote(entry: LibraryEntry, dep: ProjectDependency): string | undefined {
+  const evident = evidentEcosystem(entry);
+  if (evident === undefined || evident === dep.ecosystem) return undefined;
+  return entry.resolved
+    ? `resolved entry is the ${evident} package (resolve it again with --${dep.ecosystem} to switch)`
+    : `curated entry is the ${evident} package`;
+}
 
 /** Warm one registry entry: fresh cache → no network; else getLibraryDoc (etag-first). */
 async function warmEntry(entry: LibraryEntry, opts: WarmOptions): Promise<Outcome> {
@@ -126,8 +170,8 @@ async function warmEntry(entry: LibraryEntry, opts: WarmOptions): Promise<Outcom
 }
 
 async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts: WarmOptions, run: RunState): Promise<WarmRow> {
-  const row: WarmRow = { name: dep.name, ecosystem: dep.ecosystem, source: dep.source, status: "unresolved" };
-  if (isDeniedDependency(dep.name, dep.ecosystem)) return { ...row, status: "denied (noise list)" };
+  const base = { name: dep.name, ecosystem: dep.ecosystem, source: dep.source };
+  if (isDeniedDependency(dep.name, dep.ecosystem)) return makeWarmRow({ ...base, status: "denied (noise list)" });
 
   const entry = lookupLibrary(registry, dep.name);
   if (entry) {
@@ -136,20 +180,36 @@ async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts
       job = warmEntry(entry, opts);
       run.entryJobs.set(entry.name, job);
     }
-    return { ...row, library: entry.name, ...(await job) };
+    const outcome = await job;
+    const notes = [outcome.note, ecosystemNote(entry, dep)].filter((n): n is string => n !== undefined);
+    return makeWarmRow({ ...base, library: entry.name, status: outcome.status, url: outcome.url, note: notes.length > 0 ? notes.join("; ") : undefined });
   }
 
-  if (opts.offline) return { ...row, status: "unresolved", note: "not in the registry; offline, not resolved" };
+  if (opts.offline) return makeWarmRow({ ...base, status: "unresolved", note: "not in the registry; offline, not resolved" });
+
+  // R3: a recent failure is reported, not retried, unless forced.
+  const previous = run.recent.get(memoKey(dep.ecosystem, dep.name));
+  if (previous?.failedAt !== undefined && !opts.force) {
+    const ageHours = (run.nowMs - Date.parse(previous.failedAt)) / 3600_000;
+    const why = previous.note ? ` (${previous.note})` : "";
+    return makeWarmRow({
+      ...base,
+      status: "unresolved (recent)",
+      note: `unresolved ${ageHours.toFixed(1)} h ago${why}; retried after ${RECENT_FAILURE_HOURS} h, or now with --force`,
+      failedAt: previous.failedAt,
+    });
+  }
+
   const out = await resolvePackage(dep.name, { ecosystem: dep.ecosystem, now: opts.now, warn: opts.warn });
   if (out.ok && out.entry) {
     // S2: a resolved entry never displaces a curated one; the lookup above missed, so this installs.
     installResolvedEntry(registry, out.entry);
-    return { ...row, library: out.entry.name, status: "resolved+cached", url: out.chosen };
+    return makeWarmRow({ ...base, library: out.entry.name, status: "resolved+cached", url: out.chosen });
   }
   if (out.limited) {
-    return { ...row, status: "skipped (rate cap)", note: `resolution limit reached (${MAX_RESOLUTIONS_PER_HOUR} per hour per process); run warm again later` };
+    return makeWarmRow({ ...base, status: "skipped (rate cap)", note: `resolution limit reached (${MAX_RESOLUTIONS_PER_HOUR} per hour per process); run warm again later` });
   }
-  return { ...row, status: "unresolved", note: out.attempts.join("; ") };
+  return makeWarmRow({ ...base, status: "unresolved", note: out.attempts.join("; "), failedAt: new Date(run.nowMs).toISOString() });
 }
 
 /** One dependency's row. Never throws: an unexpected error (EACCES on the cache, a corrupt
@@ -159,8 +219,22 @@ async function warmOne(registry: Registry, dep: ProjectDependency, opts: WarmOpt
   try {
     return await warmOneUnguarded(registry, dep, opts, run);
   } catch (e) {
-    return { name: dep.name, ecosystem: dep.ecosystem, source: dep.source, status: "unreachable", note: `error: ${errorMessage(e)}` };
+    return makeWarmRow({ name: dep.name, ecosystem: dep.ecosystem, source: dep.source, status: "unreachable", note: `error: ${errorMessage(e)}` });
   }
+}
+
+/** Rows of the previous record that count as a recent failure (R3), keyed by ecosystem:name. */
+function recentFailures(dir: string, nowMs: number): Map<string, WarmRow> {
+  const memo = new Map<string, WarmRow>();
+  const record = readProjectRecord(dir);
+  if (!record) return memo;
+  for (const row of record.dependencies) {
+    if (row.status !== "unresolved" && row.status !== "unresolved (recent)") continue;
+    if (row.failedAt === undefined) continue;
+    const age = nowMs - Date.parse(row.failedAt);
+    if (age >= 0 && age < RECENT_FAILURE_HOURS * 3600_000) memo.set(memoKey(row.ecosystem, row.name), row);
+  }
+  return memo;
 }
 
 /**
@@ -175,13 +249,14 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     const why = discovery.notes.length > 0 ? ` (${discovery.notes.join("; ")})` : "";
     throw new Error(`no dependency manifest in ${dir}${why}; looked for ${MANIFEST_FILES.join(", ")}`);
   }
-  const run: RunState = { entryJobs: new Map() };
+  const nowMs = (opts.now ?? (() => new Date()))().getTime();
+  const run: RunState = { entryJobs: new Map(), recent: opts.offline ? new Map() : recentFailures(dir, nowMs), nowMs };
   const rows = await mapLimit(discovery.dependencies, opts.concurrency ?? WARM_CONCURRENCY, (dep) => warmOne(registry, dep, opts, run));
   const cached = rows.filter((r) => CACHED_STATUSES.has(r.status)).length;
   const denied = rows.filter((r) => r.status === "denied (noise list)").length;
   const report: WarmReport = {
     schemaVersion: WARM_SCHEMA_VERSION,
-    generatedAt: (opts.now ?? (() => new Date()))().toISOString(),
+    generatedAt: new Date(nowMs).toISOString(),
     dir,
     offline: opts.offline === true,
     manifests: discovery.manifests,
@@ -206,7 +281,7 @@ export function warmExitCode(report: WarmReport): 0 | 1 {
 /** Human-readable table; the same text the CLI prints and the MCP warm_project tool returns. */
 export function formatWarmTable(report: WarmReport): string {
   const header = ["dependency", "library", "status", "url"];
-  const rows = report.dependencies.map((d) => [d.name, d.library ?? "—", d.status, d.url ?? "—"]);
+  const rows = report.dependencies.map((d) => [d.name, d.library ?? "—", d.status, d.url ?? "—"].map(cleanText)); // S3
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const render = (cells: string[]) => cells.map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i]))).join("  ");
   const summary = `${report.cached}/${report.attempted} dependencies cached${report.denied > 0 ? ` · ${report.denied} denied (noise list)` : ""}`;
@@ -220,18 +295,34 @@ export function formatWarmTable(report: WarmReport): string {
     summary,
   ];
   for (const d of report.dependencies) {
-    if (!CACHED_STATUSES.has(d.status) && d.status !== "denied (noise list)" && d.note) lines.push(`✗ ${d.name}: ${d.note}`);
+    if (!d.note) continue;
+    const mark = CACHED_STATUSES.has(d.status) ? "·" : "✗"; // a cached row can still carry the D-11 note
+    if (d.status !== "denied (noise list)") lines.push(cleanText(`${mark} ${d.name}: ${d.note}`));
   }
-  for (const n of report.notes) lines.push(`note: ${n}`);
+  for (const n of report.notes) lines.push(cleanText(`note: ${n}`));
   return lines.join("\n");
 }
 
+/** D-10: is `dir` the working directory or beneath it? Lexical (resolve, no realpath — the
+ *  directory need not exist yet; discovery does its own realpath containment inside). */
+export function isWithinCwd(dir: string, cwd = process.cwd()): boolean {
+  const target = resolve(dir);
+  const base = resolve(cwd);
+  return target === base || target.startsWith(base.endsWith(sep) ? base : base + sep);
+}
+
 /** The MCP `warm_project` tool body: the table for `dir` (default: the server's working
- *  directory), or the one-line reason it could not run. Never throws. */
-export async function warmToolText(registry: Registry, dir?: string): Promise<string> {
+ *  directory, and only that directory or one beneath it — D-10), or the one-line reason it
+ *  could not run. Never throws. */
+export async function warmToolText(registry: Registry, dir?: string, opts: { force?: boolean } = {}): Promise<string> {
+  const cwd = process.cwd();
+  const target = dir ?? cwd;
+  if (!isWithinCwd(target, cwd)) {
+    return cleanText(`${resolve(target)} is outside the project directory (${cwd}); warm_project only reads the server's working directory or a directory beneath it`);
+  }
   try {
-    return formatWarmTable(await runWarm(registry, { dir }));
+    return formatWarmTable(await runWarm(registry, { dir: target, force: opts.force }));
   } catch (e) {
-    return errorMessage(e);
+    return cleanText(errorMessage(e));
   }
 }

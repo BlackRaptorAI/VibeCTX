@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
@@ -314,11 +314,17 @@ describe("formatWarmTable / warmToolText", () => {
     writeCache("react", REACT_URL, "# React fresh");
     writePackageJson({ react: "19" });
     stubFetch({});
-    const text = await warmToolText(registry(), project);
-    expect(text).toMatch(/^vibectx warm · /);
-    expect(text).toContain("1/1 dependencies cached");
-    expect(await warmToolText(registry(), join(project, "nope"))).toMatch(/is not a directory$/);
-    expect(await warmToolText(registry(), cache)).toMatch(/^no dependency manifest in /);
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(project); // D-10: the tool reads cwd or beneath
+    try {
+      const text = await warmToolText(registry(), project);
+      expect(text).toMatch(/^vibectx warm · /);
+      expect(text).toContain("1/1 dependencies cached");
+      expect(await warmToolText(registry(), join(project, "nope"))).toMatch(/is not a directory$/);
+      mkdirSync(join(project, "empty"));
+      expect(await warmToolText(registry(), join(project, "empty"))).toMatch(/^no dependency manifest in /);
+    } finally {
+      cwd.mockRestore();
+    }
   });
 
   it("the default registry with the demo scaffold (offline, empty cache): every real dependency unreachable, noise denied", async () => {
@@ -340,5 +346,123 @@ describe("formatWarmTable / warmToolText", () => {
     for (const n of ["@types/node", "@types/react", "eslint", "eslint-config-next", "postcss"]) expect(rows[n].status, n).toBe("denied (noise list)");
     expect(report.denied).toBe(5);
     expect(report.attempted).toBe(7);
+  });
+});
+
+describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
+  it("K1: every row's keys come in the documented order name, ecosystem, source, library?, status, url?, note?, failedAt?", async () => {
+    writeCache("react", REACT_URL, "# React fresh");
+    writePackageJson({ react: "19", "zz-nothing": "1", eslint: "9" });
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project });
+    const order = ["name", "ecosystem", "source", "library", "status", "url", "note", "failedAt"];
+    for (const row of report.dependencies) {
+      const keys = Object.keys(row);
+      expect(keys, row.name).toEqual(order.filter((k) => keys.includes(k)));
+    }
+    expect(Object.keys(byName(report).react)).toEqual(["name", "ecosystem", "source", "library", "status", "url"]);
+    expect(Object.keys(byName(report)["zz-nothing"])).toEqual(["name", "ecosystem", "source", "status", "note", "failedAt"]);
+  });
+
+  it("Q1: warm fetches ONLY the primary document — an index-like primary with links is cached and none of its links are requested", async () => {
+    const INDEX = "# Hono\n- [Routing](https://hono.dev/docs/routing.md)\n- [Middleware](https://hono.dev/docs/middleware.md)\n- [Helpers](https://hono.dev/docs/helpers.md)";
+    writePackageJson({ hono: "4" });
+    const spy = stubFetch({ [HONO_URL]: INDEX, "https://hono.dev/docs/routing.md": "# Routing" });
+    const report = await runWarm(registry(), { dir: project });
+    expect(byName(report).hono).toMatchObject({ status: "cached", url: HONO_URL });
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([HONO_URL]);
+    expect(readCache("hono", HONO_URL, 168)?.content).toBe(INDEX);
+  });
+
+  it("R3: a name the project record shows `unresolved` within the last 24 h is `unresolved (recent)` and spends no resolution slot; --force retries; after 24 h it retries", async () => {
+    writePackageJson({ "zz-nothing": "1" });
+    const spy = stubFetch({});
+    let t = Date.parse("2026-09-06T10:00:00Z");
+    const now = () => new Date(t);
+    const first = await runWarm(registry(), { dir: project, now });
+    expect(byName(first)["zz-nothing"]).toMatchObject({ status: "unresolved", failedAt: "2026-09-06T10:00:00.000Z" });
+    expect(spy).toHaveBeenCalledTimes(1); // npm metadata only (package.json → npm)
+    spy.mockClear();
+    t += 3 * 3600_000;
+    const second = await runWarm(registry(), { dir: project, now });
+    const row = byName(second)["zz-nothing"];
+    expect(row.status).toBe("unresolved (recent)");
+    expect(row.failedAt).toBe("2026-09-06T10:00:00.000Z");
+    expect(row.note).toMatch(/^unresolved 3\.0 h ago \(npm: no metadata \(404 or unreachable\).*\); retried after 24 h, or now with --force$/);
+    expect(spy).not.toHaveBeenCalled();
+    expect(warmExitCode(second)).toBe(1);
+    // The rewritten record keeps the ORIGINAL failure time, so the window does not slide with every run.
+    expect(readProjectRecord(project)?.dependencies[0].failedAt).toBe("2026-09-06T10:00:00.000Z");
+    const forced = await runWarm(registry(), { dir: project, now, force: true });
+    expect(byName(forced)["zz-nothing"].status).toBe("unresolved");
+    expect(byName(forced)["zz-nothing"].failedAt).toBe(new Date(t).toISOString());
+    expect(spy).toHaveBeenCalledTimes(1);
+    spy.mockClear();
+    t += 25 * 3600_000;
+    const later = await runWarm(registry(), { dir: project, now });
+    expect(byName(later)["zz-nothing"].status).toBe("unresolved");
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("R3: the memo is per ecosystem+name and never applies to names that later resolve or become curated", async () => {
+    writePackageJson({ elysia: "1" });
+    let t = Date.parse("2026-09-06T10:00:00Z");
+    const now = () => new Date(t);
+    stubFetch({});
+    expect(byName(await runWarm(registry(), { dir: project, now })).elysia.status).toBe("unresolved");
+    t += 3600_000;
+    // Now the package resolves (published metadata): the memo still holds for 24 h — until --force.
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia",
+    });
+    expect(byName(await runWarm(registry(), { dir: project, now })).elysia.status).toBe("unresolved (recent)");
+    expect(byName(await runWarm(registry(), { dir: project, now, force: true })).elysia.status).toBe("resolved+cached");
+    // A curated entry for the name is never memoised away.
+    const reg: Registry = { entries: new Map([["elysia", { name: "elysia", urls: ["https://elysiajs.com/llms.txt"] }]]) };
+    stubFetch({ "https://elysiajs.com/llms.txt": "# Elysia" });
+    expect(byName(await runWarm(reg, { dir: project, now })).elysia.status).toBe("cached");
+  });
+
+  it("R1 / D-11: a manifest whose ecosystem differs from the entry's evident ecosystem gets a note; same ecosystem gets none", async () => {
+    writeFileSync(join(project, "pyproject.toml"), '[project]\ndependencies = ["stripe", "httpx"]\n', "utf8");
+    writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { stripe: "16", httpx: "1" } }), "utf8");
+    const reg = loadRegistry(undefined, { includeResolved: false });
+    reg.entries.set("httpx", {
+      name: "httpx",
+      urls: ["https://www.python-httpx.org/llms.txt"],
+      resolved: { source: "pypi", resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://pypi.org/pypi/httpx/json" },
+    });
+    writeCache("stripe", "https://docs.stripe.com/llms-full.txt", "# Stripe");
+    writeCache("httpx", "https://www.python-httpx.org/llms.txt", "# HTTPX");
+    const report = await runWarm(reg, { dir: project, offline: true });
+    const rows = report.dependencies;
+    const find = (name: string, eco: string) => rows.find((r) => r.name === name && r.ecosystem === eco)!;
+    expect(find("stripe", "npm").note).toBeUndefined();
+    expect(find("stripe", "pypi")).toMatchObject({ library: "stripe", status: "already fresh", note: "curated entry is the npm package" });
+    expect(find("httpx", "pypi").note).toBeUndefined();
+    expect(find("httpx", "npm")).toMatchObject({ library: "httpx", status: "already fresh", note: "resolved entry is the pypi package (resolve it again with --npm to switch)" });
+    // A config entry has no evident ecosystem: no note either way.
+    const cfg: Registry = { entries: new Map([["stripe", { name: "stripe", urls: ["https://docs.stripe.com/llms-full.txt"] }]]) };
+    const cfgReport = await runWarm(cfg, { dir: project, offline: true });
+    expect(cfgReport.dependencies.filter((r) => r.name === "stripe").every((r) => r.note === undefined)).toBe(true);
+  });
+
+  it("D-10: warmToolText (the MCP tool) accepts only the server's working directory or a directory beneath it", async () => {
+    writePackageJson({ react: "19" });
+    writeCache("react", REACT_URL, "# React fresh");
+    stubFetch({});
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(project);
+    try {
+      expect(await warmToolText(registry())).toContain("1/1 dependencies cached");
+      expect(await warmToolText(registry(), project)).toContain("1/1 dependencies cached");
+      expect(await warmToolText(registry(), join(project, "sub", ".."))).toContain("1/1 dependencies cached");
+      expect(await warmToolText(registry(), join(project, "nope"))).toMatch(/is not a directory$/); // beneath cwd: allowed, then fails honestly
+      expect(await warmToolText(registry(), cache)).toBe(`${cache} is outside the project directory (${project}); warm_project only reads the server's working directory or a directory beneath it`);
+      expect(await warmToolText(registry(), join(project, ".."))).toMatch(/is outside the project directory/);
+      expect(await warmToolText(registry(), "/")).toMatch(/is outside the project directory/);
+    } finally {
+      cwd.mockRestore();
+    }
   });
 });
