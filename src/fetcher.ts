@@ -1,6 +1,7 @@
 import type { LibraryEntry } from "./registry.js";
 import { readCache, writeCache, touchCache } from "./cache.js";
 import { isAllowedLink, isForbiddenHost, type LinkPolicy } from "./link-policy.js";
+import { USER_AGENT } from "./version.js";
 
 export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 
@@ -104,8 +105,7 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string |
 export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> {
   try {
     const headers: Record<string, string> = {
-      "user-agent":
-        "vibectx/0.1.3 (+https://github.com/BlackRaptorAI/VibeCTX)",
+      "user-agent": USER_AGENT, // src/version.ts — the manifest's version, not a second copy of it
     };
     if (opts.etag) headers["if-none-match"] = opts.etag;
     // Redirects are followed by hand (S1, PAR-655 security gate): with redirect:"follow"

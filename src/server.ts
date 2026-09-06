@@ -12,6 +12,7 @@ import { warmToolText } from "./warm.js";
 import { shouldAutowarm, startAutowarm, type AutowarmSummary } from "./autowarm.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
+import { VERSION } from "./version.js";
 
 /**
  * The MCP server, transport-agnostic (PAR-656 Q2): `buildServer` registers the tools,
@@ -26,7 +27,9 @@ function text(s: string) {
 }
 
 export function buildServer(registry: Registry): McpServer {
-  const server = new McpServer({ name: "vibectx", version: "0.1.3" });
+  // The version a client sees is the manifest's, read at load time (src/version.ts) — it was
+  // a literal here and had to be remembered at every release.
+  const server = new McpServer({ name: "vibectx", version: VERSION });
 
   server.registerTool(
     "list_libraries",
