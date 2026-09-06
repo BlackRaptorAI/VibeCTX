@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -88,5 +88,48 @@ describe("listLibrariesText (PAR-707: kind bracket)", () => {
     const text = listLibrariesText(withResolved);
     expect(text).toMatch(/- \*\*zod\*\* — Zod \[not cached\] \[unknown\]$/m);
     expect(text).toMatch(/- \*\*elysia\*\* — \(package-supplied\) Ergonomic framework \[not cached\] \[unknown\] \[resolved\]$/m);
+  });
+});
+
+import { writeProjectRecord } from "../src/project-store.js";
+
+describe("listLibrariesText (PAR-656: warming… marker and project line)", () => {
+  it("appends warming… inside the status bracket for entries the startup autowarm has in flight", () => {
+    writeCache("react", "https://react.dev/llms-full.txt", "# React\n\nProse.");
+    const text = listLibrariesText(registry, { warming: new Set(["react", "pgvector"]), projectDir: dir });
+    expect(text).toMatch(/- \*\*react\*\* — React 19 documentation \[cached \S+ \(stale\), warming…\] \[full-text\]/);
+    expect(text).toMatch(/- \*\*pgvector\*\* —  \[not cached, warming…\] \[unknown\]/);
+    expect(text).toMatch(/- \*\*fastify\*\* — Fastify web framework reference \[not cached\] \[unknown\]/);
+  });
+
+  it("ends with one project-deps line when a warm record exists for the working directory, and with nothing extra otherwise", () => {
+    const without = listLibrariesText(registry, { projectDir: dir, warming: new Set() });
+    expect(without).not.toContain("Project deps");
+    writeProjectRecord({
+      schemaVersion: 1,
+      dir,
+      manifests: ["package.json"],
+      dependencies: [
+        { name: "react", ecosystem: "npm", source: "package.json", library: "react", status: "cached", url: "https://react.dev/llms-full.txt" },
+        { name: "zz", ecosystem: "npm", source: "package.json", status: "unresolved" },
+        { name: "eslint", ecosystem: "npm", source: "package.json", status: "denied (noise list)" },
+      ],
+      warmedAt: "2026-09-06T06:00:00.000Z",
+    });
+    const text = listLibrariesText(registry, { projectDir: dir, warming: new Set() });
+    const lines = text.split("\n");
+    expect(lines[lines.length - 1]).toBe(`Project deps (${dir}): 1 cached, 1 unresolved, 1 denied — warmed 2026-09-06T06:00:00.000Z`);
+    expect(lines[lines.length - 2]).toBe("");
+    expect(text.match(/Project deps/g)).toHaveLength(1);
+  });
+
+  it("defaults to process.cwd() for the project line and the live autowarm set for the marker", () => {
+    const cwd = vi.spyOn(process, "cwd").mockReturnValue(dir);
+    try {
+      writeProjectRecord({ schemaVersion: 1, dir, manifests: ["package.json"], dependencies: [], warmedAt: "2026-09-06T06:00:00.000Z" });
+      expect(listLibrariesText(registry)).toContain(`Project deps (${dir}): 0 cached, 0 unresolved, 0 denied`);
+    } finally {
+      cwd.mockRestore();
+    }
   });
 });

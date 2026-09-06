@@ -8,6 +8,8 @@ import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
 import { resolveToolText } from "./resolve.js";
+import { warmToolText } from "./warm.js";
+import { shouldAutowarm, startAutowarm } from "./autowarm.js";
 import { dispatchCli } from "./cli.js";
 
 function text(s: string) {
@@ -89,12 +91,28 @@ async function startServer(): Promise<void> {
     async ({ name, ecosystem }) => text(await resolveToolText(registry, name, ecosystem)),
   );
 
+  server.registerTool(
+    "warm_project",
+    {
+      description:
+        "Read the project's dependency manifests (package.json, pyproject.toml, requirements*.txt; lockfiles when the manifest is absent) and cache every dependency's primary docs so get_docs answers for the whole stack offline. Unknown names are resolved from npm / PyPI; build/lint tooling is skipped as noise. Same table as `vibectx warm`.",
+      inputSchema: {
+        dir: z.string().optional().describe("Project directory (default: the server's working directory)"),
+      },
+    },
+    async ({ dir }) => text(await warmToolText(registry, dir)),
+  );
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Background revalidation of configured libraries that are uncached or past TTL (PAR-656):
+  // fire-and-forget, after the transport is up, never on the request path; every error is
+  // swallowed into one stderr line. Opt out with VIBECTX_NO_AUTOWARM=1.
+  if (shouldAutowarm(process.env, process.argv)) void startAutowarm(registry);
 }
 
-// `vibectx doctor [...]` / `vibectx resolve <name>` run and exit with their code;
-// anything else starts the MCP stdio server exactly as before.
+// `vibectx doctor [...]` / `vibectx resolve <name>` / `vibectx warm [dir]` run and exit
+// with their code; anything else starts the MCP stdio server exactly as before.
 const cliExit = await dispatchCli(process.argv, {
   stdout: (s) => process.stdout.write(s),
   stderr: (s) => process.stderr.write(s),
