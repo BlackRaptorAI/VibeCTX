@@ -10,6 +10,8 @@ import {
   deriveProbeQuery,
   formatDoctorTable,
   doctorExitCode,
+  doctorToolText,
+  DOCTOR_CONCURRENCY,
   type DoctorReport,
 } from "../src/doctor.js";
 
@@ -269,6 +271,25 @@ describe("runDoctor cache age and staleness", () => {
     expect(lib.healthy).toBe(true);
   });
 
+  it("exactly 2x TTL is already unhealthy (boundary is >=)", async () => {
+    seedAged("react", REACT_URL, REACT_DOC, 20);
+    stubFetch({});
+    const [lib] = (await runDoctor(reg(entry))).libraries;
+    expect(lib.cacheAgeHours).toBe(20);
+    expect(lib.healthy).toBe(false);
+    expect(lib.reasons).toEqual(["stale 20h, over 2x TTL (10h)"]);
+  });
+
+  it("ttlHours 0 (always revalidate) disables the staleness rule: a refreshed library is healthy", async () => {
+    seedAged("react", REACT_URL, REACT_DOC, 5);
+    stubFetch({ [REACT_URL]: REACT_DOC });
+    const [lib] = (await runDoctor(reg({ ...entry, ttlHours: 0 }))).libraries;
+    expect(lib.ttlHours).toBe(0);
+    expect(lib.stale).toBe(true); // cache.ts semantics: ttl 0 is stale the moment it is written
+    expect(lib.healthy).toBe(true);
+    expect(lib.reasons).toEqual([]);
+  });
+
   it("stale beyond 2x TTL is unhealthy", async () => {
     seedAged("react", REACT_URL, REACT_DOC, 25);
     stubFetch({});
@@ -309,6 +330,29 @@ describe("runDoctor --offline", () => {
     expect(fastify.healthy).toBe(false);
     expect(report.healthy).toBe(1);
     expect(report.total).toBe(2);
+  });
+
+  it("offline reaches the link-following layer: an uncached linked page is dropped, not fetched", async () => {
+    // Mutant guard: dropping `args.offline` from the fetchLinkedPage call in get-docs.ts
+    // makes this fetch the page and turns this test red.
+    writeCache("fastify", FASTIFY_INDEX_URL, fastifyIndex());
+    const spy = vi.fn(async () => new Response(FASTIFY_PAGE, { status: 200, headers: { "content-type": "text/plain" } }));
+    vi.stubGlobal("fetch", spy);
+    const report = await runDoctor(
+      reg({ name: "fastify", urls: [FASTIFY_INDEX_URL], probeQueries: ["querystring parsing"] }),
+      { offline: true },
+    );
+    expect(spy).not.toHaveBeenCalled();
+    const [lib] = report.libraries;
+    expect(lib.kind).toBe("index-only");
+    expect(lib.probes[0]).toEqual({
+      query: "querystring parsing",
+      derived: false,
+      status: "answered",
+      followed: 0,
+      dropped: 1,
+    });
+    expect(lib.healthy).toBe(false);
   });
 
   it("offline index following uses cached pages only", async () => {
@@ -401,5 +445,96 @@ describe("report shape, table and exit code", () => {
     const report = await mixedReport();
     expect(doctorExitCode(report)).toBe(1);
     expect(doctorExitCode({ ...report, libraries: report.libraries.filter((l) => l.healthy), healthy: 1, total: 1 })).toBe(0);
+  });
+});
+
+describe("runDoctor per-library failure isolation", () => {
+  it("a library whose cache read throws is reported unreachable with the error; the rest still render", async () => {
+    // Corrupt meta.json → JSON.parse throws inside readCache → getLibraryDoc → getDocsDetailed.
+    writeCache("broken", "https://broken.example.com/llms.txt", "# Broken");
+    const metaPath = join(dir, "broken", `${urlSlug("https://broken.example.com/llms.txt")}.meta.json`);
+    writeFileSync(metaPath, "{ not json", "utf8");
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    const report = await runDoctor(
+      reg(
+        { name: "broken", urls: ["https://broken.example.com/llms.txt"], probeQueries: ["x"] },
+        { name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] },
+      ),
+    );
+    const [broken, react] = report.libraries;
+    expect(broken.kind).toBe("unreachable");
+    expect(broken.healthy).toBe(false);
+    expect(broken.probes).toEqual([]);
+    expect(broken.reasons).toHaveLength(1);
+    expect(broken.reasons[0]).toMatch(/^error: /);
+    expect(broken.reasons[0]).toMatch(/JSON/i);
+    expect(react.healthy).toBe(true);
+    expect(report.healthy).toBe(1);
+    expect(report.total).toBe(2);
+    expect(formatDoctorTable(report)).toMatch(/broken\s+unreachable\s+—\s+—\s+0\/0\s+✗/);
+  });
+});
+
+describe("runDoctor concurrency cap", () => {
+  it("never has more than DOCTOR_CONCURRENCY libraries in flight", async () => {
+    expect(DOCTOR_CONCURRENCY).toBe(3);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const spy = vi.fn(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((r) => setTimeout(r, 10));
+      inFlight -= 1;
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", spy);
+    const entries: LibraryEntry[] = Array.from({ length: 5 }, (_, i) => ({
+      name: `lib${i}`,
+      urls: [`https://lib${i}.example.com/llms.txt`],
+      probeQueries: ["x"],
+    }));
+    const report = await runDoctor(reg(...entries));
+    expect(spy).toHaveBeenCalledTimes(5);
+    expect(maxInFlight).toBeGreaterThan(1); // it did fan out …
+    expect(maxInFlight).toBeLessThanOrEqual(DOCTOR_CONCURRENCY); // … but no further than the cap
+    expect(report.libraries.map((l) => l.library)).toEqual(entries.map((e) => e.name)); // registry order kept
+    expect(report.total).toBe(5);
+  });
+});
+
+describe("doctorToolText (MCP doctor tool body)", () => {
+  it("returns the table for the whole registry when no library is given", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    const out = await doctorToolText(
+      reg(
+        { name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] },
+        { name: "ghost", urls: ["https://ghost.example.com/llms.txt"] },
+      ),
+    );
+    expect(out).toMatch(/^vibectx doctor/);
+    expect(out).toContain("1/2 libraries healthy");
+  });
+
+  it("restricts to a known library", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    const out = await doctorToolText(
+      reg(
+        { name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] },
+        { name: "ghost", urls: ["https://ghost.example.com/llms.txt"] },
+      ),
+      "react",
+    );
+    expect(out).toContain("1/1 libraries healthy");
+    expect(out).not.toContain("ghost");
+  });
+
+  it("names the known libraries for an unknown one, without running any probe", async () => {
+    const spy = stubFetch({});
+    const out = await doctorToolText(reg({ name: "react", urls: [REACT_URL] }), "nope");
+    expect(out).toBe('Unknown library "nope". Known: react');
+    expect(spy).not.toHaveBeenCalled();
   });
 });

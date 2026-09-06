@@ -6,7 +6,7 @@ import { loadRegistry } from "./registry.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { getDocs } from "./get-docs.js";
 import { listLibrariesText } from "./list-libraries.js";
-import { runDoctor, formatDoctorTable } from "./doctor.js";
+import { doctorToolText } from "./doctor.js";
 import { dispatchCli } from "./cli.js";
 
 function text(s: string) {
@@ -91,13 +91,7 @@ async function startServer(): Promise<void> {
         library: z.string().optional().describe("Check one library only (default: all)"),
       },
     },
-    async ({ library }) => {
-      if (library !== undefined && !registry.entries.has(library)) {
-        const known = [...registry.entries.keys()].join(", ");
-        return text(`Unknown library "${library}". Known: ${known}`);
-      }
-      return text(formatDoctorTable(await runDoctor(registry, { library })));
-    },
+    async ({ library }) => text(await doctorToolText(registry, library)),
   );
 
   const transport = new StdioServerTransport();

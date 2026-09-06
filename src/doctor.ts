@@ -78,8 +78,12 @@ export interface DoctorOptions {
 }
 
 const DEFAULT_TTL_HOURS = 168;
-/** A cache entry older than this many TTLs marks the library unhealthy. */
+/** A cache entry older than this many TTLs marks the library unhealthy (boundary inclusive:
+ *  age >= 2 x TTL). Not applied when ttlHours is 0 — that means "always revalidate", and
+ *  cache.ts marks such entries stale the moment they are written. */
 const STALE_TTL_MULTIPLE = 2;
+/** Libraries checked at once. Bounds fan-out to remote hosts (security finding, PAR-707 review). */
+export const DOCTOR_CONCURRENCY = 3;
 
 const README_BASENAME = /^readme(\.[a-z0-9]+)?$/i;
 const LLMS_TXT_BASENAME = /^llms(-[a-z0-9]+)?\.txt$/i;
@@ -133,7 +137,34 @@ function probeQueriesFor(entry: LibraryEntry): { query: string; derived: boolean
   return [{ query: deriveProbeQuery(entry), derived: true }];
 }
 
+function errorMessage(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+/** One library's row. Never throws: an unexpected error (unreadable cache file, EACCES on
+ *  write, corrupt meta.json) becomes an `unreachable` row carrying the message, so one bad
+ *  library cannot take down the whole report. */
 async function checkLibrary(entry: LibraryEntry, offline: boolean): Promise<LibraryReport> {
+  try {
+    return await checkLibraryUnguarded(entry, offline);
+  } catch (e) {
+    return {
+      library: entry.name,
+      kind: "unreachable",
+      url: null,
+      cacheAgeHours: null,
+      stale: false,
+      ttlHours: entry.ttlHours ?? DEFAULT_TTL_HOURS,
+      probes: [],
+      followed: 0,
+      dropped: 0,
+      healthy: false,
+      reasons: [`error: ${errorMessage(e)}`],
+    };
+  }
+}
+
+async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Promise<LibraryReport> {
   const ttlHours = entry.ttlHours ?? DEFAULT_TTL_HOURS;
   const probes: ProbeResult[] = [];
   let source: { url: string; stale: boolean } | undefined;
@@ -176,7 +207,7 @@ async function checkLibrary(entry: LibraryEntry, offline: boolean): Promise<Libr
     reasons.push("index-only, no links followed (answered from the link list at best)");
   }
   for (const p of probes) if (p.status === "no match") reasons.push(`no match: "${p.query}"`);
-  if (cacheAgeHours !== null && cacheAgeHours >= STALE_TTL_MULTIPLE * ttlHours) {
+  if (ttlHours > 0 && cacheAgeHours !== null && cacheAgeHours >= STALE_TTL_MULTIPLE * ttlHours) {
     reasons.push(`stale ${cacheAgeHours}h, over ${STALE_TTL_MULTIPLE}x TTL (${ttlHours}h)`);
   }
 
@@ -195,24 +226,48 @@ async function checkLibrary(entry: LibraryEntry, offline: boolean): Promise<Libr
   };
 }
 
-/** Run the doctor over the registry (or one library). Libraries are checked
- *  concurrently; the report keeps registry order. */
+/** Map with at most `limit` calls in flight; results in input order. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      results[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function unknownLibraryMessage(registry: Registry, library: string): string {
+  return `Unknown library "${library}". Known: ${[...registry.entries.keys()].join(", ")}`;
+}
+
+/** Run the doctor over the registry (or one library). Up to DOCTOR_CONCURRENCY
+ *  libraries are checked at once; the report keeps registry order. */
 export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): Promise<DoctorReport> {
   let entries = [...registry.entries.values()];
   if (opts.library !== undefined) {
     const one = registry.entries.get(opts.library);
-    if (!one) {
-      throw new Error(`Unknown library "${opts.library}". Known: ${[...registry.entries.keys()].join(", ")}`);
-    }
+    if (!one) throw new Error(unknownLibraryMessage(registry, opts.library));
     entries = [one];
   }
-  const libraries = await Promise.all(entries.map((e) => checkLibrary(e, opts.offline === true)));
+  const libraries = await mapLimit(entries, DOCTOR_CONCURRENCY, (e) => checkLibrary(e, opts.offline === true));
   return {
     generatedAt: new Date().toISOString(),
     libraries,
     healthy: libraries.filter((l) => l.healthy).length,
     total: libraries.length,
   };
+}
+
+/** The MCP `doctor` tool body: the table for the registry or one library, or the
+ *  unknown-library message (no probe is run in that case). */
+export async function doctorToolText(registry: Registry, library?: string): Promise<string> {
+  if (library !== undefined && !registry.entries.has(library)) return unknownLibraryMessage(registry, library);
+  return formatDoctorTable(await runDoctor(registry, { library }));
 }
 
 /** 0 when every checked library is healthy, else 1. */
