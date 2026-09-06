@@ -114,6 +114,7 @@ describe("default registry: vibe-coder top-30 (PAR-654)", () => {
     expectAlias("@playwright/test", "playwright");
     expectAlias("@sveltejs/kit", "sveltekit");
     expectAlias("@tanstack/react-query", "tanstack-query");
+    expectAlias("@tailwindcss/postcss", "tailwindcss");
     // Canonical already IS the common name — no alias needed, must resolve directly:
     for (const n of ["openai", "trpc", "tailwindcss", "drizzle-orm"]) expect(resolveLibrary(reg, n)?.name, n).toBe(n);
   });
@@ -250,7 +251,8 @@ describe("D-06: config beats default alias (backward compatibility with 0.1.3 co
   it("a config ALIAS equal to a default alias also wins: the default loses it", () => {
     const reg = loadRegistry(writeConfig([{ name: "mine", urls: ["u"], aliases: ["tailwind"] }]));
     expect(resolveLibrary(reg, "tailwind")?.name).toBe("mine");
-    expect(reg.entries.get("tailwindcss")?.aliases).toEqual([]);
+    expect(reg.entries.get("tailwindcss")?.aliases).not.toContain("tailwind");
+    expect(reg.entries.get("tailwindcss")?.aliases).toEqual(["@tailwindcss/postcss"]); // the unclaimed alias stays
   });
 
   it("never mutates the shared DEFAULT_REGISTRY objects when dropping an alias", () => {

@@ -116,7 +116,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "tailwindcss",
-    aliases: ["tailwind"],
+    aliases: ["tailwind", "@tailwindcss/postcss"],
     urls: [
       "https://tailwindcss.com/llms-full.txt",
       "https://tailwindcss.com/llms.txt",
