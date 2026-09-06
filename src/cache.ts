@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -48,6 +48,21 @@ export function readCache(
   };
 }
 
+/** Write `path` via a temp file in the same directory and an atomic rename, so a
+ *  concurrent reader (another vibectx process on the same cache, the startup autowarm
+ *  beside a tool call) sees the old file or the new one, never a partial one (S4, PAR-656).
+ *  The temp file is removed if the write fails. */
+function writeAtomic(path: string, data: string): void {
+  const tmp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tmp, data, "utf8");
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
 /** Refresh a cache entry's TTL clock without rewriting content — used after a
  *  304 Not Modified revalidation confirms the upstream is unchanged. */
 export function touchCache(library: string, url: string): void {
@@ -56,9 +71,12 @@ export function touchCache(library: string, url: string): void {
   if (!existsSync(metaPath)) return;
   const meta = JSON.parse(readFileSync(metaPath, "utf8")) as CacheMeta;
   meta.fetchedAt = new Date().toISOString();
-  writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+  writeAtomic(metaPath, JSON.stringify(meta, null, 2));
 }
 
+/** Content first, then meta — each atomically. A crash between the two leaves content
+ *  without meta, which readCache reports as a miss (both files are required), so no
+ *  reader can observe a torn pair. */
 export function writeCache(
   library: string,
   url: string,
@@ -67,11 +85,7 @@ export function writeCache(
 ): void {
   const dir = libDir(library);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${urlSlug(url)}.md`), content, "utf8");
+  writeAtomic(join(dir, `${urlSlug(url)}.md`), content);
   const meta: CacheMeta = { url, fetchedAt: new Date().toISOString(), etag };
-  writeFileSync(
-    join(dir, `${urlSlug(url)}.meta.json`),
-    JSON.stringify(meta, null, 2),
-    "utf8",
-  );
+  writeAtomic(join(dir, `${urlSlug(url)}.meta.json`), JSON.stringify(meta, null, 2));
 }
