@@ -73,8 +73,11 @@ counts once. Sections that score zero are dropped; ties keep document order.
 rendered as `## Auth > Row Level Security > Policies` rather than a context-free
 `## Policies`. A `#` line inside a fenced code block is code, not a heading — with one
 known limitation: a fence indented four or more spaces, or with a tab, is an indented code
-block under CommonMark and is not recognised as a fence (its contents are indented with
-it, so they still cannot become headings). The primary document and each followed index
+block under CommonMark and is not recognised as a fence, so its contents are not protected
+as code. In practice the block's own lines are indented with it and an ATX heading must
+start at column 0, so they do not become headings; a line inside such a block that is
+*not* indented with it — a `#` at column 0 — is outside that protection and does start a
+new section. The primary document and each followed index
 page are split into sections **separately**, so an unclosed fence in one page cannot
 swallow another, and a followed page's headings read under that page's own title. The
 heading path, a snippet's language and its context line are stripped of control, bidi and
