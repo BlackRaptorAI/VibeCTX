@@ -463,6 +463,64 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     expect(out).not.toContain("## Checkout\n"); // sections-mode rendering is not used
   });
 
+  /**
+   * B1 — the README's `mode: "snippets"` example is this run, and this test is what
+   * keeps the two identical. The library is fictional and its host is under
+   * `example.com` (RFC 2606, reserved for documentation), so nothing in the README
+   * claims to be output from a vendor's real documentation site.
+   *
+   * If this test fails, the README is now wrong: update both together.
+   */
+  const README_URL = "https://docs.acme.example.com/llms-full.txt";
+  const README_ENTRY = { name: "acme-pay", urls: [README_URL] };
+  const README_DOC = [
+    "# Acme Pay",
+    "",
+    "## Checkout",
+    "",
+    "### Create a Checkout Session",
+    "",
+    "Create the session on your server, then redirect the customer:",
+    "",
+    "```js",
+    "const session = await acme.checkout.sessions.create({",
+    "  line_items: [{ price: 'price_123', quantity: 1 }],",
+    "  mode: 'payment',",
+    "  success_url: 'https://example.com/thanks',",
+    "});",
+    "```",
+    "",
+    "## Refunds",
+    "",
+    "Refund a payment:",
+    "",
+    "```js",
+    "await acme.refunds.create({ payment: 'pay_123' });",
+    "```",
+  ].join("\n");
+
+  it("produces the README's snippets example verbatim (B1)", async () => {
+    writeCache(README_ENTRY.name, README_URL, README_DOC);
+    stubFetch({});
+    const out = await getDocs(README_ENTRY, { topic: "checkout session create", mode: "snippets" });
+    expect(out).toBe(
+      [
+        "Source: https://docs.acme.example.com/llms-full.txt",
+        "",
+        "### Acme Pay > Checkout > Create a Checkout Session",
+        "Create the session on your server, then redirect the customer:",
+        "",
+        "```js",
+        "const session = await acme.checkout.sessions.create({",
+        "  line_items: [{ price: 'price_123', quantity: 1 }],",
+        "  mode: 'payment',",
+        "  success_url: 'https://example.com/thanks',",
+        "});",
+        "```",
+      ].join("\n"),
+    );
+  });
+
   it("the default mode is unchanged: sections-mode prose, not code blocks", async () => {
     writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
     stubFetch({});

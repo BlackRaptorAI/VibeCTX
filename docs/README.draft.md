@@ -45,14 +45,14 @@ That's the whole install. No Docker, no database, no embedding key, no config fi
 | Tool | What it does |
 |---|---|
 | `list_libraries()` | Registry + per-library cache status |
-| `get_docs(library, topic?, maxTokens?)` | Fetch-or-cache, then return the sections best matching `topic` (follows llms.txt index links when needed). No topic → table of contents + document head |
+| `get_docs(library, topic?, maxTokens?, mode?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head |
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted) |
 
 ## How it works
 
 - **llms.txt-first.** VibeCTX prefers each project's own published [`llms.txt` / `llms-full.txt`](https://llmstxt.org/); candidate URLs are probed in order, with a raw README or docs page as fallback.
 - **Index-aware.** When a source is a link index, VibeCTX fetches (and caches) the topic's best-matching links one level deep.
-- **Deterministic retrieval.** Markdown heading-split plus keyword scoring. No embeddings, no external calls at query time — the same question returns the same answer every run.
+- **Deterministic retrieval.** Markdown heading-split plus BM25 scoring over a camelCase-aware, lightly stemmed tokenizer. No embeddings, no external calls at query time — the same question returns the same answer every run.
 - **Offline-first cache.** Disk cache (etag / TTL); when the network is down, VibeCTX serves the cached copy flagged `STALE:` rather than failing.
 - **Safe by default.** A same-origin SSRF guard bounds which links the fetcher will follow.
 

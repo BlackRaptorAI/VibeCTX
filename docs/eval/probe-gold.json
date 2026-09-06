@@ -1,4 +1,5 @@
 {
+  "schemaVersion": 1,
   "provenance": "producer-labelled against GitHub README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox",
   "questions": 60,
   "corpus": "For every one of the 30 registry entries, the document the fetcher actually resolved in the build sandbox was the raw.githubusercontent.com README fallback: the docs-site llms-full.txt / llms.txt candidates are not reachable from here. A README is a much thinner corpus than an llms-full.txt, so many probe queries have NO correct answer in it at all.",

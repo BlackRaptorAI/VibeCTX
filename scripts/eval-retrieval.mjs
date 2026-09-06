@@ -118,7 +118,59 @@ function legacyAssemble(sections, maxTokens) {
 
 /* ------------------------------------------------------------------ */
 
-const gold = JSON.parse(readFileSync(join(repoRoot, "docs/eval/probe-gold.json"), "utf8"));
+/**
+ * D-32 — the gold set is a versioned data contract, not a convenient blob. This script
+ * is the only reader, so it is the only place the shape can be checked: it validates
+ * before it measures and fails loudly, because a silently half-read gold set produces
+ * numbers that look exactly like real ones.
+ *
+ * Version 1: `{ schemaVersion: 1, provenance: string, gold: [{ library, query, expect:
+ * string[], unanswerable?: true, note?: string }] }`. `unanswerable` must agree with
+ * `expect.length === 0` — the flag is kept rather than dropped, because it records that
+ * the labeller decided the corpus cannot answer the question, which an empty array alone
+ * does not distinguish from an unfinished entry.
+ */
+const GOLD_SCHEMA_VERSION = 1;
+
+function validateGold(g) {
+  const fail = (why) => {
+    throw new Error(`docs/eval/probe-gold.json: ${why} — refusing to report numbers from a gold set this script cannot read`);
+  };
+  if (g === null || typeof g !== "object" || Array.isArray(g)) fail("not a JSON object");
+  if (g.schemaVersion !== GOLD_SCHEMA_VERSION) {
+    fail(`schemaVersion is ${JSON.stringify(g.schemaVersion)}, this script reads ${GOLD_SCHEMA_VERSION}`);
+  }
+  if (typeof g.provenance !== "string" || g.provenance.trim() === "") fail("provenance must be a non-empty string");
+  if (!Array.isArray(g.gold) || g.gold.length === 0) fail("gold must be a non-empty array");
+  g.gold.forEach((q, i) => {
+    const at = `gold[${i}]`;
+    if (q === null || typeof q !== "object" || Array.isArray(q)) fail(`${at} is not an object`);
+    for (const key of ["library", "query"]) {
+      if (typeof q[key] !== "string" || q[key].trim() === "") fail(`${at}.${key} must be a non-empty string`);
+    }
+    if (!Array.isArray(q.expect) || q.expect.some((r) => typeof r !== "string" || r === "")) {
+      fail(`${at}.expect must be an array of non-empty strings`);
+    }
+    for (const r of q.expect) {
+      try {
+        new RegExp(r, "i");
+      } catch (e) {
+        fail(`${at}.expect contains an invalid regex ${JSON.stringify(r)}: ${e.message}`);
+      }
+    }
+    if (q.unanswerable !== undefined && q.unanswerable !== true) fail(`${at}.unanswerable, when present, must be true`);
+    if ((q.unanswerable === true) !== (q.expect.length === 0)) {
+      fail(`${at} ("${q.library}" / "${q.query}"): unanswerable=${q.unanswerable} disagrees with expect.length=${q.expect.length}`);
+    }
+    if (q.note !== undefined && typeof q.note !== "string") fail(`${at}.note must be a string`);
+  });
+  if (typeof g.questions === "number" && g.questions !== g.gold.length) {
+    fail(`questions says ${g.questions} but gold has ${g.gold.length} entries`);
+  }
+  return g;
+}
+
+const gold = validateGold(JSON.parse(readFileSync(join(repoRoot, "docs/eval/probe-gold.json"), "utf8")));
 const entries = new Map(DEFAULT_REGISTRY.map((e) => [e.name, e]));
 
 /** Fetch each library's document once. */

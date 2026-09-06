@@ -51,11 +51,14 @@ split at camelCase and PascalCase boundaries — `useEffect` becomes `use` + `ef
 `HTTPServer` becomes `http` + `server` — while the whole compound (`useeffect`) is kept
 too, so a literal `useEffect` still scores. A light suffix stemmer folds `policies` onto
 `policy`, `hooks` onto `hook`, and — after the plural and `ing`/`ed` rules — repairs the
-spelling the suffix changed, so `parse` / `parsing` / `parsed` / `parses` all land on
-`pars`, `running` on `run`, and `cache` / `caching` / `cached` on `cach`. Two exceptions
-are deliberate: `using` is a stopword and keeps its own form, and there is no agent-noun
-rule, so `handler` and `router` stay distinct from `handle` and `route`. A small
-stopword list drops "how do I use the …"
+spelling the suffix changed, in both directions: it drops a silent `e` so `parse` /
+`parsing` / `parsed` / `parses` all land on `pars`, undoubles a consonant so `running`
+lands on `run`, and puts a silent `e` back so `type` / `typed` / `typing` all land on
+`type` rather than on the bare `typ`. Three exceptions are deliberate and documented in
+`src/tokenize.ts`: `using` is a stopword and keeps its own form; there is no agent-noun
+rule, so `handler` and `router` stay distinct from `handle` and `route`; and `embed` does
+not meet `embedded`, because no suffix rule can tell a real `-ed` from a word that merely
+ends in one. A small stopword list drops "how do I use the …"
 scaffolding, unless the query is nothing but stopwords. The result: asking for "use
 effect cleanup" finds `useEffect`, and asking for `useEffect` finds "use effect".
 
@@ -68,7 +71,15 @@ counts once. Sections that score zero are dropped; ties keep document order.
 
 **Heading path.** Sections know where they sit in the heading tree, so a returned H4 is
 rendered as `## Auth > Row Level Security > Policies` rather than a context-free
-`## Policies`. A `#` line inside a fenced code block is code, not a heading.
+`## Policies`. A `#` line inside a fenced code block is code, not a heading — with one
+known limitation: a fence indented four or more spaces, or with a tab, is an indented code
+block under CommonMark and is not recognised as a fence (its contents are indented with
+it, so they still cannot become headings). The primary document and each followed index
+page are split into sections **separately**, so an unclosed fence in one page cannot
+swallow another, and a followed page's headings read under that page's own title. The
+heading path, a snippet's language and its context line are stripped of control, bidi and
+zero-width characters before they are rendered; section bodies are not, because the body
+is the document.
 
 Measured comparison against the previous ranker: [`docs/eval/2026-09-06-par-658.md`](docs/eval/2026-09-06-par-658.md).
 
@@ -80,31 +91,42 @@ path, one line of context from the doc, and the fence's language:
 
 ```jsonc
 // tool call
-{ "library": "stripe", "topic": "checkout session create", "mode": "snippets" }
+{ "library": "acme-pay", "topic": "checkout session create", "mode": "snippets" }
 ```
 
 ~~~markdown
-Source: https://docs.stripe.com/llms-full.txt
+Source: https://docs.acme.example.com/llms-full.txt
 
-### Checkout > Sessions > Create a Checkout Session
-Create the session server-side, then redirect the customer:
+### Acme Pay > Checkout > Create a Checkout Session
+Create the session on your server, then redirect the customer:
 
 ```js
-const session = await stripe.checkout.sessions.create({
+const session = await acme.checkout.sessions.create({
   line_items: [{ price: 'price_123', quantity: 1 }],
   mode: 'payment',
+  success_url: 'https://example.com/thanks',
 });
 ```
 ~~~
 
-(Shape of the response, from the real `llms-full.txt`. The exact headings depend on
-what the library publishes.)
+**Where that response came from.** `acme-pay` is a made-up library on a
+[reserved documentation domain](https://datatracker.ietf.org/doc/html/rfc2606), and the
+block above is the real, unedited output of this code against a fixture document — pinned
+by `test/get-docs.test.ts` ("produces the README's snippets example verbatim"), which
+fails if the two ever drift. It is the *shape* of a response, not a capture from any
+vendor's documentation site; the exact headings depend on what the library publishes.
 
 A snippet is ranked by its section's BM25 score plus a BM25 over the code itself, so the
 block that actually contains the call you asked for wins. Blocks under two lines are
-skipped unless the query names them exactly. `mode` needs a topic; the default is
+skipped unless the query names them exactly. The code is fenced with a backtick run
+longer than any run inside it, so a code sample that itself contains a fence cannot break
+out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a topic; the default is
 `"sections"`, and anything other than those two values is a schema error. When nothing
-matches you get `No code snippets matched "…" — try mode "sections" or broader terms.`
+matches you get, in full:
+
+```
+No code snippets matched "<topic>" in <library> docs (source: <url>). Try mode "sections" or broader terms.
+```
 
 ## Warm your project's docs
 
@@ -132,10 +154,13 @@ eslint-config-next     —            denied (noise list)  —
 6/6 dependencies cached · 2 denied (noise list)
 ```
 
-(A run from a network where only GitHub was reachable, so every entry fell back to its
-README candidate; with the docs sites reachable you would see `llms-full.txt` / `llms.txt`
-URLs where projects publish them.) Afterwards `get_docs("stripe", "webhook signature
-verification")` answers from the cache with the network unplugged.
+(A real run against that `package.json`, reproduced on 2026-09-06 from a sandbox where
+only `raw.githubusercontent.com` was reachable, so every entry fell back to its README
+candidate; with the docs sites reachable you would see `llms-full.txt` / `llms.txt` URLs
+where projects publish them. Every row and the totals are that run's; only the two paths
+in the header line are shown as a typical macOS home rather than the run's temporary
+directories.) Afterwards `get_docs("stripe", "webhook signature verification")` answers
+from the cache with the network unplugged.
 
 **What it reads** (each file once; names de-duplicated per ecosystem):
 
@@ -295,6 +320,7 @@ no curation, no config. `resolve_library` does the same step explicitly and show
 ```
 $ npx -y @blackraptorai/vibectx resolve fastapi
 Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
+  description: (package-supplied) FastAPI framework, high performance, easy to learn, fast to code, ready for production
   homepage:   —
   docs:       https://fastapi.tiangolo.com/
   repository: https://github.com/fastapi/fastapi
@@ -308,6 +334,12 @@ Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
   followed-link hosts: fastapi.tiangolo.com (plus the source document's own host; https only)
   saved to ~/.docs-cache-mcp/resolved.json — get_docs("fastapi") works now; pin or override it in vibectx.config.json.
 ```
+
+(A real run, re-verified on 2026-09-06 line by line, including the 22,568-char figure.
+Two things are presentation, not output: candidates 5 and 6 are elided at the `…`, and the
+last line shows the default cache directory in place of the `DOCS_CACHE_DIR` the run used.
+The first two candidates report `no document` because that sandbox cannot reach
+`fastapi.tiangolo.com` — from a machine that can, `llms.txt` may well win instead.)
 
 **What resolution does**, in order, stopping at the first usable document:
 
@@ -628,18 +660,30 @@ npx -y @blackraptorai/vibectx doctor --config ./vibectx.config.json
 ```
 
 ```
-library   kind         cache  probe                 links  mark
-supabase  readme       0.0h   2 probes: 2 answered  0/0    ✓
-stripe    readme       0.0h   2 probes: 2 answered  0/0    ✓
-react     unreachable  —      —                     0/0    ✗
+library         kind    cache  probe                             links  mark
+next.js         readme  0.0h   2 probes: 1 answered, 1 no match  0/0    ✗
+react           readme  0.0h   2 probes: 1 answered, 1 no match  0/0    ✗
+supabase        readme  0.0h   2 probes: 2 answered              0/0    ✓
+…
+resend          readme  0.0h   2 probes: 2 answered              0/0    ✓
 
-2/3 libraries healthy
-✗ react: unreachable: nothing fetched and nothing cached
+23/30 libraries healthy
+✗ next.js: no match: "app router layout"
+✗ react: no match: "context provider"
+✗ tailwindcss: no match: "responsive breakpoints"
+✗ prisma: no match: "upsert"
+✗ hono: no match: "route params"
+✗ vite: no match: "env variables"
+✗ anthropic-sdk: no match: "tool use"
 ```
 
-(Three rows of a run from a network where only GitHub was reachable, so the entries fell
-back to their README candidates; with the docs sites reachable you would expect `full-text`
-or `index-only` in the kind column.)
+(A real `vibectx doctor` run over the shipped 30, on 2026-09-06, from a sandbox where only
+`raw.githubusercontent.com` was reachable — so every entry fell back to its README
+candidate and the `kind` column is `readme` throughout. Rows are elided at the `…`; the
+totals and the ✗ lines are that run's, in full. With the docs sites reachable you would
+expect `full-text` or `index-only` in the kind column and fewer `no match` probes: a
+README is a much thinner document than an `llms-full.txt`, which is the honest limit
+`doctor` exists to show you.)
 
 Per library it reports:
 
