@@ -1,3 +1,4 @@
+import { clipText } from "./config.js";
 import { tokenize } from "./tokenize.js";
 
 /** A heading and the text under it, with where it sits in the heading tree (D-25). */
@@ -215,14 +216,52 @@ export function rankSections(markdown: string, query: string): Section[] {
     .map(({ order: _order, ...s }) => s);
 }
 
+/* ------------------------------------------------------------------ *
+ * D-30 — what gets sanitised, and what deliberately does not.
+ *
+ * Every field VibeCTX composes a line out of — the heading path, a snippet's language
+ * and its context line — is a DERIVED field: the document supplies the text, we supply
+ * the markdown around it. Those get the same treatment `list_libraries` rows and `warm`
+ * rows already get: control, C1, bidi and zero-width characters stripped, then clipped.
+ *
+ * Section BODIES are NOT cleaned. The body IS the document: a control character inside a
+ * code sample is part of the sample, and laundering it would corrupt the answer the
+ * agent asked for. The asymmetry is deliberate — sanitise what we compose, quote what we
+ * were given — and both halves are pinned by tests.
+ * ------------------------------------------------------------------ */
+
+/** D-30 field caps: long enough for a real heading path, short enough that no derived
+ *  field can dominate a response. ASSUMED, matching MAX_LIBRARY_FIELD_CHARS. */
+const MAX_PATH_CHARS = 200;
+const MAX_CONTEXT_CHARS = 200;
+const MAX_LANG_CHARS = 20;
+
+/**
+ * A derived field, made safe to place in rendered markdown: control, C1, bidi and
+ * zero-width characters removed and the text clipped (`clipText`, the same helper the
+ * library table uses — stripping controls also flattens it to one line), then any run of
+ * three or more backticks or tildes collapsed to two, which is inert in every position.
+ * That last step is what stops a heading, a context line or an info string from opening
+ * or closing a fenced block of its own. Both regexes are one character class with one
+ * quantifier: linear on any input.
+ */
+function renderField(text: string, max: number): string {
+  return clipText(text, max).replace(/`{3,}/g, "``").replace(/~{3,}/g, "~~");
+}
+
 /** The heading line D-25 renders: ancestors joined with " > ", the section's own
  *  heading last. Top-level sections and "(intro)" render as they always did. */
 export function headingPath(s: { heading: string; path: string[] }): string {
   return s.path.length > 0 ? `${s.path.join(" > ")} > ${s.heading}` : s.heading;
 }
 
+/** The heading path as it is rendered: derived, so cleaned and clipped (D-30). */
+function renderedPath(s: { heading: string; path: string[] }): string {
+  return renderField(headingPath(s), MAX_PATH_CHARS);
+}
+
 export function renderSection(s: SplitSection): string {
-  return `## ${headingPath(s)}\n\n${s.body}`;
+  return `## ${renderedPath(s)}\n\n${s.body}`;
 }
 
 /** The leading run of `sections` that fits a rough token budget (~4 chars per
@@ -384,8 +423,37 @@ export function rankSnippets(markdown: string, query: string): Snippet[] {
     .map(({ order: _order, ...s }) => s);
 }
 
+/** The longest run of backticks anywhere in `code`. One linear pass. */
+function longestBacktickRun(code: string): number {
+  let longest = 0;
+  let run = 0;
+  for (let i = 0; i < code.length; i++) {
+    if (code.charCodeAt(i) === 96) {
+      run += 1;
+      if (run > longest) longest = run;
+    } else {
+      run = 0;
+    }
+  }
+  return longest;
+}
+
+/**
+ * D-28: the fence for this code — a backtick run one longer than the longest run the
+ * code contains, never fewer than three. Backticks rather than tildes so a `~~~` inside
+ * the code is inert too. This is what makes the rendered block well-formed markdown for
+ * ANY code content, which is a test (`snippet rendering is inescapable and bounded`),
+ * not a claim in a comment.
+ */
+function fenceFor(code: string): string {
+  return "`".repeat(Math.max(MIN_FENCE_CHARS, longestBacktickRun(code) + 1));
+}
+
 function renderSnippet(s: Snippet): string {
-  return `### ${headingPath(s)}\n${s.context}\n\n\`\`\`${s.lang}\n${s.code}\n\`\`\``;
+  const fence = fenceFor(s.code);
+  const lang = renderField(s.lang, MAX_LANG_CHARS);
+  const context = renderField(s.context, MAX_CONTEXT_CHARS);
+  return `### ${renderedPath(s)}\n${context}\n\n${fence}${lang}\n${s.code}\n${fence}`;
 }
 
 /** The leading run of `snippets` that fits the token budget; always at least one,
@@ -403,19 +471,43 @@ export function selectSnippets(snippets: Snippet[], maxTokens: number): Snippet[
   return chosen;
 }
 
+/**
+ * D-29: one assembled snippet, never longer than `budget` characters. Two steps, both
+ * needed:
+ *
+ *   1. cut the CODE so the block still closes its own fence — the readable truncation,
+ *      and the one that fires for an ordinary long example (D-28: the truncated path
+ *      uses the same fence width, because the fence is recomputed from the cut code,
+ *      which can only need a shorter run);
+ *   2. clip whatever comes out to `budget`, exactly as `assemble` does — the guarantee.
+ *
+ * Step 2 is what makes the cap hold when the OVERHEAD alone is over budget: a snippet
+ * whose heading path, context line and language are all attacker-supplied is bounded at
+ * 200 + 200 + 20 characters by D-30, but `maxTokens` can be smaller than that. No field
+ * escapes the cap; a caller asking for 100 tokens gets at most 400 characters.
+ */
+function clipSnippet(s: Snippet, budget: number): string {
+  let chunk = renderSnippet(s);
+  if (chunk.length > budget) {
+    // Two passes at most: bounding the code bounds the fence, and a shorter fence only
+    // frees more room, so the second pass cannot need a third.
+    let code = s.code.slice(0, Math.max(0, budget));
+    chunk = renderSnippet({ ...s, code });
+    if (chunk.length > budget) {
+      code = code.slice(0, Math.max(0, budget - (chunk.length - code.length)));
+      chunk = renderSnippet({ ...s, code });
+    }
+  }
+  return chunk.length > budget ? chunk.slice(0, budget) : chunk;
+}
+
 /** Assemble top snippets under a rough token budget (~4 chars per token). An
- *  over-budget block is cut inside the fence and the fence closed, so the output is
- *  always well-formed markdown. */
+ *  over-budget block is cut inside the fence and the fence closed, and the result is
+ *  clipped to the budget whatever the derived fields hold (D-28, D-29). */
 export function assembleSnippets(snippets: Snippet[], maxTokens: number): string {
   const budget = maxTokens * 4;
   return selectSnippets(snippets, maxTokens)
-    .map((s) => {
-      const chunk = renderSnippet(s);
-      if (chunk.length <= budget) return chunk;
-      const overhead = chunk.length - s.code.length;
-      const room = Math.max(0, budget - overhead);
-      return renderSnippet({ ...s, code: s.code.slice(0, room) });
-    })
+    .map((s) => clipSnippet(s, budget))
     .join("\n\n");
 }
 
