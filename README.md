@@ -33,7 +33,7 @@ npx -y @blackraptorai/vibectx
 | Tool | What it does |
 |---|---|
 | `list_libraries()` | Registry + per-library cache status |
-| `get_docs(library, topic?, maxTokens?)` | Fetch-or-cache, then return the sections best matching `topic` (follows llms.txt index links when needed). No topic → table of contents + document head |
+| `get_docs(library, topic?, maxTokens?, mode?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head |
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved) |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
@@ -41,6 +41,65 @@ npx -y @blackraptorai/vibectx
 
 `library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
 or **any npm / PyPI package name** — an unknown name is resolved on the spot.
+
+### How ranking works
+
+No embeddings, no network at query time, same answer every run.
+
+**Tokenizer.** Text is lowercased and split on non-alphanumerics, and identifiers are
+split at camelCase and PascalCase boundaries — `useEffect` becomes `use` + `effect`,
+`HTTPServer` becomes `http` + `server` — while the whole compound (`useeffect`) is kept
+too, so a literal `useEffect` still scores. A light suffix stemmer folds `policies` onto
+`policy` and `hooks` onto `hook`. A small stopword list drops "how do I use the …"
+scaffolding, unless the query is nothing but stopwords. The result: asking for "use
+effect cleanup" finds `useEffect`, and asking for `useEffect` finds "use effect".
+
+**BM25.** Sections are scored with Okapi BM25 (k1 = 1.2, b = 0.75) over the sections of
+that call — the primary document plus any followed index pages. Because BM25 weighs a
+term by how rare it is, a section containing `upsert` beats a long section that merely
+repeats `query`, and length normalization stops a big section winning on bulk. A term in
+the section's own heading counts three times; one in an ancestor heading or in the body
+counts once. Sections that score zero are dropped; ties keep document order.
+
+**Heading path.** Sections know where they sit in the heading tree, so a returned H4 is
+rendered as `## Auth > Row Level Security > Policies` rather than a context-free
+`## Policies`. A `#` line inside a fenced code block is code, not a heading.
+
+Measured comparison against the previous ranker: [`docs/eval/2026-09-06-par-658.md`](docs/eval/2026-09-06-par-658.md).
+
+### Code-first answers: `mode: "snippets"`
+
+When the question is really "show me the call", pass `mode: "snippets"` and get the
+fenced code blocks instead of the prose around them. Each snippet carries its heading
+path, one line of context from the doc, and the fence's language:
+
+```jsonc
+// tool call
+{ "library": "stripe", "topic": "checkout session create", "mode": "snippets" }
+```
+
+~~~markdown
+Source: https://docs.stripe.com/llms-full.txt
+
+### Checkout > Sessions > Create a Checkout Session
+Create the session server-side, then redirect the customer:
+
+```js
+const session = await stripe.checkout.sessions.create({
+  line_items: [{ price: 'price_123', quantity: 1 }],
+  mode: 'payment',
+});
+```
+~~~
+
+(Shape of the response, from the real `llms-full.txt`. The exact headings depend on
+what the library publishes.)
+
+A snippet is ranked by its section's BM25 score plus a BM25 over the code itself, so the
+block that actually contains the call you asked for wins. Blocks under two lines are
+skipped unless the query names them exactly. `mode` needs a topic; the default is
+`"sections"`, and anything other than those two values is a schema error. When nothing
+matches you get `No code snippets matched "…" — try mode "sections" or broader terms.`
 
 ## Warm your project's docs
 
@@ -630,7 +689,8 @@ cache without touching the network (`unknown` until something is cached).
   links on the source document's host or the entry's `allowedHosts` are followed, checked
   again after redirects; skipped, oversize or unreachable links are reported in the
   response rather than dropped silently.
-- **Deterministic retrieval:** markdown heading-split + keyword scoring. No embeddings,
+- **Deterministic retrieval:** markdown heading-split + BM25 scoring over a camelCase-aware,
+  lightly stemmed tokenizer — see [How ranking works](#how-ranking-works). No embeddings,
   no external calls at query time, same answer every run.
 
 ## Using this in a company / behind an air gap?

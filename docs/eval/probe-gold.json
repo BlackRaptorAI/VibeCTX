@@ -1,0 +1,415 @@
+{
+  "provenance": "producer-labelled against GitHub README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox",
+  "questions": 60,
+  "corpus": "For every one of the 30 registry entries, the document the fetcher actually resolved in the build sandbox was the raw.githubusercontent.com README fallback: the docs-site llms-full.txt / llms.txt candidates are not reachable from here. A README is a much thinner corpus than an llms-full.txt, so many probe queries have NO correct answer in it at all.",
+  "labellingRule": "A section counts as correct when a developer asking that question would be materially helped by that section's own text: it names the API or concept asked about and shows or explains it. A word appearing in a feature bullet, a link list, a sponsor list, a repository-directory listing, or an unrelated context (a support-policy table, a test-harness setup) does NOT count. Where no section of the fetched document meets that bar, `expect` is [] and `unanswerable` is true: the question is still one of the 60, and neither ranker can score it. Labelled from the documents' own headings and text, before either ranker was run against them.",
+  "matching": "Each regex in `expect` is tested (case-insensitively, JavaScript RegExp) against the top-ranked section's rendered heading path — ancestors joined with ' > ', the section's own heading last. A question is a hit when any regex matches.",
+  "gold": [
+    {
+      "library": "next.js",
+      "query": "server actions revalidate",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The next package README is an install snippet plus links to nextjs.org; 'actions' and 'revalidate' appear nowhere in it."
+    },
+    {
+      "library": "next.js",
+      "query": "app router layout",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'router' and 'layout' appear nowhere in the README."
+    },
+    {
+      "library": "react",
+      "query": "useEffect cleanup",
+      "expect": [
+        "useEffect\\(setup, dependencies\\?\\)",
+        "Connecting to an external system",
+        "My cleanup logic runs"
+      ],
+      "note": "The fallback is the react.dev useEffect reference page. The API entry (and its Parameters/Returns/Caveats children) defines the cleanup function; 'Connecting to an external system' is the worked cleanup example; the troubleshooting entry is about cleanup directly."
+    },
+    {
+      "library": "react",
+      "query": "context provider",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The useEffect reference page never mentions context or providers."
+    },
+    {
+      "library": "supabase",
+      "query": "row level security policy",
+      "expect": [],
+      "unanswerable": true,
+      "note": "supabase-js README covers usage, a support policy table and build warnings. 'row level security' is not in it; the only 'policy' is 'Support Policy'."
+    },
+    {
+      "library": "supabase",
+      "query": "auth sign in with oauth",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'oauth' is absent; the single 'auth' hit is the package blurb in the intro."
+    },
+    {
+      "library": "tailwindcss",
+      "query": "dark mode variant",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The Tailwind README is four sections of links; 'mode' and 'variant' are absent."
+    },
+    {
+      "library": "tailwindcss",
+      "query": "responsive breakpoints",
+      "expect": [],
+      "unanswerable": true,
+      "note": "Both terms are absent from the README."
+    },
+    {
+      "library": "shadcn",
+      "query": "add button component",
+      "expect": ["Add Components$"],
+      "note": "Three 'Add Components' sections (one per install route) each run `npx shadcn add button`."
+    },
+    {
+      "library": "shadcn",
+      "query": "theming css variables",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The installation page covers project creation and the CLI. 'theming' and 'variables' are absent; 'Configure Tailwind CSS and Import Aliases' is import-alias setup, not theming."
+    },
+    {
+      "library": "stripe",
+      "query": "checkout session create",
+      "expect": [],
+      "unanswerable": true,
+      "note": "stripe-node's README documents the client library. 'checkout' and 'session' appear nowhere in it."
+    },
+    {
+      "library": "stripe",
+      "query": "webhook signature verify",
+      "expect": ["Webhook signing"],
+      "note": "'Webhook signing' and its 'Testing Webhook signing' child are the constructEvent / signature-verification documentation."
+    },
+    {
+      "library": "ai-sdk",
+      "query": "streamText tool calling",
+      "expect": ["Usage > Agents$"],
+      "note": "'streamText' is absent from the README; 'Usage > Agents' is the only section showing a tool-calling loop (ToolLoopAgent with a tools map)."
+    },
+    {
+      "library": "ai-sdk",
+      "query": "useChat hook",
+      "expect": ["UI Integration$", "Page @/app/page"],
+      "note": "'UI Integration' introduces the UI hooks; its 'Page' child is the useChat example."
+    },
+    {
+      "library": "expo",
+      "query": "expo router navigation",
+      "expect": ["Expo Router$"],
+      "note": "'The Expo ecosystem > Expo Router' explains file-based routing and universal navigation."
+    },
+    {
+      "library": "expo",
+      "query": "push notifications",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'expo-notifications' appears only as one entry in the Expo SDK module list; 'push' only in the EAS blurb. Neither documents push notifications."
+    },
+    {
+      "library": "drizzle-orm",
+      "query": "select with where",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'where' is absent from the README and no section shows a query."
+    },
+    {
+      "library": "drizzle-orm",
+      "query": "migrations generate",
+      "expect": ["^Ecosystem$"],
+      "note": "'Ecosystem' names Drizzle Kit and says it generates SQL migration files — thin, but it does answer where migrations come from."
+    },
+    {
+      "library": "prisma",
+      "query": "upsert",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'upsert' appears nowhere in the Prisma README."
+    },
+    {
+      "library": "prisma",
+      "query": "relation include",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'include' is absent; the single 'relation' hit is inside an AI-agent blurb."
+    },
+    {
+      "library": "trpc",
+      "query": "create router procedure",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'router' and 'procedure' are absent from the tRPC README."
+    },
+    {
+      "library": "trpc",
+      "query": "react query client",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'query' is absent; 'client' appears only in the feature list."
+    },
+    {
+      "library": "zod",
+      "query": "parse object schema",
+      "expect": ["Basic usage > Parsing data$", "^Basic usage$"],
+      "note": "'Basic usage' defines an object schema and 'Parsing data' shows .parse / .safeParse against it."
+    },
+    {
+      "library": "zod",
+      "query": "refine custom validation",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'custom' is absent. `.refine` appears only in an aside about async parsing, which links out to zod.dev/api#refinements rather than documenting it."
+    },
+    {
+      "library": "hono",
+      "query": "middleware",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The only middleware mention is a feature bullet ('built-in middleware, custom middleware, third-party middleware'); the README never shows or explains one."
+    },
+    {
+      "library": "hono",
+      "query": "route params",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'params' is absent; 'route' appears in the feature bullet about RegExpRouter."
+    },
+    {
+      "library": "bun",
+      "query": "bun install",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The fallback is the Bun.serve HTTP docs page; 'install' is absent from it."
+    },
+    {
+      "library": "bun",
+      "query": "Bun.serve http server",
+      "expect": ["^Basic Setup$", "^Reference$"],
+      "note": "'Basic Setup' is the canonical Bun.serve example; 'Reference' is the full ServeOptions type."
+    },
+    {
+      "library": "vite",
+      "query": "env variables",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The fallback is the Getting Started guide; 'env' and 'variables' are absent."
+    },
+    {
+      "library": "vite",
+      "query": "config proxy",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'proxy' is absent; the 'config' hits are about vite.config.js existing, not about proxying."
+    },
+    {
+      "library": "clerk",
+      "query": "middleware protect routes",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'protect' and 'routes' are absent. The single 'middleware' hit is one clause inside a pointer to the hosted Next.js quickstart."
+    },
+    {
+      "library": "clerk",
+      "query": "useUser hook",
+      "expect": [],
+      "unanswerable": true,
+      "note": "Neither term appears in the @clerk/nextjs README."
+    },
+    {
+      "library": "convex",
+      "query": "mutation query function",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The convex-backend README is about the open-source backend; 'mutation' appears only in the repository-layout directory listing."
+    },
+    {
+      "library": "convex",
+      "query": "schema define table",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'schema' and 'table' are absent from the README."
+    },
+    {
+      "library": "firebase",
+      "query": "firestore query where",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The firebase-js-sdk README is a contributor guide. 'query' is absent; the 'firestore' hits are emulator test setup."
+    },
+    {
+      "library": "firebase",
+      "query": "auth sign in google",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'Authentication Support' is about enabling anonymous auth in the test project, not about signing in with Google."
+    },
+    {
+      "library": "openai",
+      "query": "chat completions streaming",
+      "expect": ["Streaming responses$", "Multi-turn conversations$"],
+      "note": "'Streaming responses' documents streaming; 'Multi-turn conversations' is where chat.completions appears."
+    },
+    {
+      "library": "openai",
+      "query": "structured outputs",
+      "expect": [],
+      "unanswerable": true,
+      "note": "Neither 'structured' nor 'outputs' appears in the openai-node README."
+    },
+    {
+      "library": "anthropic-sdk",
+      "query": "streaming messages",
+      "expect": ["Getting started$"],
+      "note": "'streaming' is absent from this short README; 'Getting started' is the only section documenting the messages API (client.messages.create). A partial answer, accepted as the best the corpus holds."
+    },
+    {
+      "library": "anthropic-sdk",
+      "query": "tool use",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'tool' is absent from the README."
+    },
+    {
+      "library": "playwright",
+      "query": "locator click",
+      "expect": ["Write a test$"],
+      "note": "The example test uses getByRole locators and .click()."
+    },
+    {
+      "library": "playwright",
+      "query": "expect toBeVisible",
+      "expect": ["Write a test$"],
+      "note": "The only toBeVisible assertion in the README is in that example."
+    },
+    {
+      "library": "vitest",
+      "query": "mock function",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'mock' is absent from the Getting Started guide."
+    },
+    {
+      "library": "vitest",
+      "query": "config coverage",
+      "expect": ["Configuring Vitest$"],
+      "note": "'Configuring Vitest' is the vitest.config.ts documentation."
+    },
+    {
+      "library": "react-router",
+      "query": "loader data",
+      "expect": ["Route Modules$"],
+      "note": "'Route Modules' documents the loader export and the data it returns."
+    },
+    {
+      "library": "react-router",
+      "query": "nested routes outlet",
+      "expect": ["Nested Routes$"],
+      "note": "'Nested Routes' is the Outlet documentation."
+    },
+    {
+      "library": "astro",
+      "query": "content collections",
+      "expect": [],
+      "unanswerable": true,
+      "note": "The fallback is the astro-components page; 'collections' is absent."
+    },
+    {
+      "library": "astro",
+      "query": "islands client directive",
+      "expect": ["The Component Template$"],
+      "note": "'The Component Template' is where client: directives are explained."
+    },
+    {
+      "library": "sveltekit",
+      "query": "load function",
+      "expect": [
+        "\\+page\\.js$",
+        "\\+page\\.server\\.js$",
+        "\\+layout\\.js$",
+        "\\+layout\\.server\\.js$"
+      ],
+      "note": "The routing page documents `load` in each of the four data-loading module sections; any of them is a correct top result."
+    },
+    {
+      "library": "sveltekit",
+      "query": "form actions",
+      "expect": ["\\+page\\.server\\.js$"],
+      "note": "`actions` is exported from +page.server.js; that section is the form-actions documentation."
+    },
+    {
+      "library": "nuxt",
+      "query": "useFetch data fetching",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'useFetch' is absent from the Nuxt README, which is a table of contents with badges."
+    },
+    {
+      "library": "nuxt",
+      "query": "server api routes",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'routes' is absent; 'server' and 'api' appear only in the README's own link list."
+    },
+    {
+      "library": "vue",
+      "query": "computed reactive ref",
+      "expect": ["Composition API"],
+      "note": "The Composition API section shows `ref()` reactive state; 'computed' itself is absent from the introduction page."
+    },
+    {
+      "library": "vue",
+      "query": "component props emit",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'props' and 'emit' are absent from the introduction page."
+    },
+    {
+      "library": "tanstack-query",
+      "query": "useQuery stale time",
+      "expect": [],
+      "unanswerable": true,
+      "note": "All three terms are absent from the TanStack Query README, which is sponsors and links."
+    },
+    {
+      "library": "tanstack-query",
+      "query": "mutation invalidate queries",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'invalidate' is absent; 'mutation' and 'queries' appear once in the project blurb."
+    },
+    {
+      "library": "motion",
+      "query": "animate variants",
+      "expect": ["Platforms > (React|JS)$"],
+      "note": "'variants' is absent, but the React and JS platform sections are runnable `animate` examples — the API the question is about."
+    },
+    {
+      "library": "motion",
+      "query": "layout animation",
+      "expect": [],
+      "unanswerable": true,
+      "note": "'layout transitions' appears once, in a feature bullet under 'Why Motion?'; nothing documents layout animation."
+    },
+    {
+      "library": "resend",
+      "query": "send email react template",
+      "expect": ["Send email using React$"],
+      "note": "That section renders a React email template and sends it."
+    },
+    {
+      "library": "resend",
+      "query": "domains verify",
+      "expect": ["SDK > Usage$"],
+      "note": "The Usage section's note is the only place domain verification is covered."
+    }
+  ]
+}
