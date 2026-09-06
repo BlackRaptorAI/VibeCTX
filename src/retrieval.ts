@@ -109,22 +109,26 @@ export function splitSections(markdown: string): SplitSection[] {
 }
 
 /** D-24: Okapi BM25 term-frequency saturation. */
-const BM25_K1 = 1.2;
+export const BM25_K1 = 1.2;
 /** D-24: Okapi BM25 length normalization. */
-const BM25_B = 0.75;
+export const BM25_B = 0.75;
 /** D-24 (BM25F-lite): a term in the section's own heading counts this many times.
  *  Ancestor-path headings and body text count once. */
-const HEADING_WEIGHT = 3;
+export const HEADING_WEIGHT = 3;
 
 /** ln(1 + (N − n + 0.5) / (n + 0.5)) — the standard non-negative BM25 IDF. */
-function idf(docCount: number, matching: number): number {
+export function idf(docCount: number, matching: number): number {
   return Math.log(1 + (docCount - matching + 0.5) / (matching + 0.5));
 }
 
 /** Per-document term frequencies for the query terms only, plus the document length.
  *  Counting only the query's terms is what keeps a 5 MB corpus linear and allocation-free
- *  beyond the token arrays themselves. */
-interface Weighted {
+ *  beyond the token arrays themselves.
+ *
+ *  PAR-659: exported because the cross-library `search` scores sections it never tokenizes —
+ *  the `tf` vector comes out of the on-disk posting lists instead — and it must produce the
+ *  SAME number as `rankSplitSections` would. One BM25, one field weighting, one `Weighted`. */
+export interface Weighted {
   tf: number[];
   length: number;
 }
@@ -143,7 +147,7 @@ function weigh(fields: { tokens: string[]; weight: number }[], index: Map<string
 }
 
 /** BM25 score of one weighted document against every query term. */
-function bm25(doc: Weighted, idfs: number[], avgLength: number): number {
+export function bm25(doc: Weighted, idfs: number[], avgLength: number): number {
   let score = 0;
   for (let t = 0; t < idfs.length; t++) {
     const tf = doc.tf[t];
@@ -172,13 +176,13 @@ function averageLength(docs: Weighted[]): number {
 }
 
 /** Query terms, deduplicated, with the index tokenized documents are counted against. */
-function queryIndex(query: string): { terms: string[]; index: Map<string, number> } {
+export function queryIndex(query: string): { terms: string[]; index: Map<string, number> } {
   const terms = [...new Set(tokenize(query))];
   return { terms, index: new Map(terms.map((t, i) => [t, i])) };
 }
 
 /** Weigh each split section: own heading x HEADING_WEIGHT, ancestor path x1, body x1. */
-function weighSections(sections: SplitSection[], index: Map<string, number>): Weighted[] {
+export function weighSections(sections: SplitSection[], index: Map<string, number>): Weighted[] {
   return sections.map((s) =>
     weigh(
       [
