@@ -2,8 +2,11 @@
 
 **A local MCP server that fetches official library documentation (llms.txt-first), caches it to disk, and serves the relevant sections to your coding agents — offline, deterministic, zero recurring cost.**
 
-> Published on npm as [`@blackraptorai/vibectx`](https://www.npmjs.com/package/@blackraptorai/vibectx).
-> (Formerly `@blackraptorai/docs-cache-mcp` ≤ 0.1.1 — deprecated in favor of this package.)
+> Installed from source — clone this repository and build it. See [Install](#install).
+> npm is no longer the distribution channel. The last version published there was
+> `@blackraptorai/vibectx` **0.1.2** (July 2026); everything since — including the 0.1.3
+> hotfix and all of the work above it — exists only in this repository. (Older still:
+> `@blackraptorai/docs-cache-mcp` ≤ 0.1.1, superseded by the rename.)
 
 By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
 [BlackRaptor Agents — development](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/development) and
@@ -18,14 +21,59 @@ local: fetch once from the official source (preferring each project's published
 sections matched to the agent's question. When the network is down you get the cached
 copy, clearly flagged as stale, instead of a failure.
 
+## Install
+
+VibeCTX runs from a local clone. You need git and Node — `package.json` declares
+**Node ≥ 18**, and CI builds and tests on **Node 22**, which is the version this is actually
+proven on. Running the test suite needs Node ≥ 20.19 regardless (vitest's `vite` dependency
+declares `^20.19.0 || >=22.12.0`); building and running the server does not.
+
+```bash
+git clone https://github.com/BlackRaptorAI/VibeCTX.git
+cd VibeCTX
+npm ci          # install dependencies
+npm run build   # compile TypeScript to dist/
+```
+
+That is the whole install. `dist/index.js` is now the server, and launching it contacts no
+package registry — which is the point. An `npx`-style install has to reach the network on
+*every* start to resolve what it runs; a docs cache whose own launch depends on the network
+would defeat itself.
+
+To use the `vibectx` CLI (every command example below assumes it is on your PATH):
+
+```bash
+npm link
+```
+
+`npm link` writes into npm's global prefix. On a stock Node install that is root-owned, so
+this either needs `sudo` or — better — a user-owned prefix first:
+`npm config set prefix ~/.npm-global` and put `~/.npm-global/bin` on your PATH. If you would
+rather not link at all, every `vibectx …` example below also works as
+`node /absolute/path/to/VibeCTX/dist/index.js …`.
+
+**Nothing is cached yet.** A fresh install has an empty cache, so `vibectx doctor` and
+`vibectx search` will both exit 1 with empty results until documents are fetched — that is
+correct behaviour, not a broken install. Run `vibectx warm` in a project to cache its
+dependencies' docs, or call `get_docs` for one library. See
+[Warm your project's docs](#warm-your-projects-docs).
+
+Update with `git pull && npm ci && npm run build`.
+
+> **On pinning:** this repository carries no release tags yet, so `main` is currently the
+> only thing to track. Once a `v*` tag exists, checking it out (`git checkout v0.1.3`) is
+> how you pin a version — with source distribution the tag is the release artifact.
+
 ## Quickstart
+
+Point your MCP client at the built server using the **absolute path** to your clone:
 
 ```bash
 # Claude Code
-claude mcp add vibectx -- npx -y @blackraptorai/vibectx
+claude mcp add vibectx -- node /absolute/path/to/VibeCTX/dist/index.js
 
 # or any MCP client (stdio):
-npx -y @blackraptorai/vibectx
+node /absolute/path/to/VibeCTX/dist/index.js
 ```
 
 ## Tools
@@ -148,9 +196,9 @@ groups the hits by library, so the answer to "which library documents this?" com
 with the section that proves it.
 
 ```bash
-npx -y @blackraptorai/vibectx search "server-sent events streaming"
-npx -y @blackraptorai/vibectx search "server-sent events" --library hono --library ai-sdk
-npx -y @blackraptorai/vibectx search "revalidate" --max-tokens 1500 --json
+vibectx search "server-sent events streaming"
+vibectx search "server-sent events" --library hono --library ai-sdk
+vibectx search "revalidate" --max-tokens 1500 --json
 ```
 
 ~~~markdown
@@ -286,7 +334,7 @@ One command, and your whole stack's docs are on disk — works offline, never a 
 
 ```bash
 cd my-app
-npx -y @blackraptorai/vibectx warm
+vibectx warm
 ```
 
 ```
@@ -470,7 +518,7 @@ no curation, no config. `resolve_library` does the same step explicitly and show
 `vibectx resolve <name>` prints the identical report from the command line.
 
 ```
-$ npx -y @blackraptorai/vibectx resolve fastapi
+$ vibectx resolve fastapi
 Resolved "fastapi" via PyPI — https://pypi.org/pypi/fastapi/json
   description: (package-supplied) FastAPI framework, high performance, easy to learn, fast to code, ready for production
   homepage:   —
@@ -619,7 +667,7 @@ entry's aliases as `(aka …)`; every tool that takes a `library` accepts an ali
 Add or override libraries with a JSON config:
 
 ```bash
-npx -y @blackraptorai/vibectx --config ./vibectx.config.json
+vibectx --config ./vibectx.config.json
 ```
 
 A `vibectx.config.json` committed to your repo is picked up with **no flag at all** — see
@@ -669,9 +717,11 @@ anything:
   `~/.vibectx` and re-appear when you go back up — but you pay a cold cache, and you then have
   two directories. If you need a downgrade to keep its cache, set `DOCS_CACHE_DIR=~/.vibectx`
   (0.1.x reads it) or rename the directory back by hand before running the older version.
-- **The `docs-cache-mcp` command still works** — the package ships it as a second bin name
-  alongside `vibectx`, so an `.mcp.json` or shell alias written against the old package keeps
-  running. It is deprecated and **will be removed in `0.3.0`**, on the same schedule as
+- **The `docs-cache-mcp` command still works** — the build still provides it as a second bin
+  name alongside `vibectx`, so a shell alias or an `.mcp.json` that invokes the *command*
+  keeps running once you have run `npm link`. (An `.mcp.json` that invokes the old npm
+  *package* — `npx -y @blackraptorai/docs-cache-mcp` — no longer reaches this code at all:
+  it resolves to the abandoned 0.1.1 on the registry. Point it at your clone instead.) It is deprecated and **will be removed in `0.3.0`**, on the same schedule as
   `DOCS_CACHE_DIR` and the legacy `docs-cache.config.json` filename; move to `vibectx` before
   then. (`test/version.test.ts` fails the day the version reaches `0.3.0` with any of the
   three still shipped, so this is a schedule rather than an intention.)
@@ -790,7 +840,7 @@ is a complete example — the Fastify / TimescaleDB / pgvector / AWS CDK stack t
 as the default registry through 0.1.3:
 
 ```bash
-npx -y @blackraptorai/vibectx --config ./docs/examples/paragon.vibectx.config.json doctor
+vibectx --config ./docs/examples/paragon.vibectx.config.json doctor
 ```
 
 ### Team config, no flags
@@ -807,7 +857,7 @@ An MCP client launches the server with a **fixed command line**, so a config tha
 ```
 
 in `vibectx.config.json` at the root of your repo, and every teammate's agent — started
-with plain `npx -y @blackraptorai/vibectx`, no flags — gets `acme-platform` in
+with plain `vibectx`, no flags — gets `acme-platform` in
 `list_libraries`, in `get_docs`, and in the startup warm.
 
 | # | Source | Where |
@@ -909,11 +959,11 @@ library it runs the entry's `probeQueries` through the **same `get_docs` path**
 your agent uses and reports what came back.
 
 ```bash
-npx -y @blackraptorai/vibectx doctor                      # human table
-npx -y @blackraptorai/vibectx doctor --json               # machine shape (below)
-npx -y @blackraptorai/vibectx doctor --library next.js    # one library (aliases work: --library next)
-npx -y @blackraptorai/vibectx doctor --offline            # cache only; never touches the network
-npx -y @blackraptorai/vibectx doctor --config ./vibectx.config.json
+vibectx doctor                      # human table
+vibectx doctor --json               # machine shape (below)
+vibectx doctor --library next.js    # one library (aliases work: --library next)
+vibectx doctor --offline            # cache only; never touches the network
+vibectx doctor --config ./vibectx.config.json
 ```
 
 ```
@@ -1015,8 +1065,8 @@ your setup. Real-world reports directly shape what gets built.
 ## Development
 
 ```bash
-npm install
-npm test        # vitest
+npm ci
+npm test        # vitest (needs Node ≥ 20.19)
 npm run build   # tsc → dist/
 ```
 

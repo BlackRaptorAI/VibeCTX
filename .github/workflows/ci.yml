@@ -3,6 +3,11 @@ name: CI
 on:
   push:
     branches: [main]
+    # VibeCTX is distributed as source, so a `v*` tag IS the release artifact — the thing a
+    # user checks out and builds. It must therefore be verified. Until 2026-09-07 the only
+    # tag-triggered job lived in publish.yml; removing that workflow with npm distribution
+    # would have left `git push --tags` running nothing at all.
+    tags: ["v*"]
   pull_request:
 
 jobs:

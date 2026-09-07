@@ -10,11 +10,12 @@ forward (0.1.2 examples used docs-cache.config.json; cache dir is
 
 # VibeCTX
 
-**Batteries-included docs for your AI coding agent — feature-rich like the heavy tools, instant like the hosted ones, fully local. `npx` and it works.**
+**Batteries-included docs for your AI coding agent — feature-rich like the heavy tools, instant like the hosted ones, fully local. Clone, build, done.**
 
 VibeCTX is a local [MCP](https://modelcontextprotocol.io/) server that fetches official library documentation (llms.txt-first), caches it to disk, and serves the sections relevant to your agent's question — offline, deterministic, zero recurring cost.
 
-> Published on npm as [`@blackraptorai/vibectx`](https://www.npmjs.com/package/@blackraptorai/vibectx) · MIT.
+> Installed from source — clone and build; see the root README's Install section · MIT.
+> (npm is no longer the distribution channel; 0.1.2 is the last version published there.)
 > By [BlackRaptor AI](https://github.com/BlackRaptorAI). Companion to [BlackRaptor Agents](https://github.com/BlackRaptorAI/BlackRaptor_Agents).
 
 ---
@@ -26,16 +27,19 @@ Coding agents write confident code against APIs that don't exist. The fix is put
 - **Hosted docs services** work well until the network hiccups, the free tier gets throttled, or you'd simply rather your inner agent loop not depend on a cloud round-trip.
 - **Self-hosted options** can mean standing up Docker and wiring an embedding provider before you get your first answer.
 
-VibeCTX keeps the whole loop on your machine and skips the setup tax. Fetch once from the official source, cache to disk, serve matching sections — deterministically, offline, with no account, no container, and no API key. `npx` and it works. Power is opt-in, never required.
+VibeCTX keeps the whole loop on your machine and skips the setup tax. Fetch once from the official source, cache to disk, serve matching sections — deterministically, offline, with no account, no container, and no API key. One clone and a build. Power is opt-in, never required.
 
 ## Quickstart
 
 ```bash
+# one-time: clone and build
+git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
+
 # Claude Code
-claude mcp add vibectx -- npx -y @blackraptorai/vibectx
+claude mcp add vibectx -- node /absolute/path/to/VibeCTX/dist/index.js
 
 # or any MCP client (stdio):
-npx -y @blackraptorai/vibectx
+node /absolute/path/to/VibeCTX/dist/index.js
 ```
 
 That's the whole install. No Docker, no database, no embedding key, no config file.
@@ -95,7 +99,7 @@ Everything on the roadmap is designed to ship with a sensible default and stay z
 VibeCTX runs with no configuration. To add or override libraries, point it at a JSON file:
 
 ```bash
-npx -y @blackraptorai/vibectx --config ./vibectx.config.json
+vibectx --config ./vibectx.config.json
 ```
 
 ```json

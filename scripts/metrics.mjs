@@ -9,18 +9,25 @@
  * exists to REMOVE governance machinery nobody asked for, not to add a cron job that posts
  * numbers into a tracker where they will rot.
  *
- * It reads two things, both public and unauthenticated:
- *   - npm download counts for @blackraptorai/vibectx, from api.npmjs.org
- *   - the repository's open-issue count, from api.github.com
+ * It reads the repository's public, unauthenticated figures from api.github.com:
+ * open issues, stars and forks.
  *
- * HONEST DEGRADATION is the whole design constraint, because both are expected to fail
- * today: the package is unpublished (PAR-516) and api.github.com is unreachable from the
- * build sandbox. A number this script cannot obtain is never printed as `0` — a zero is a
- * measurement and would be a lie here. It prints what it could not reach and why, and it
+ * There is deliberately NO install count. VibeCTX is distributed as source — users clone
+ * and build — and a clone is not observable from here: GitHub's traffic/clones endpoint
+ * requires push access to the repository, and the npm download counts this script used to
+ * print now measure an abandoned channel (the last version published to npm was 0.1.2, in
+ * July 2026). Printing a stale npm number as if it were adoption would be worse than
+ * printing nothing, so this script prints nothing for it and says why.
+ *
+ * HONEST DEGRADATION is the design constraint, because reachability is not a given:
+ * api.github.com answers 403 through the agent sandbox's proxy while resolving normally
+ * from an ordinary machine, so the same script legitimately prints figures in one place and
+ * `unknown` in another. Do not encode either as a fact — let the run report what it found.
+ * A number this script cannot obtain is never printed as `0` — a zero is a measurement and
+ * would be a lie here. It prints what it could not reach and why, and it
  * exits 0 either way: not knowing is a normal outcome, not a failure of the script.
  */
 
-const PACKAGE = "@blackraptorai/vibectx";
 const REPO = "BlackRaptorAI/VibeCTX";
 const TIMEOUT_MS = 10_000;
 
@@ -44,23 +51,26 @@ async function getJson(url) {
   }
 }
 
-/** npm downloads for one window, or the reason there is no number. */
-async function downloads(window) {
-  const r = await getJson(`https://api.npmjs.org/downloads/point/${window}/${encodeURIComponent(PACKAGE)}`);
-  if (r.ok && typeof r.data?.downloads === "number") return { value: r.data.downloads };
-  if (r.notFound) return { unknown: "npm has no record of this package — it is not published yet" };
-  return { unknown: `npm download API unreachable (${r.why})` };
-}
-
-async function openIssues() {
+/** The repository's public counters, in ONE request — or the reason there is no number. */
+async function repoFigures() {
   const r = await getJson(`https://api.github.com/repos/${REPO}`);
-  if (r.ok && typeof r.data?.open_issues_count === "number") {
+  if (r.notFound) {
+    const why = "the repository is private or does not exist under that name";
+    return { issues: { unknown: why }, stars: { unknown: why }, forks: { unknown: why } };
+  }
+  if (!r.ok) {
+    const why = `GitHub API unreachable (${r.why})`;
+    return { issues: { unknown: why }, stars: { unknown: why }, forks: { unknown: why } };
+  }
+  const num = (v, note) =>
+    typeof v === "number" ? (note ? { value: v, note } : { value: v }) : { unknown: "the API response carried no such field" };
+  return {
     // GitHub's `open_issues_count` counts open pull requests as issues. Say so rather than
     // presenting it as an issue count it is not.
-    return { value: r.data.open_issues_count, note: "includes open pull requests (GitHub counts them as issues)" };
-  }
-  if (r.notFound) return { unknown: "the repository is private or does not exist under that name" };
-  return { unknown: `GitHub API unreachable (${r.why})` };
+    issues: num(r.data?.open_issues_count, "includes open pull requests (GitHub counts them as issues)"),
+    stars: num(r.data?.stargazers_count),
+    forks: num(r.data?.forks_count),
+  };
 }
 
 const line = (label, result, suffix = "") => {
@@ -68,29 +78,25 @@ const line = (label, result, suffix = "") => {
   return `  ${label.padEnd(22)} ${result.value}${suffix}${result.note ? ` (${result.note})` : ""}`;
 };
 
-const [day, week, month, issues] = await Promise.all([
-  downloads("last-day"),
-  downloads("last-week"),
-  downloads("last-month"),
-  openIssues(),
-]);
+const { issues, stars, forks } = await repoFigures();
 
-const known = [day, week, month, issues].filter((r) => r.unknown === undefined).length;
+const all = [issues, stars, forks];
+const known = all.filter((r) => r.unknown === undefined).length;
 
 console.log(
   [
     `VibeCTX status — ${new Date().toISOString().slice(0, 10)}`,
-    `  package               ${PACKAGE}`,
     `  repository            ${REPO}`,
+    "  distribution          source (git clone + npm run build)",
     "",
-    line("npm downloads (day)", day),
-    line("npm downloads (week)", week),
-    line("npm downloads (month)", month),
     line("open issues", issues),
+    line("stars", stars),
+    line("forks", forks),
+    "  installs               not observable — see the header comment",
     "",
-    known === 4
-      ? "  All four figures were retrieved live just now."
-      : `  ${4 - known} of 4 figures could not be retrieved; the reason is on the line itself.`,
+    known === all.length
+      ? `  All ${all.length} figures were retrieved live just now.`
+      : `  ${all.length - known} of ${all.length} figures could not be retrieved; the reason is on the line itself.`,
     "  MEASURED where a number is shown; an `unknown` line is not a zero.",
   ].join("\n"),
 );
