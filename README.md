@@ -663,6 +663,18 @@ anything:
 - If the rename fails (a different filesystem, permissions), vibectx keeps using
   `~/.docs-cache-mcp` for that run and says so once. Nothing is copied and no cached
   document is lost.
+- **Going back down to 0.1.x after the rename starts cold.** The migration is one-way and
+  0.1.x knows nothing about `~/.vibectx`: it looks for `~/.docs-cache-mcp`, does not find it,
+  creates it empty and re-fetches everything. Nothing is lost — the documents are still in
+  `~/.vibectx` and re-appear when you go back up — but you pay a cold cache, and you then have
+  two directories. If you need a downgrade to keep its cache, set `DOCS_CACHE_DIR=~/.vibectx`
+  (0.1.x reads it) or rename the directory back by hand before running the older version.
+- **The `docs-cache-mcp` command still works** — the package ships it as a second bin name
+  alongside `vibectx`, so an `.mcp.json` or shell alias written against the old package keeps
+  running. It is deprecated and **will be removed in `0.3.0`**, on the same schedule as
+  `DOCS_CACHE_DIR` and the legacy `docs-cache.config.json` filename; move to `vibectx` before
+  then. (`test/version.test.ts` fails the day the version reaches `0.3.0` with any of the
+  three still shipped, so this is a schedule rather than an intention.)
 
 **Size cap.** The cache is capped at **512 MB** by default — an assumed figure, not a
 measured one; `VIBECTX_CACHE_MAX_MB` changes it and `VIBECTX_CACHE_MAX_MB=0` turns it off.
