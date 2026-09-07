@@ -2,6 +2,7 @@ import type { LibraryEntry } from "./registry.js";
 import { readCache, writeCache, touchCache } from "./cache.js";
 import { isAllowedLink, isForbiddenHost, type LinkPolicy } from "./link-policy.js";
 import { USER_AGENT } from "./version.js";
+import { classifyFetchError, debugEvent } from "./debug.js";
 
 export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 
@@ -103,6 +104,10 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string |
  *  (which need the same byte cap and HTML-as-200 detection); everything else goes
  *  through getLibraryDoc / fetchLinkedPage. */
 export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> {
+  // PAR-652 item 7b: VIBECTX_DEBUG diagnostics are ADDITIVE — every `debugEvent` below is a
+  // stderr line and nothing else. No policy, redirect decision, byte cap or returned value
+  // in this function is read from, or changed by, any of them.
+  const startedAt = Date.now();
   try {
     const headers: Record<string, string> = {
       "user-agent": USER_AGENT, // src/version.ts — the manifest's version, not a second copy of it
@@ -150,7 +155,10 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       return { status: "refused" };
     }
     if (res.status === 304) return { status: "not-modified" };
-    if (!res.ok) return { status: "miss" };
+    if (!res.ok) {
+      debugEvent("fetch.miss", { url, reason: "http-status", status: res.status, ms: Date.now() - startedAt });
+      return { status: "miss" };
+    }
     const declared = Number(res.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > opts.maxBytes) {
       await res.body?.cancel();
@@ -162,12 +170,26 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
     if (type.includes("text/html") && !url.endsWith(".md")) {
       // Some sites serve their 404 page with 200; a real llms.txt is plain text.
       if (body.slice(0, 500).toLowerCase().includes("<!doctype html")) {
+        debugEvent("fetch.miss", { url, reason: "html-not-text", status: res.status, ms: Date.now() - startedAt });
         return { status: "miss" };
       }
     }
-    if (body.trim().length === 0) return { status: "miss" };
+    if (body.trim().length === 0) {
+      debugEvent("fetch.miss", { url, reason: "empty-body", status: res.status, ms: Date.now() - startedAt });
+      return { status: "miss" };
+    }
     return { status: "ok", body, etag: res.headers.get("etag") ?? undefined };
-  } catch {
+  } catch (e) {
+    // The one place a 404, a timeout and a DNS failure stop being distinguishable. They stay
+    // one `miss` to the caller — the diagnostic line is what tells them apart.
+    const failure = classifyFetchError(e);
+    debugEvent("fetch.miss", {
+      url,
+      reason: failure.reason,
+      code: failure.code,
+      error: failure.message,
+      ms: Date.now() - startedAt,
+    });
     return { status: "miss" };
   }
 }

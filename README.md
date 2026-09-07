@@ -677,6 +677,25 @@ process, so the cache can sit up to about that much over the cap between sweeps.
 Recency is the document's `fetchedAt`, which a 304 revalidation refreshes, so a document
 you keep using keeps its place.
 
+**When a library will not cache: `VIBECTX_DEBUG=1`.** Every fetch failure looks the same
+from the outside — the library is simply not cached — because a 404, a connection timeout
+and a name that does not resolve all mean "no document at this URL". Set `VIBECTX_DEBUG=1`
+and each one writes a line to stderr saying which it was:
+
+```
+vibectx [debug] fetch.miss url=https://example.com/llms.txt reason=http-status status=404 ms=54
+vibectx [debug] fetch.miss url=https://example.com/llms.txt reason=timeout error="The operation was aborted due to timeout" ms=0
+vibectx [debug] fetch.miss url=https://nope.invalid/llms.txt reason=dns code=ENOTFOUND error="fetch failed" ms=1
+```
+
+(A real capture, 2026-09-07, from a built `dist/` with the three failures injected in place
+of the network — hence the `ms` figures, which are the stub's latency, not a real host's.)
+
+`reason` is one of `http-status`, `timeout`, `dns`, `connection-refused`,
+`connection-reset`, `tls`, `network`, `html-not-text` (a site serving its 404 page with a
+200) or `empty-body`. Nothing else changes: the fetch behaves identically with the variable
+set or unset, and stdout — which carries the MCP protocol — is never written to.
+
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see

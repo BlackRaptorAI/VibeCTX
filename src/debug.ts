@@ -1,0 +1,106 @@
+/**
+ * PAR-652 item 7b — `VIBECTX_DEBUG=1` structured stderr diagnostics.
+ *
+ * `fetchUrl` collapses a 404, a connection timeout and a DNS failure into the same
+ * `{ status: "miss" }`, which is right for the caller (all three mean "no document from
+ * this URL") and useless for the person trying to work out why their library will not
+ * cache. This module is the only place that difference is written down.
+ *
+ * It is ADDITIVE and nothing else: no call here changes a return value, a redirect
+ * decision, a byte cap or a policy check. Diagnostics that can alter behaviour are not
+ * diagnostics.
+ *
+ * Everything goes to STDERR. This process is a stdio MCP server: stdout carries the
+ * protocol and a stray byte on it corrupts the session.
+ */
+
+/** Longest a single field value is printed at; a URL from a fetched document is untrusted. */
+const MAX_FIELD_CHARS = 300;
+
+/** True only for an explicit opt-in. Anything else — including `0`, `false` and the empty
+ *  string — leaves diagnostics off, so a variable someone set to `0` to disable them does
+ *  not enable them. */
+export function debugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.VIBECTX_DEBUG;
+  if (raw === undefined) return false;
+  const v = raw.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+/** Strip C0/C1 and bidi controls and clip. A debug line carries URLs and error messages
+ *  that came off the network; a terminal must not be able to be driven by one. */
+export function debugField(value: string | number | undefined): string {
+  if (value === undefined) return "-";
+  const text = typeof value === "number" ? String(value) : value;
+  const cleaned = text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "");
+  const clipped = cleaned.length > MAX_FIELD_CHARS ? `${cleaned.slice(0, MAX_FIELD_CHARS)}…` : cleaned;
+  return /[\s"]/.test(clipped) ? JSON.stringify(clipped) : clipped;
+}
+
+/** One structured line: `vibectx [debug] <event> k=v k=v`. No-op unless VIBECTX_DEBUG is on. */
+export function debugEvent(
+  event: string,
+  fields: Record<string, string | number | undefined>,
+  opts: { env?: NodeJS.ProcessEnv; write?: (line: string) => void } = {},
+): void {
+  if (!debugEnabled(opts.env ?? process.env)) return;
+  const rendered = Object.entries(fields)
+    .filter(([, v]) => v !== undefined)
+    .map(([k, v]) => `${k}=${debugField(v)}`)
+    .join(" ");
+  const line = `vibectx [debug] ${event}${rendered.length > 0 ? ` ${rendered}` : ""}\n`;
+  (opts.write ?? ((s: string) => void process.stderr.write(s)))(line);
+}
+
+export type FetchFailureReason =
+  | "timeout"
+  | "aborted"
+  | "dns"
+  | "connection-refused"
+  | "connection-reset"
+  | "tls"
+  | "network";
+
+/**
+ * Which kind of failure a thrown fetch error was. The three the brief names are the three
+ * that matter most and they are genuinely different problems: a `timeout` is the host being
+ * slow or a captive network, `dns` is a name that does not resolve (a typo, or no network
+ * at all), and an HTTP status never reaches here — it is not a thrown error, so it is logged
+ * separately at the point `fetchUrl` decides a response is a miss.
+ *
+ * `fetch` wraps low-level failures in a `TypeError` whose `cause` carries the libuv code, so
+ * the code is read from the cause chain rather than from the message text.
+ */
+export function classifyFetchError(error: unknown): { reason: FetchFailureReason; code?: string; message: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const name = error instanceof Error ? error.name : "";
+  if (name === "TimeoutError") return { reason: "timeout", message };
+  if (name === "AbortError") return { reason: "aborted", message };
+  let code: string | undefined;
+  let cursor: unknown = error;
+  for (let depth = 0; depth < 5 && cursor !== undefined && cursor !== null; depth++) {
+    const c = (cursor as { code?: unknown }).code;
+    if (typeof c === "string") {
+      code = c;
+      break;
+    }
+    cursor = (cursor as { cause?: unknown }).cause;
+  }
+  switch (code) {
+    case "ENOTFOUND":
+    case "EAI_AGAIN":
+      return { reason: "dns", code, message };
+    case "ECONNREFUSED":
+      return { reason: "connection-refused", code, message };
+    case "ECONNRESET":
+    case "EPIPE":
+      return { reason: "connection-reset", code, message };
+    default:
+      break;
+  }
+  if (code !== undefined && (code.startsWith("ERR_TLS") || code.startsWith("CERT_") || code.includes("SSL"))) {
+    return { reason: "tls", code, message };
+  }
+  if (name === "TimeoutError" || /timed? ?out/i.test(message)) return { reason: "timeout", code, message };
+  return { reason: "network", code, message };
+}
