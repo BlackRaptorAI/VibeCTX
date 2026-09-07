@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
@@ -48,6 +48,41 @@ export function resetCacheRootState(): void {
 const configured = (value: string | undefined): string | undefined =>
   value !== undefined && value.length > 0 ? value : undefined;
 
+/** A real directory this tool would be willing to treat as a cache (D-46: lstat, not stat). */
+function isRealDirectory(path: string): boolean {
+  try {
+    return lstatSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Rule 1 keeps an existing `~/.vibectx` and moves nothing — correct, and it used to be
+ * SILENT. An EMPTY `~/.vibectx` (a `mkdir`, a dotfile manager, a half-finished earlier run)
+ * took that same path, so a full legacy cache sat stranded beside it while the tool
+ * re-downloaded every document the user already had, with no way to find out why.
+ *
+ * One note, and no move: the rule does not change — deciding for the user which of two caches
+ * wins is exactly the judgement rule 1 refuses to make — they are just told where the other
+ * one is. Best effort throughout; an unreadable directory means nothing is said.
+ */
+function noteStrandedLegacy(current: string, legacy: string, warn: (message: string) => void): void {
+  if (!isRealDirectory(legacy)) return; // only a real directory is a cache worth mentioning
+  let currentIsEmpty: boolean;
+  try {
+    currentIsEmpty = readdirSync(current).length === 0;
+  } catch {
+    return;
+  }
+  if (!currentIsEmpty) return; // this user has a cache at the new path and has moved on
+  warn(
+    `vibectx: ${current} is empty, so the cache at ${legacy} (the old package name) is not being used ` +
+      `and nothing was moved. Delete ${current} to have it migrated on the next run, or delete ${legacy} ` +
+      `if you no longer want it.`,
+  );
+}
+
 /**
  * The default root, with the one-time rebrand migration (D-45, PAR-652).
  *
@@ -55,7 +90,9 @@ const configured = (value: string | undefined): string | undefined =>
  * of losing someone's cache:
  *   1. `~/.vibectx` already exists → use it and touch nothing. A user who has both
  *      directories has already moved on; overwriting the new one with the old would lose
- *      the newer cache, which is the worst outcome available here.
+ *      the newer cache, which is the worst outcome available here. If it is EMPTY and a
+ *      legacy cache is sitting beside it, say so once (`noteStrandedLegacy`) — the rule is
+ *      unchanged, but it is no longer silent about what it left behind.
  *   2. No `~/.docs-cache-mcp` → use `~/.vibectx`. Nothing to migrate.
  *   3. `~/.docs-cache-mcp` is not a REAL DIRECTORY (D-46, PAR-652b) → rename nothing, say so
  *      once, and degrade exactly as rule 4 does. `existsSync` follows symlinks, so without
@@ -82,7 +119,11 @@ function defaultCacheRoot(warn: (message: string) => void): string {
   const current = join(home, CACHE_DIR_NAME);
   const legacy = join(home, LEGACY_CACHE_DIR_NAME);
   resolvedDefaultRoot = current;
-  if (existsSync(current) || !existsSync(legacy)) return current;
+  if (existsSync(current)) {
+    noteStrandedLegacy(current, legacy, warn);
+    return current;
+  }
+  if (!existsSync(legacy)) return current;
   // D-46: prove the legacy path before renaming it. lstat, not stat — the question is what
   // the ENTRY is, not what it points at. A throw here means it vanished between the two
   // calls, which is rule 2 arriving late: there is nothing to migrate.

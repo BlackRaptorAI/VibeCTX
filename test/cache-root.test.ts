@@ -240,3 +240,57 @@ describe("D-46: a symlinked legacy cache directory is refused, not renamed", () 
     expect(notes[0]).toContain("moved the cache directory");
   });
 });
+
+/**
+ * PAR-652b (security-gate note, info) — rule 1 was silent about what it left behind.
+ *
+ * `~/.vibectx` existing wins outright, and rightly so: a user with both directories has
+ * already moved on, and overwriting the newer cache with the older one is the worst outcome
+ * available here. But an EMPTY `~/.vibectx` — created by a `mkdir`, a dotfile manager, a
+ * half-finished earlier run — took the same path and said nothing, so a full legacy cache sat
+ * there stranded while the tool re-downloaded every document the user already had.
+ *
+ * The fix is a note, not a move: rule 1 does not change, the user is simply told where the
+ * old cache is and what to do with it.
+ */
+describe("an empty ~/.vibectx no longer strands a legacy cache silently", () => {
+  it("names both directories, once, and moves nothing", () => {
+    const marker = seedLegacy();
+    mkdirSync(current(), { recursive: true }); // empty
+    const notes: string[] = [];
+    const warn = (m: string) => notes.push(m);
+
+    expect(cacheRoot({ warn })).toBe(current());
+    cacheRoot({ warn });
+    cacheRoot({ warn });
+
+    expect(existsSync(marker)).toBe(true); // the legacy cache is exactly where it was
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(legacy());
+    expect(notes[0]).toContain(current());
+  });
+
+  it("says nothing when ~/.vibectx already holds a cache — that user has moved on", () => {
+    seedLegacy();
+    mkdirSync(current(), { recursive: true });
+    writeFileSync(join(current(), "keep.md"), "new", "utf8");
+    const notes: string[] = [];
+    expect(cacheRoot({ warn: (m) => notes.push(m) })).toBe(current());
+    expect(notes).toEqual([]);
+  });
+
+  it("says nothing when there is no legacy directory to strand", () => {
+    mkdirSync(current(), { recursive: true });
+    const notes: string[] = [];
+    expect(cacheRoot({ warn: (m) => notes.push(m) })).toBe(current());
+    expect(notes).toEqual([]);
+  });
+
+  it("says nothing when the legacy path is not a real directory", () => {
+    mkdirSync(current(), { recursive: true });
+    symlinkSync(mkdtempSync(join(tmpdir(), "vibectx-elsewhere-")), legacy());
+    const notes: string[] = [];
+    expect(cacheRoot({ warn: (m) => notes.push(m) })).toBe(current());
+    expect(notes).toEqual([]);
+  });
+});
