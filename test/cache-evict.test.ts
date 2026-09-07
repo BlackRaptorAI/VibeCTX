@@ -133,24 +133,31 @@ describe("eviction", () => {
     expect(existsSync(contentPath("react", "a"))).toBe(true);
   });
 
+  /**
+   * Q1 (PAR-652c). This case used to seed oldest-first, so "least recently fetched" and "first
+   * written" and "first alphabetically" all named the same document: replacing the recency
+   * sort with insertion order left the whole file green, and only `cache-evict-perf.test.ts`
+   * caught it. The three orders are now deliberately different — `omega` is the OLDEST but is
+   * seeded LAST and sorts LAST by path — so this file discriminates on its own.
+   */
   it("evicts least-recently-fetched first, and only as many as it takes", () => {
-    seed("react", "a", 4000, "2020-01-01T00:00:00.000Z");
-    seed("react", "b", 4000, "2021-01-01T00:00:00.000Z");
-    seed("zod", "c", 4000, "2022-01-01T00:00:00.000Z");
+    seed("react", "beta", 4000, "2022-01-01T00:00:00.000Z"); // newest, written first
+    seed("zod", "alpha", 4000, "2021-01-01T00:00:00.000Z");
+    seed("react", "omega", 4000, "2020-01-01T00:00:00.000Z"); // OLDEST, written last
     resetCacheEvictionState(); // a later run: nothing here was written by "this" run
     process.env.VIBECTX_CACHE_MAX_MB = String(9000 / (1024 * 1024)); // room for roughly two documents
     const notes: string[] = [];
     const summary = enforceCacheSizeCap(dir, { warn: (m) => notes.push(m) })!;
 
-    expect(summary.evicted.map((e) => e.document)).toEqual([urlSlug(url("a"))]);
+    expect(summary.evicted.map((e) => e.document)).toEqual([urlSlug(url("omega"))]);
     expect(summary.evicted[0].fetchedAt).toBe("2020-01-01T00:00:00.000Z");
     expect(summary.totalBytesAfter).toBeLessThanOrEqual(summary.capBytes);
     expect(summary.stillOverCap).toBe(false);
-    expect(existsSync(contentPath("react", "a"))).toBe(false);
-    expect(existsSync(metaPath("react", "a"))).toBe(false); // the meta goes with the content
-    expect(existsSync(contentPath("react", "b"))).toBe(true);
-    expect(existsSync(contentPath("zod", "c"))).toBe(true);
-    expect(readCache("react", url("a"), 168)).toBeUndefined();
+    expect(existsSync(contentPath("react", "omega"))).toBe(false);
+    expect(existsSync(metaPath("react", "omega"))).toBe(false); // the meta goes with the content
+    expect(existsSync(contentPath("react", "beta"))).toBe(true); // written first, and it stays
+    expect(existsSync(contentPath("zod", "alpha"))).toBe(true); // first by path, and it stays
+    expect(readCache("react", url("omega"), 168)).toBeUndefined();
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("evicted 1");
   });
@@ -207,14 +214,17 @@ describe("eviction", () => {
   });
 
   it("a document whose meta is unreadable sorts as oldest and goes first", () => {
-    seed("react", "a", 4000, "2024-01-01T00:00:00.000Z");
-    seed("react", "b", 4000, "2020-01-01T00:00:00.000Z");
-    writeFileSync(metaPath("react", "a"), "{not json", "utf8");
+    // Same discipline as above (Q1): the corrupt one is written LAST and sorts LAST by path,
+    // so only the recency rule can pick it.
+    seed("react", "beta", 4000, "2020-01-01T00:00:00.000Z");
+    seed("react", "omega", 4000, "2024-01-01T00:00:00.000Z");
+    writeFileSync(metaPath("react", "omega"), "{not json", "utf8");
     resetCacheEvictionState();
     process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
     const summary = enforceCacheSizeCap(dir, { warn: () => {} })!;
-    expect(summary.evicted[0].document).toBe(urlSlug(url("a")));
+    expect(summary.evicted[0].document).toBe(urlSlug(url("omega")));
     expect(summary.evicted[0].fetchedAt).toBeUndefined();
+    expect(existsSync(contentPath("react", "beta"))).toBe(true);
   });
 
   it("never descends or deletes through a symlinked library directory", () => {
