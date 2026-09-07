@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache, readCache, urlSlug } from "../src/cache.js";
@@ -8,7 +8,9 @@ import {
   cacheEvictionStats,
   enforceCacheSizeCap,
   lastEvictionSummary,
+  noteCacheWrite,
   resetCacheEvictionState,
+  sweepThresholdBytes,
   DEFAULT_CACHE_MAX_MB,
   EVICTION_SWEEP_BYTES,
 } from "../src/cache-evict.js";
@@ -97,21 +99,30 @@ describe("eviction", () => {
     expect(notes[0]).toContain("evicted 1");
   });
 
-  it("never evicts a document written in this run, even when it is the oldest", () => {
+  it("never evicts the document whose own write triggered the sweep, even when it is the oldest", () => {
+    // R3 narrowed "written in this run" to "written since the last sweep" — this is the case
+    // the protection actually exists for, and it is unchanged: a write cannot be undone by the
+    // sweep that same write triggers. Written by hand rather than through `seed` so that its
+    // `fetchedAt` is already the oldest at the moment the sweep runs (`seed` back-dates the
+    // meta only after `writeCache` has returned, i.e. after the sweep).
     seed("react", "old", 4000, "2020-01-01T00:00:00.000Z");
     resetCacheEvictionState(); // "old" now belongs to a previous run
-    seed("react", "fresh", 4000, "1999-01-01T00:00:00.000Z"); // written now, back-dated on purpose
+    mkdirSync(join(dir, "react"), { recursive: true });
+    writeFileSync(contentPath("react", "fresh"), "x".repeat(4000), "utf8");
+    writeFileSync(metaPath("react", "fresh"), JSON.stringify({ url: url("fresh"), fetchedAt: "1999-01-01T00:00:00.000Z" }), "utf8");
     process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
-    const summary = enforceCacheSizeCap(dir, { warn: () => {} })!;
+    const summary = noteCacheWrite(dir, contentPath("react", "fresh"), 4000)!;
 
     expect(summary.evicted.map((e) => e.document)).toEqual([urlSlug(url("old"))]);
-    expect(summary.protectedFromEviction).toBe(1); // "fresh" was older but is this run's
+    expect(summary.protectedFromEviction).toBe(1); // "fresh" was older but is this write
     expect(existsSync(contentPath("react", "fresh"))).toBe(true);
   });
 
   it("gives up honestly when everything left is protected", () => {
-    seed("react", "a", 4000, "2020-01-01T00:00:00.000Z");
-    seed("react", "b", 4000, "2021-01-01T00:00:00.000Z");
+    resetCacheEvictionState();
+    enforceCacheSizeCap(dir, { warn: () => {} }); // the process has swept once already
+    seed("react", "a", 4000, "2020-01-01T00:00:00.000Z"); // both writes land in the same
+    seed("react", "b", 4000, "2021-01-01T00:00:00.000Z"); // window, so both are protected
     process.env.VIBECTX_CACHE_MAX_MB = String(1000 / (1024 * 1024));
     const notes: string[] = [];
     const summary = enforceCacheSizeCap(dir, { warn: (m) => notes.push(m) })!;
@@ -173,6 +184,97 @@ describe("eviction", () => {
     process.env.VIBECTX_CACHE_MAX_MB = "0";
     expect(enforceCacheSizeCap(dir, { warn: () => {} })).toBeUndefined();
     expect(existsSync(contentPath("react", "a"))).toBe(true);
+  });
+});
+
+/**
+ * PAR-652c review R3, MEASURED by the review gate before this change: twelve 1 MiB documents
+ * written by ONE long-lived process against a 2 MB cap left 12,583,948 bytes on disk, zero
+ * evictions and not one stderr line. Two mechanisms combined to produce that:
+ *
+ *   1. `writtenThisRun` never cleared, so in a server (which is one process for days) every
+ *      document ever written was permanently protected — the protection was written for the
+ *      warm loop and quietly became "the cap does not apply to this process".
+ *   2. the sweep threshold was a flat 16 MiB, so 12 MiB of writes never triggered a second
+ *      sweep at all. Fixing (1) alone would still have measured zero evictions.
+ *
+ * Both are closed here. The protection is now scoped to the write that triggered the sweep
+ * (the fetch-evict-refetch loop it exists to prevent is a within-one-write problem), and the
+ * threshold never exceeds half the cap, so the overshoot is bounded by the cap rather than by
+ * a constant chosen for a 512 MB one.
+ */
+describe("a long-running process respects its cap (R3)", () => {
+  /** Every regular byte under the cache root — the same set the cap counts. */
+  function bytesOnDisk(root: string): number {
+    let total = 0;
+    for (const name of readdirSync(root)) {
+      const path = join(root, name);
+      const st = lstatSync(path);
+      if (st.isFile()) total += st.size;
+      else if (st.isDirectory()) for (const child of readdirSync(path)) total += lstatSync(join(path, child)).size;
+    }
+    return total;
+  }
+
+  it("twelve 1 MiB documents against a 2 MB cap end under the cap, not 6× over it", () => {
+    process.env.VIBECTX_CACHE_MAX_MB = "2";
+    resetCacheEvictionState();
+    const notes: string[] = [];
+    const warn = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    });
+    try {
+      for (let i = 0; i < 12; i++) writeCache("react", url(`doc${i}`), "x".repeat(1024 * 1024));
+    } finally {
+      warn.mockRestore();
+    }
+
+    const cap = 2 * 1024 * 1024;
+    // The bound the design promises: the cap, plus the sweep threshold (half the cap) it may
+    // accumulate between sweeps, plus the one document that triggered the last sweep.
+    expect(bytesOnDisk(dir)).toBeLessThanOrEqual(cap + cap / 2 + 1024 * 1024 + 4096);
+    expect(bytesOnDisk(dir)).toBeLessThan(12 * 1024 * 1024); // the measured failure, ruled out
+    expect(notes.filter((n) => n.includes("evicted")).length).toBeGreaterThan(0);
+    expect(lastEvictionSummary()!.evicted.length).toBeGreaterThan(0);
+    // The oldest documents went and the newest survived: this is LRU, not "delete something".
+    expect(existsSync(contentPath("react", "doc0"))).toBe(false);
+    expect(existsSync(contentPath("react", "doc11"))).toBe(true);
+  });
+
+  it("a document's protection lasts one sweep, not the life of the process", () => {
+    process.env.VIBECTX_CACHE_MAX_MB = "1"; // roomy: sweep 1 evicts nothing
+    resetCacheEvictionState();
+    seed("react", "a", 4000, "2020-01-01T00:00:00.000Z"); // first write of the process ⇒ sweep 1
+
+    // Squeeze the cap and write again, in the SAME process. Before R3, "a" was written by this
+    // process and was therefore unevictable for ever; now its protection ended at sweep 1.
+    process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
+    const notes: string[] = [];
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => {
+      notes.push(String(chunk));
+      return true;
+    });
+    try {
+      seed("react", "b", 600_000, "2022-01-01T00:00:00.000Z"); // crosses the threshold ⇒ sweep 2
+    } finally {
+      stderr.mockRestore();
+    }
+
+    expect(cacheEvictionStats().sweeps).toBe(2);
+    const summary = lastEvictionSummary()!;
+    expect(summary.evicted.map((e) => e.document)).toEqual([urlSlug(url("a"))]);
+    expect(summary.protectedFromEviction).toBe(1); // "b", the write that triggered this sweep
+    expect(existsSync(contentPath("react", "a"))).toBe(false);
+    expect(existsSync(contentPath("react", "b"))).toBe(true);
+    expect(notes.some((n) => n.includes("evicted 1"))).toBe(true);
+  });
+
+  it("the sweep threshold is the smaller of 16 MiB and half the cap", () => {
+    expect(sweepThresholdBytes({})).toBe(EVICTION_SWEEP_BYTES); // 512 MB default: unchanged
+    expect(sweepThresholdBytes({ VIBECTX_CACHE_MAX_MB: "2" })).toBe(1024 * 1024);
+    expect(sweepThresholdBytes({ VIBECTX_CACHE_MAX_MB: "0" })).toBe(EVICTION_SWEEP_BYTES); // cap off
+    expect(sweepThresholdBytes({ VIBECTX_CACHE_MAX_MB: "0.000001" })).toBe(1); // never zero
   });
 });
 

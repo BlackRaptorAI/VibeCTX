@@ -668,14 +668,22 @@ anything:
 measured one; `VIBECTX_CACHE_MAX_MB` changes it and `VIBECTX_CACHE_MAX_MB=0` turns it off.
 When a write pushes the cache over, the least-recently-fetched library **documents** are
 deleted until it is back under, and one stderr line and a `vibectx doctor` line say what
-went. Three things the cap deliberately does not do: it never evicts a document this run
-just fetched (that would make a warm loop fetch and delete the same file for ever, so the
-cap gives way instead and says so); it never evicts `resolved.json`, `index.json` or a
-project record, though it does count their bytes; and it does not sweep on every write —
-it accumulates and sweeps once per 16 MiB written, plus once at the first write of a
-process, so the cache can sit up to about that much over the cap between sweeps.
-Recency is the document's `fetchedAt`, which a 304 revalidation refreshes, so a document
-you keep using keeps its place.
+went. Recency is the document's `fetchedAt`, which a 304 revalidation refreshes, so a
+document you keep using keeps its place.
+
+Three things the cap deliberately does not do:
+
+- It never evicts the document whose own write triggered the sweep — that would make a warm
+  loop fetch and delete the same file for ever — so the cap gives way for that one document
+  instead, and the stderr line says so. The protection lasts **one sweep**, not the life of
+  the process: a long-running server respects its cap, and every document it has cached takes
+  its turn.
+- It never evicts `resolved.json`, `index.json` or a project record, though it does count
+  their bytes.
+- It does not sweep on every write. It accumulates and sweeps once per 16 MiB written, or
+  once per **half the cap** when that is smaller, plus once at the first write of a process.
+  So the cache can sit over the cap by up to that amount plus one document between sweeps —
+  a bound tied to the cap you set, not to a constant sized for the default one.
 
 **When a library will not cache: `VIBECTX_DEBUG=1`.** Every fetch failure looks the same
 from the outside — the library is simply not cached — because a 404, a connection timeout, a

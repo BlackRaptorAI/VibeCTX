@@ -22,6 +22,14 @@ import { join } from "node:path";
  * as oldest: it is the same judgement `readCache` makes (an unparsable `fetchedAt` reads as
  * stale, N-6), and a document whose meta is corrupt is exactly the one to drop first.
  *
+ * WHAT "THIS RUN" MEANS is one sweep, not one process (R3, PAR-652c). `writtenThisRun` holds
+ * the documents written since the last sweep, and the sweep clears it down to the write that
+ * triggered it. It used to hold everything the process had ever written, which in a server is
+ * everything, full stop — so the cap applied to a fresh process and to nothing else. The
+ * protection's job is narrow: stop a single write being undone by the sweep it triggers. Once
+ * a document has survived one sweep it has been returned to its caller and is re-fetchable,
+ * so it takes its turn like any other.
+ *
  * KNOWN LIMIT — two vibectx processes on one cache. `writtenThisRun` is per-process, so
  * this process can evict a document the other one fetched seconds ago. That is a wasted
  * refetch, not a correctness problem: the other process already returned the content it
@@ -50,7 +58,7 @@ import { join } from "node:path";
 export const DEFAULT_CACHE_MAX_MB = 512;
 
 /**
- * How many bytes may be written between full sweeps. ASSUMED.
+ * Ceiling on how many bytes may be written between full sweeps. ASSUMED — see below.
  *
  * The alternative designs were: stat the whole cache on every write (a warm run writes
  * hundreds of documents, so that is hundreds of full directory walks — the "stat the world"
@@ -59,11 +67,10 @@ export const DEFAULT_CACHE_MAX_MB = 512;
  * bug class `atomic-store.ts` exists to avoid).
  *
  * What is here instead: accumulate the bytes THIS process has written and sweep when they
- * exceed this threshold — plus once on the first write, so a process that starts against an
- * already-oversized cache fixes it immediately rather than after 16 MiB of new work. The
- * cost of a sweep is one `lstat` per file; amortised over 16 MiB of writes it is noise
- * beside the writes themselves. The price is the overshoot: between sweeps the cache may
- * exceed the cap by up to this threshold plus one document.
+ * exceed `sweepThresholdBytes()` — plus once on the first write, so a process that starts
+ * against an already-oversized cache fixes it immediately rather than after a threshold of
+ * new work. The price is the overshoot: between sweeps the cache may exceed the cap by up to
+ * the threshold plus one document.
  */
 export const EVICTION_SWEEP_BYTES = 16 * 1024 * 1024;
 
@@ -144,6 +151,26 @@ export function cacheCapBytes(env: NodeJS.ProcessEnv = process.env): number | un
   if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_CACHE_MAX_MB * 1024 * 1024;
   if (parsed === 0) return undefined;
   return Math.floor(parsed * 1024 * 1024);
+}
+
+/**
+ * Bytes this process may write between sweeps: the smaller of `EVICTION_SWEEP_BYTES` and half
+ * the cap, and never zero.
+ *
+ * A flat 16 MiB was chosen against the 512 MB default, where it is 3 % of the cap and the
+ * overshoot is invisible. Against a small cap it was the whole story: 12 MiB of writes against
+ * a 2 MB cap never reached the threshold, so after the first write NO sweep ran and the cache
+ * finished 6× over its cap with nothing said (MEASURED by the review gate, PAR-652c R3).
+ * Tying the threshold to the cap makes the overshoot a property of the cap the user set rather
+ * than of a constant sized for a different one: at most half the cap of accumulated writes,
+ * plus the document that triggered the sweep.
+ *
+ * With the cap off there is nothing to overshoot, so the ceiling stands.
+ */
+export function sweepThresholdBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const cap = cacheCapBytes(env);
+  if (cap === undefined) return EVICTION_SWEEP_BYTES;
+  return Math.max(1, Math.min(EVICTION_SWEEP_BYTES, Math.floor(cap / 2)));
 }
 
 /** A REGULAR file's size, or `undefined` for a symlink, a directory or anything unreadable. */
@@ -314,9 +341,11 @@ export function enforceCacheSizeCap(
   for (const doc of candidates) {
     if (running <= capBytes) break;
     if (writtenThisRun.has(doc.contentPath)) {
-      // Evicting what this run just fetched would make a warm loop fetch, evict, and fetch
+      // Evicting what triggered this sweep would make a warm loop fetch, evict, and fetch
       // again for ever, and would make `get_docs` able to return a document it had already
-      // deleted. The cap gives way instead; `stillOverCap` says so.
+      // deleted. The cap gives way instead; `stillOverCap` says so. The set is cleared to the
+      // triggering write at the end of every sweep (see `noteCacheWrite`), so this protection
+      // lasts one sweep, not the life of the process.
       summary.protectedFromEviction += 1;
       continue;
     }
@@ -360,14 +389,32 @@ export function formatBytes(bytes: number): string {
  * Called by `writeCache` after both renames land: record the document as this run's, and
  * sweep only when enough has been written since the last sweep (or this is the first write
  * of the process). Best effort — never throws into the write path.
+ *
+ * THE PROTECTED SET IS CLEARED AT EVERY SWEEP (R3, PAR-652c), leaving only the write that
+ * triggered it. It used to accumulate for the life of the process, which in a server — one
+ * process for days — meant every document it had ever fetched was permanently unevictable and
+ * the cap silently stopped applying: MEASURED, twelve 1 MiB documents against a 2 MB cap left
+ * 12,583,948 bytes, zero evictions, no note. That is not what the protection was for. It
+ * exists so a single write cannot be undone by the sweep that same write triggers (a warm loop
+ * that fetched, evicted and refetched for ever; `get_docs` returning a document it had already
+ * deleted) — a within-one-write problem, which one write's worth of protection solves. A
+ * document fetched before the previous sweep has already been returned to its caller and is
+ * re-fetchable; keeping it pinned buys nothing and costs the bound.
  */
 export function noteCacheWrite(root: string, contentPath: string, bytes: number): EvictionSummary | undefined {
   writtenThisRun.add(contentPath);
   bytesSinceSweep += bytes;
-  if (sweptEver && bytesSinceSweep < EVICTION_SWEEP_BYTES) return undefined;
+  if (sweptEver && bytesSinceSweep < sweepThresholdBytes()) return undefined;
   try {
     return enforceCacheSizeCap(root);
   } catch {
     return undefined;
+  } finally {
+    // Emptied, not reduced to `contentPath`: this write has survived the only sweep that could
+    // have deleted it before `writeCache` returned, and holding it any longer is what made the
+    // steady state two protected documents rather than one. Done in `finally` so it happens
+    // even when the sweep threw or the cap is off — an unbounded protected set is also an
+    // unbounded `Set` in a process that runs for days.
+    writtenThisRun = new Set();
   }
 }
