@@ -22,6 +22,14 @@ import { join } from "node:path";
  * as oldest: it is the same judgement `readCache` makes (an unparsable `fetchedAt` reads as
  * stale, N-6), and a document whose meta is corrupt is exactly the one to drop first.
  *
+ * KNOWN LIMIT — two vibectx processes on one cache. `writtenThisRun` is per-process, so
+ * this process can evict a document the other one fetched seconds ago. That is a wasted
+ * refetch, not a correctness problem: the other process already returned the content it
+ * fetched, and every reader re-reads from disk and treats a missing file as a miss
+ * (`readCache` requires both files to exist; `search` skips a group whose body it cannot
+ * re-read). Sharing the protected set would need a file two processes agree on — the
+ * mutable-shared-state bug class this cache is built to avoid — so it is not shared.
+ *
  * SYMLINKS are never followed and never removed — `lstat` decides what is a directory and
  * what is a regular file, the same rule the temp sweep in `atomic-store.ts` applies. The
  * cache directory is a trust boundary: a link planted in it must not be able to aim a
