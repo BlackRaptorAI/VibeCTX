@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -163,5 +163,80 @@ describe("D-45 one-time migration of ~/.docs-cache-mcp", () => {
     expect(notes).toHaveLength(1);
     expect(notes[0]).toContain("EXDEV");
     expect(notes[0]).toContain(legacy());
+  });
+});
+
+/**
+ * D-46 (oversight, PAR-652b) — the legacy path must be PROVEN a real directory before it is
+ * renamed.
+ *
+ * `existsSync` follows symlinks, so at HEAD a symlinked `~/.docs-cache-mcp` passed rule 2 and
+ * rule 3 renamed THE LINK: `~/.vibectx` became a symlink aiming wherever the link aimed, and
+ * from then on every cached document — and every eviction — landed in the user's own
+ * directory. `renameSync` operates on the link itself, which is exactly why nothing about the
+ * target being someone's `Documents` folder stopped it.
+ *
+ * The refusal degrades the same way a failed rename does (rule 4): keep using the legacy path
+ * for this run and say so once. RESIDUAL, stated because it is real: writes during that run
+ * still resolve through the link. What is closed here is the PERMANENT capture — `~/.vibectx`
+ * is not made a link — and deletion, which the D-46 root guard in cache-evict.ts refuses.
+ */
+describe("D-46: a symlinked legacy cache directory is refused, not renamed", () => {
+  let target: string;
+  let victim: string;
+  beforeEach(() => {
+    target = mkdtempSync(join(tmpdir(), "vibectx-victim-"));
+    victim = join(target, "thesis.md");
+    writeFileSync(victim, "# My thesis", "utf8");
+  });
+  afterEach(() => {
+    rmSync(target, { recursive: true, force: true });
+  });
+
+  const legacyIsLinkTo = (dest: string) => symlinkSync(dest, legacy());
+
+  it("never renames the link, so ~/.vibectx cannot become a link aimed at user files", () => {
+    legacyIsLinkTo(target);
+    const notes: string[] = [];
+    const root = cacheRoot({ warn: (m) => notes.push(m) });
+
+    expect(existsSync(current())).toBe(false); // nothing was created at the new path
+    expect(lstatSync(legacy()).isSymbolicLink()).toBe(true); // the link is exactly where it was
+    expect(realpathSync(legacy())).toBe(realpathSync(target));
+    expect(existsSync(victim)).toBe(true);
+    expect(root).toBe(legacy()); // degraded in place, as a failed rename does
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("symlink");
+    expect(notes[0]).toContain(legacy());
+  });
+
+  it("says it once per process, however many times cacheRoot is called", () => {
+    legacyIsLinkTo(target);
+    const notes: string[] = [];
+    const warn = (m: string) => notes.push(m);
+    cacheRoot({ warn });
+    cacheRoot({ warn });
+    cacheRoot({ warn });
+    expect(notes).toHaveLength(1);
+  });
+
+  it("refuses a legacy path that exists but is not a directory", () => {
+    writeFileSync(legacy(), "not a cache", "utf8");
+    const notes: string[] = [];
+    cacheRoot({ warn: (m) => notes.push(m) });
+    expect(existsSync(current())).toBe(false);
+    expect(readFileSync(legacy(), "utf8")).toBe("not a cache");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("not a directory");
+  });
+
+  it("a real legacy directory still migrates — the guard costs the good case nothing", () => {
+    const marker = seedLegacy();
+    const notes: string[] = [];
+    expect(cacheRoot({ warn: (m) => notes.push(m) })).toBe(current());
+    expect(existsSync(marker)).toBe(false);
+    expect(readFileSync(join(current(), "react", "doc.md"), "utf8")).toBe("# react");
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain("moved the cache directory");
   });
 });

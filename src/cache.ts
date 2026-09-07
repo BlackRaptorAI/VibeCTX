@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
@@ -57,10 +57,21 @@ const configured = (value: string | undefined): string | undefined =>
  *      directories has already moved on; overwriting the new one with the old would lose
  *      the newer cache, which is the worst outcome available here.
  *   2. No `~/.docs-cache-mcp` → use `~/.vibectx`. Nothing to migrate.
- *   3. Otherwise rename `~/.docs-cache-mcp` to `~/.vibectx` — a rename, never a copy: a
+ *   3. `~/.docs-cache-mcp` is not a REAL DIRECTORY (D-46, PAR-652b) → rename nothing, say so
+ *      once, and degrade exactly as rule 4 does. `existsSync` follows symlinks, so without
+ *      this check a link planted at the legacy path passed rule 2 and rule 3 renamed THE LINK
+ *      — `renameSync` moves the link itself, so `~/.vibectx` became a symlink aiming wherever
+ *      the link aimed, and every cached document and every eviction from then on landed in
+ *      whatever directory that was. Measured by the security gate. The link is never followed
+ *      into a rename and never removed.
+ *      RESIDUAL, stated because it is real: writes during that one run still resolve through
+ *      the link. What this closes is the PERMANENT capture (`~/.vibectx` is not made a link)
+ *      and deletion — `enforceCacheSizeCap` refuses a root that is not a real directory, so
+ *      nothing is evicted through it either.
+ *   4. Otherwise rename `~/.docs-cache-mcp` to `~/.vibectx` — a rename, never a copy: a
  *      copy can half-succeed and leave two divergent caches, and a rename either happens
  *      or does not.
- *   4. The rename failed (cross-device, permissions, a race with another process) → keep
+ *   5. The rename failed (cross-device, permissions, a race with another process) → keep
  *      using the OLD path for this run and say so once. Degrading is right: the cache is
  *      a cache, but silently starting from an empty one would re-download every document
  *      the user already has.
@@ -72,6 +83,25 @@ function defaultCacheRoot(warn: (message: string) => void): string {
   const legacy = join(home, LEGACY_CACHE_DIR_NAME);
   resolvedDefaultRoot = current;
   if (existsSync(current) || !existsSync(legacy)) return current;
+  // D-46: prove the legacy path before renaming it. lstat, not stat — the question is what
+  // the ENTRY is, not what it points at. A throw here means it vanished between the two
+  // calls, which is rule 2 arriving late: there is nothing to migrate.
+  let legacyStats;
+  try {
+    legacyStats = lstatSync(legacy);
+  } catch {
+    return current;
+  }
+  if (!legacyStats.isDirectory()) {
+    resolvedDefaultRoot = legacy;
+    warn(
+      `vibectx: not moving ${legacy} → ${current} — ${legacy} is ` +
+        `${legacyStats.isSymbolicLink() ? "a symlink" : "not a directory"}, and only a real directory is moved. ` +
+        `Using ${legacy} for this run; nothing was renamed, copied or deleted. ` +
+        `Remove it, or set VIBECTX_CACHE_DIR to a real directory.`,
+    );
+    return resolvedDefaultRoot;
+  }
   try {
     renameSync(legacy, current);
     warn(`vibectx: moved the cache directory ${legacy} → ${current} (renamed once; nothing was copied or deleted).`);
