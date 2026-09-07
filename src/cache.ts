@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync 
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
+import { noteCacheWrite } from "./cache-evict.js";
 
 export interface CacheMeta {
   url: string;
@@ -189,4 +190,9 @@ export function writeCache(
     rmSync(metaTmp, { force: true });
     throw e;
   }
+  // Only after BOTH renames land: this document now exists and counts toward the cap, and it
+  // is protected from eviction for the rest of this run (PAR-652 item 7a). Sweeping is
+  // amortised inside noteCacheWrite, which never throws — an unsweepable cache must not fail
+  // a write that already succeeded.
+  noteCacheWrite(cacheRoot(), contentPath, Buffer.byteLength(content, "utf8"));
 }

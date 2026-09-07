@@ -2,6 +2,7 @@ import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry
 import type { ConfigScope } from "./config.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
+import { lastEvictionSummary, formatBytes } from "./cache-evict.js";
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
 
 /**
@@ -307,6 +308,22 @@ export function formatDoctorTable(report: DoctorReport): string {
   }
   for (const issue of report.configIssues ?? []) {
     lines.push(`✗ config ${issue.path} (${issue.scope}): ${issue.reason} — file skipped`);
+  }
+  // PAR-652 item 7a: doctor's job is to say why retrieval is not what you expected, and
+  // "the document was evicted under the size cap" is one of the answers. Reported only when
+  // this run actually evicted something, so a healthy cache says nothing about it.
+  const eviction = lastEvictionSummary();
+  if (eviction !== undefined && eviction.evicted.length > 0) {
+    const named = eviction.evicted
+      .slice(0, 5)
+      .map((e) => `${e.library}/${e.document}`)
+      .join(", ");
+    lines.push(
+      `cache: evicted ${eviction.evicted.length} least-recently-fetched document(s), ` +
+        `${formatBytes(eviction.totalBytesBefore - eviction.totalBytesAfter)} freed, now ` +
+        `${formatBytes(eviction.totalBytesAfter)} against a ${formatBytes(eviction.capBytes)} cap (VIBECTX_CACHE_MAX_MB) — ` +
+        `${named}${eviction.evicted.length > 5 ? `, +${eviction.evicted.length - 5} more` : ""}`,
+    );
   }
   return lines.join("\n");
 }

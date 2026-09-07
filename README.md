@@ -664,6 +664,19 @@ anything:
   `~/.docs-cache-mcp` for that run and says so once. Nothing is copied and no cached
   document is lost.
 
+**Size cap.** The cache is capped at **512 MB** by default — an assumed figure, not a
+measured one; `VIBECTX_CACHE_MAX_MB` changes it and `VIBECTX_CACHE_MAX_MB=0` turns it off.
+When a write pushes the cache over, the least-recently-fetched library **documents** are
+deleted until it is back under, and one stderr line and a `vibectx doctor` line say what
+went. Three things the cap deliberately does not do: it never evicts a document this run
+just fetched (that would make a warm loop fetch and delete the same file for ever, so the
+cap gives way instead and says so); it never evicts `resolved.json`, `index.json` or a
+project record, though it does count their bytes; and it does not sweep on every write —
+it accumulates and sweeps once per 16 MiB written, plus once at the first write of a
+process, so the cache can sit up to about that much over the cap between sweeps.
+Recency is the document's `fetchedAt`, which a 304 revalidation refreshes, so a document
+you keep using keeps its place.
+
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
