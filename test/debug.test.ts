@@ -2,7 +2,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { classifyFetchError, debugEnabled, debugEvent, debugField } from "../src/debug.js";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import {
+  classifyFetchError,
+  debugEnabled,
+  debugEvent,
+  debugField,
+  FETCH_DIAGNOSTIC_REASONS,
+  FETCH_FAILURE_REASONS,
+} from "../src/debug.js";
 import { fetchUrl, PRIMARY_DOC_MAX_BYTES } from "../src/fetcher.js";
 
 /**
@@ -227,6 +236,62 @@ describe("fetchUrl diagnostics: a refusal and an over-size document each get the
     vi.stubGlobal("fetch", vi.fn(async () => new Response("x", { status: 200, headers: { "content-length": "99999999" } })));
     expect(await fetchUrl(URL_UNDER_TEST, { maxBytes: 1000 })).toEqual({ status: "too-large" });
     expect(lines).toEqual([]);
+  });
+});
+
+/**
+ * PAR-652c schema K2. The README enumerated nine `reason` values while the type union
+ * exported ten — `aborted` was in the code and in no document. Prose and a type do not stay
+ * in step by good intentions, so this is the mechanism: one exported list, and a test that
+ * reads the README and refuses a drift in either direction.
+ */
+describe("the documented reason vocabulary is the shipped one", () => {
+  const README = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+  const start = README.indexOf("**When a library will not cache");
+  const section = README.slice(start, README.indexOf("`VIBECTX_NO_AUTOWARM=1`", start));
+
+  it("the README's VIBECTX_DEBUG section names every event and every reason the code can emit", () => {
+    expect(section.length).toBeGreaterThan(500); // the slice found the section, not an empty string
+    const missing: string[] = [];
+    for (const [event, reasons] of Object.entries(FETCH_DIAGNOSTIC_REASONS)) {
+      if (!section.includes(`\`${event}\``)) missing.push(event);
+      for (const reason of reasons) if (!section.includes(`\`${reason}\``)) missing.push(`${event}/${reason}`);
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("the README documents no reason the code cannot emit", () => {
+    const shipped = new Set(Object.values(FETCH_DIAGNOSTIC_REASONS).flat());
+    // Every inline-code token in the section that LOOKS like a reason (lower-case, hyphenated
+    // or a bare word) must be one, an event name, or one of the section's own known terms.
+    const allowed = new Set([
+      ...shipped,
+      ...Object.keys(FETCH_DIAGNOSTIC_REASONS),
+      "to=",
+      "bytes=",
+      "limit=",
+      "--json",
+      "reason", // the field's own name, as prose
+      "ms",
+    ]);
+    const undocumentable = [...section.matchAll(/`([a-z][a-z0-9-]*)`/g)]
+      .map((m) => m[1])
+      .filter((token) => !allowed.has(token));
+    expect(undocumentable).toEqual([]);
+  });
+
+  it("every FetchFailureReason is a fetch.miss reason — the union and the map cannot drift", () => {
+    for (const reason of FETCH_FAILURE_REASONS) {
+      expect(FETCH_DIAGNOSTIC_REASONS["fetch.miss"]).toContain(reason);
+    }
+  });
+
+  it("`aborted` is classified, even though nothing reaches it today", () => {
+    // Kept on purpose: dropping the branch would relabel a future caller-side cancellation as
+    // `network`. The README says plainly that no code path produces it yet.
+    const e = new Error("This operation was aborted");
+    e.name = "AbortError";
+    expect(classifyFetchError(e)).toEqual({ reason: "aborted", message: "This operation was aborted" });
   });
 });
 

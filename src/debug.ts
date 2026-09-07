@@ -14,6 +14,15 @@
  *
  * Everything goes to STDERR. This process is a stdio MCP server: stdout carries the
  * protocol and a stray byte on it corrupts the session.
+ *
+ * THE LINE IS FOR A HUMAN, NOT A PARSER (PAR-652c, schema K2). `vibectx [debug] <event> k=v`
+ * has a stable enough shape to read and to grep, and no stability guarantee beyond that: the
+ * event names, the field set, the field ORDER and the `reason` vocabulary may all change in
+ * any release, without a version bump and without a deprecation, because the whole point of a
+ * diagnostic is to be improved the moment it fails to explain something. Nothing in this
+ * product parses it, and nothing outside should either — the machine-readable surfaces are
+ * `--json` on the CLI subcommands and the MCP tool payloads, which ARE versioned contracts.
+ * If you need a fetch failure in a script, that is a feature request, not a `grep`.
  */
 
 /** Longest a single field value is printed at; a URL from a fetched document is untrusted. */
@@ -75,14 +84,42 @@ export function debugEvent(
   }
 }
 
-export type FetchFailureReason =
-  | "timeout"
-  | "aborted"
-  | "dns"
-  | "connection-refused"
-  | "connection-reset"
-  | "tls"
-  | "network";
+/** The thrown-error reasons, as data as well as a type — see `FETCH_DIAGNOSTIC_REASONS`. */
+export const FETCH_FAILURE_REASONS = [
+  "timeout",
+  "aborted",
+  "dns",
+  "connection-refused",
+  "connection-reset",
+  "tls",
+  "network",
+] as const;
+
+export type FetchFailureReason = (typeof FETCH_FAILURE_REASONS)[number];
+
+/**
+ * Every `reason=` value `fetchUrl` can emit, by event name — the ONE list, and the one the
+ * README documents.
+ *
+ * It exists because the README and this module had drifted (PAR-652c, schema K2): the docs
+ * enumerated nine values and the union exported ten. Prose and a type cannot be kept in step
+ * by good intentions, so `test/debug.test.ts` reads the README's list and compares it to this
+ * constant, and the behavioural cases in the same file prove each value is really emitted.
+ * Adding a reason to the code and not to the docs now reds a test.
+ */
+export const FETCH_DIAGNOSTIC_REASONS: Readonly<Record<string, readonly string[]>> = {
+  "fetch.miss": [
+    "http-status",
+    "html-not-text",
+    "empty-body",
+    "redirect-no-location",
+    "redirect-hops",
+    "redirect-unparsable",
+    ...FETCH_FAILURE_REASONS,
+  ],
+  "fetch.refused": ["not-public", "redirect-host", "final-host", "link-policy"],
+  "fetch.too-large": ["content-length", "body-cap"],
+};
 
 /**
  * Which kind of failure a thrown fetch error was. The three the brief names are the three
@@ -90,6 +127,16 @@ export type FetchFailureReason =
  * slow or a captive network, `dns` is a name that does not resolve (a typo, or no network
  * at all), and an HTTP status never reaches here — it is not a thrown error, so it is logged
  * separately at the point `fetchUrl` decides a response is a miss.
+ *
+ * `aborted` IS NOT REACHABLE TODAY (PAR-652c, schema K2), and is kept deliberately. The only
+ * signal `fetchUrl` passes is `AbortSignal.timeout(20_000)`, whose rejection is a
+ * `TimeoutError` and is claimed by the branch above; no caller passes an `AbortController`
+ * into a fetch (the autowarm's controller stops it SCHEDULING further fetches — `src/
+ * autowarm.ts` — it does not abort one in flight). Dropping the branch would not delete the
+ * case, it would relabel it: the day a caller does pass a controller, an abort would arrive
+ * here with no `code` on its cause chain and be reported as `network`, which is the wrong
+ * answer to the only question this function exists to answer. It costs one line to be right
+ * about it, and the README says plainly that no code path produces it yet.
  *
  * `fetch` wraps low-level failures in a `TypeError` whose `cause` carries the libuv code, so
  * the code is read from the cause chain rather than from the message text.

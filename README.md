@@ -702,7 +702,7 @@ Every failure path in `fetchUrl` emits exactly one line:
 - `fetch.miss` — `http-status` · `html-not-text` (a site serving its 404 page with a 200) ·
   `empty-body` · `redirect-no-location` · `redirect-hops` (more than 5) ·
   `redirect-unparsable` · and, for a fetch that threw, `timeout`, `dns`,
-  `connection-refused`, `connection-reset`, `tls` or `network`.
+  `connection-refused`, `connection-reset`, `tls`, `network` or `aborted`.
 - `fetch.refused` — the guard said no and no body was read: `not-public` (the URL is not
   https on a public host), `redirect-host`, `final-host`, `link-policy` (a followed link left
   its source origin). `to=` names the URL that was refused, which is a URL vibectx did *not*
@@ -711,8 +711,16 @@ Every failure path in `fetchUrl` emits exactly one line:
   read; `bytes=` is what the server declared) or `body-cap` (the cap was hit mid-stream, so
   the true size is unknown and no `bytes=` is printed). `limit=` is the cap that applied.
 
-Nothing else changes: the fetch behaves identically with the variable set or unset, and
-stdout — which carries the MCP protocol — is never written to.
+`aborted` is in the vocabulary but **no code path produces it today**: the only abort signal
+vibectx uses is the 20-second fetch timeout, which arrives as `timeout`. It is kept so that a
+future caller-side cancellation is not silently reported as `network`.
+
+**These lines are for a human, not for a parser.** The shape is stable enough to read and to
+grep, and that is the whole guarantee: event names, fields, field order and the `reason`
+vocabulary can change in any release without a version bump. The versioned, machine-readable
+surfaces are `--json` on the CLI subcommands and the MCP tool payloads. Nothing else changes:
+the fetch behaves identically with the variable set or unset, and stdout — which carries the
+MCP protocol — is never written to.
 
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
