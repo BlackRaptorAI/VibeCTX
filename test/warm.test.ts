@@ -527,6 +527,12 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     const HOSTILE = "boom\u001b[31mx\u009f\u202ey\u200bz";
     const CLEAN = "boom[31mxyz";
     // Route 1: a seeded project record — the R3 memo copies the previous run's note into this run's row.
+    //
+    // `failedAt` MUST be relative to the real clock, not a hard-coded date. The warmToolText
+    // assertion below takes no `now` injection, so it reads the wall clock: a fixed timestamp
+    // makes this test pass only inside its own RECENT_FAILURE_HOURS window and fail from the
+    // next day on. (It did — CI went red on the day after the commit landed.)
+    const failedAt = new Date(Date.now() - 3 * 3600_000).toISOString();
     writePackageJson({ "zz-nothing": "1" });
     mkdirSync(join(cache, "projects"), { recursive: true });
     writeFileSync(
@@ -535,15 +541,16 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
         schemaVersion: PROJECT_RECORD_SCHEMA_VERSION,
         dir: project,
         manifests: ["package.json"],
-        dependencies: [{ name: "zz-nothing", ecosystem: "npm", source: "package.json", status: "unresolved", note: HOSTILE, failedAt: "2026-09-06T10:00:00.000Z" }],
-        warmedAt: "2026-09-06T10:00:00.000Z",
+        dependencies: [{ name: "zz-nothing", ecosystem: "npm", source: "package.json", status: "unresolved", note: HOSTILE, failedAt }],
+        warmedAt: failedAt,
       }),
       "utf8",
     );
     // Route 2: a manifest FILE NAME carrying the same characters — it becomes a `source` and a manifest entry.
     writeFileSync(join(project, "requirements-\u001b[31mred\u200b.txt"), "flask\n", "utf8");
     stubFetch({});
-    const report = await runWarm(registry(), { dir: project, now: () => new Date("2026-09-06T13:00:00Z") });
+    // No `now` injection: this run and the warmToolText run below must share one clock.
+    const report = await runWarm(registry(), { dir: project });
 
     const memo = report.dependencies.find((d) => d.name === "zz-nothing")!;
     expect(memo.status).toBe("unresolved (recent)");
