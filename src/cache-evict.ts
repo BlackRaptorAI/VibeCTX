@@ -72,6 +72,20 @@ export const DEFAULT_CACHE_MAX_MB = 512;
  * against an already-oversized cache fixes it immediately rather than after a threshold of
  * new work. The price is the overshoot: between sweeps the cache may exceed the cap by up to
  * the threshold plus one document.
+ *
+ * WHERE THIS NUMBER COMES FROM (Q2, PAR-652c) — nowhere. 16 MiB is a chosen constant, not a
+ * figure derived from a cost measurement, and no measurement would produce it: it is the
+ * ratio between two costs (a sweep's `lstat` walk against the writes it is amortised over)
+ * and any value spanning an order of magnitude either way would be defensible. What IS
+ * measured is the cost it trades against, so the trade can be judged rather than taken on
+ * faith — MEASURED 2026-09-07 (Node 22.22.2, tmpfs, warm page cache, median of 5) by
+ * `enforceCacheSizeCap` over a synthetic under-cap cache: 1,000 documents (2,000 files) swept
+ * in 10.1 ms and 10,000 documents (20,000 files) in 82.5 ms — 4-5 microseconds per file,
+ * linear, and no meta file parsed because the cache is under the cap. So even a
+ * 10,000-document cache costs ~83 ms of sweep per 16 MiB written, about 5 ms per megabyte.
+ * That is the number to argue with; the constant itself is a judgement about how much
+ * overshoot is acceptable, not a result. Note also that the threshold actually in force is
+ * `sweepThresholdBytes()`, which lowers this ceiling for a small cap.
  */
 export const EVICTION_SWEEP_BYTES = 16 * 1024 * 1024;
 
