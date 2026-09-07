@@ -141,6 +141,95 @@ describe("fetchUrl diagnostics: a 404, a timeout and a DNS failure are three dif
   });
 });
 
+/**
+ * PAR-652c review R4. README promised "every fetch failure" a line, and the two outcomes a
+ * user is most likely to need explained — the SSRF guard refusing a redirect, and a document
+ * over the byte cap — returned silently. From the outside they are indistinguishable from a
+ * 404: the library simply is not cached. These cases pin one line per refusal and per
+ * over-size, and pin that the OUTCOME each caller sees is byte-for-byte what it always was.
+ */
+describe("fetchUrl diagnostics: a refusal and an over-size document each get their own line", () => {
+  /** The `reason=` of the single line carrying `event`, or undefined when none was logged. */
+  function reasonOf(event: string): string | undefined {
+    const line = lines.find((l) => l.includes(event));
+    return line === undefined ? undefined : /reason=([^\s]+)/.exec(line)?.[1];
+  }
+  const redirectTo = (location: string) =>
+    vi.fn(async () => new Response(null, { status: 302, headers: { location } }));
+
+  it("a redirect to a non-public host logs fetch.refused reason=redirect-host naming the target", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    vi.stubGlobal("fetch", redirectTo("http://127.0.0.1/secret"));
+    expect(await fetchOnce()).toEqual({ status: "refused" });
+    expect(reasonOf("fetch.refused")).toBe("redirect-host");
+    expect(lines.join("")).toContain("to=http://127.0.0.1/secret");
+    expect(lines.join("")).toContain("status=302");
+  });
+
+  it("a content-derived first URL that is not public https is refused before any request", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    const spy = vi.fn(async () => new Response("never", { status: 200 }));
+    vi.stubGlobal("fetch", spy);
+    expect(await fetchUrl("http://169.254.169.254/latest", { maxBytes: PRIMARY_DOC_MAX_BYTES, publicFinalUrl: true })).toEqual({
+      status: "refused",
+    });
+    expect(reasonOf("fetch.refused")).toBe("not-public");
+    expect(spy).not.toHaveBeenCalled(); // the diagnostic did not cost a request
+  });
+
+  it("a followed link leaving its source origin logs fetch.refused reason=link-policy", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("stolen", { status: 200 })));
+    expect(
+      await fetchUrl("https://elsewhere.example/page.md", {
+        maxBytes: PRIMARY_DOC_MAX_BYTES,
+        linkGuard: { sourceUrl: "https://example.com/llms.txt" },
+      }),
+    ).toEqual({ status: "refused" });
+    expect(reasonOf("fetch.refused")).toBe("link-policy");
+  });
+
+  it("a declared Content-Length over the cap logs fetch.too-large with the size and the limit", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("x", { status: 200, headers: { "content-length": "99999999" } })));
+    expect(await fetchUrl(URL_UNDER_TEST, { maxBytes: 1000 })).toEqual({ status: "too-large" });
+    expect(reasonOf("fetch.too-large")).toBe("content-length");
+    expect(lines.join("")).toContain("bytes=99999999");
+    expect(lines.join("")).toContain("limit=1000");
+  });
+
+  it("an undeclared body that overruns the cap mid-stream logs reason=body-cap and no size", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("y".repeat(5000), { status: 200, headers: { "content-type": "text/plain" } })));
+    expect(await fetchUrl(URL_UNDER_TEST, { maxBytes: 100 })).toEqual({ status: "too-large" });
+    expect(reasonOf("fetch.too-large")).toBe("body-cap");
+    expect(lines.join("")).toContain("limit=100");
+    expect(lines.join("")).not.toContain("bytes="); // the true size is unknown; it is not guessed
+  });
+
+  it("a redirect with no Location, and one past the hop limit, are two different misses", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 302 })));
+    expect(await fetchOnce()).toEqual({ status: "miss" });
+    expect(loggedReason()).toBe("redirect-no-location");
+
+    lines = [];
+    let hops = 0;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 302, headers: { location: `https://example.com/${hops++}` } })));
+    expect(await fetchOnce()).toEqual({ status: "miss" });
+    expect(loggedReason()).toBe("redirect-hops");
+  });
+
+  it("the diagnostics are additive: with VIBECTX_DEBUG unset every outcome is identical and silent", async () => {
+    delete process.env.VIBECTX_DEBUG;
+    vi.stubGlobal("fetch", redirectTo("http://127.0.0.1/secret"));
+    expect(await fetchOnce()).toEqual({ status: "refused" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("x", { status: 200, headers: { "content-length": "99999999" } })));
+    expect(await fetchUrl(URL_UNDER_TEST, { maxBytes: 1000 })).toEqual({ status: "too-large" });
+    expect(lines).toEqual([]);
+  });
+});
+
 describe("debugEvent", () => {
   it("renders one line of key=value pairs and drops undefined fields", () => {
     const out: string[] = [];

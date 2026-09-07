@@ -678,23 +678,41 @@ Recency is the document's `fetchedAt`, which a 304 revalidation refreshes, so a 
 you keep using keeps its place.
 
 **When a library will not cache: `VIBECTX_DEBUG=1`.** Every fetch failure looks the same
-from the outside — the library is simply not cached — because a 404, a connection timeout
-and a name that does not resolve all mean "no document at this URL". Set `VIBECTX_DEBUG=1`
-and each one writes a line to stderr saying which it was:
+from the outside — the library is simply not cached — because a 404, a connection timeout, a
+name that does not resolve, a redirect the SSRF guard refused and a document over the byte
+cap all mean "no document at this URL". Set `VIBECTX_DEBUG=1` and each one writes a line to
+stderr saying which it was:
 
 ```
-vibectx [debug] fetch.miss url=https://example.com/llms.txt reason=http-status status=404 ms=54
+vibectx [debug] fetch.miss url=https://example.com/llms.txt reason=http-status status=404 ms=50
 vibectx [debug] fetch.miss url=https://example.com/llms.txt reason=timeout error="The operation was aborted due to timeout" ms=0
-vibectx [debug] fetch.miss url=https://nope.invalid/llms.txt reason=dns code=ENOTFOUND error="fetch failed" ms=1
+vibectx [debug] fetch.miss url=https://nope.invalid/llms.txt reason=dns code=ENOTFOUND error="fetch failed" ms=0
+vibectx [debug] fetch.refused url=https://example.com/llms.txt reason=redirect-host to=http://169.254.169.254/latest/meta-data/ status=302 ms=1
+vibectx [debug] fetch.refused url=https://elsewhere.example/page.md reason=link-policy to=https://elsewhere.example/page.md status=200 ms=1
+vibectx [debug] fetch.too-large url=https://example.com/llms.txt reason=content-length bytes=31457280 limit=26214400 ms=0
+vibectx [debug] fetch.too-large url=https://example.com/guide.md reason=body-cap limit=2097152 ms=57
 ```
 
-(A real capture, 2026-09-07, from a built `dist/` with the three failures injected in place
-of the network — hence the `ms` figures, which are the stub's latency, not a real host's.)
+(A real capture, 2026-09-07, from a built `dist/` with each failure injected in place of the
+network — hence the `ms` figures, which are the stub's latency, not a real host's.)
 
-`reason` is one of `http-status`, `timeout`, `dns`, `connection-refused`,
-`connection-reset`, `tls`, `network`, `html-not-text` (a site serving its 404 page with a
-200) or `empty-body`. Nothing else changes: the fetch behaves identically with the variable
-set or unset, and stdout — which carries the MCP protocol — is never written to.
+There are **three event names, one per outcome**, and `reason` names the cause within it.
+Every failure path in `fetchUrl` emits exactly one line:
+
+- `fetch.miss` — `http-status` · `html-not-text` (a site serving its 404 page with a 200) ·
+  `empty-body` · `redirect-no-location` · `redirect-hops` (more than 5) ·
+  `redirect-unparsable` · and, for a fetch that threw, `timeout`, `dns`,
+  `connection-refused`, `connection-reset`, `tls` or `network`.
+- `fetch.refused` — the guard said no and no body was read: `not-public` (the URL is not
+  https on a public host), `redirect-host`, `final-host`, `link-policy` (a followed link left
+  its source origin). `to=` names the URL that was refused, which is a URL vibectx did *not*
+  fetch.
+- `fetch.too-large` — `content-length` (declared over the cap, refused before the body is
+  read; `bytes=` is what the server declared) or `body-cap` (the cap was hit mid-stream, so
+  the true size is unknown and no `bytes=` is printed). `limit=` is the cap that applied.
+
+Nothing else changes: the fetch behaves identically with the variable set or unset, and
+stdout — which carries the MCP protocol — is never written to.
 
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).

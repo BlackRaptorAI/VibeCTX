@@ -109,6 +109,20 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
   // in this function is read from, or changed by, any of them. Nor can one THROW past a
   // return: `debugEvent` never raises (PAR-652b), which is what makes the call in the catch
   // block below safe — a diagnostic must not turn a handled failure into an unhandled one.
+  //
+  // Three event names, one per outcome, and `reason` names the specific cause within it
+  // (PAR-652c, review R4 — `refused` and `too-large` used to return silently while the README
+  // promised a line for every fetch failure, so the two outcomes a user is most likely to need
+  // explained were the two with nothing to explain them):
+  //   fetch.miss       http-status · html-not-text · empty-body · redirect-no-location ·
+  //                    redirect-hops · redirect-unparsable · and the thrown-error reasons
+  //                    `classifyFetchError` returns (timeout, dns, connection-refused, …)
+  //   fetch.refused    not-public · redirect-host · final-host · link-policy
+  //   fetch.too-large  content-length (declared, refused before the body is read) · body-cap
+  //                    (the cap hit mid-stream, so the true size is unknown)
+  // A `refused` line names the target it refused in `to=` when a redirect moved it — that is
+  // the whole diagnostic value, and it is the URL the guard already decided against, never a
+  // URL that was fetched. Every return path in this function now emits exactly one line.
   const startedAt = Date.now();
   try {
     const headers: Record<string, string> = {
@@ -119,7 +133,11 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
     // the runtime would issue the request to the Location before any check could run —
     // a blind SSRF for a 302 to http://127.0.0.1/. Each Location is checked BEFORE it is
     // requested; on refusal no request is made.
-    if (opts.publicFinalUrl && !isPublicHttpsUrl(url)) return { status: "refused" }; // content-derived first URL: check before requesting
+    if (opts.publicFinalUrl && !isPublicHttpsUrl(url)) {
+      // content-derived first URL: checked before requesting, so no request is made
+      debugEvent("fetch.refused", { url, reason: "not-public", ms: Date.now() - startedAt });
+      return { status: "refused" };
+    }
     let current = url;
     let res: Response;
     for (let hop = 0; ; hop++) {
@@ -131,14 +149,26 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       if (!REDIRECT_STATUSES.has(res.status)) break;
       const location = res.headers.get("location");
       await res.body?.cancel();
-      if (location === null || hop >= MAX_REDIRECT_HOPS) return { status: "miss" };
+      if (location === null || hop >= MAX_REDIRECT_HOPS) {
+        debugEvent("fetch.miss", {
+          url,
+          reason: location === null ? "redirect-no-location" : "redirect-hops",
+          status: res.status,
+          ms: Date.now() - startedAt,
+        });
+        return { status: "miss" };
+      }
       let next: string;
       try {
         next = new URL(location, current).href; // relative Locations resolve against the current URL
       } catch {
+        debugEvent("fetch.miss", { url, reason: "redirect-unparsable", status: res.status, ms: Date.now() - startedAt });
         return { status: "miss" };
       }
-      if (!hopAllowed(next, opts)) return { status: "refused" };
+      if (!hopAllowed(next, opts)) {
+        debugEvent("fetch.refused", { url, reason: "redirect-host", to: next, status: res.status, ms: Date.now() - startedAt });
+        return { status: "refused" };
+      }
       current = next;
     }
     // Final-URL check kept: should a runtime report a different res.url, judge that too.
@@ -146,14 +176,17 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
     const final = res.url || current;
     if (final !== url && !hopAllowed(final, opts)) {
       await res.body?.cancel();
+      debugEvent("fetch.refused", { url, reason: "final-host", to: final, status: res.status, ms: Date.now() - startedAt });
       return { status: "refused" };
     }
     if (opts.linkGuard !== undefined && !isAllowedLink(final, opts.linkGuard.sourceUrl, opts.linkGuard.policy)) {
       await res.body?.cancel();
+      debugEvent("fetch.refused", { url, reason: "link-policy", to: final, status: res.status, ms: Date.now() - startedAt });
       return { status: "refused" };
     }
     if (opts.publicFinalUrl && !isPublicHttpsUrl(final)) {
       await res.body?.cancel();
+      debugEvent("fetch.refused", { url, reason: "not-public", to: final, status: res.status, ms: Date.now() - startedAt });
       return { status: "refused" };
     }
     if (res.status === 304) return { status: "not-modified" };
@@ -164,11 +197,23 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
     const declared = Number(res.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > opts.maxBytes) {
       await res.body?.cancel();
+      debugEvent("fetch.too-large", {
+        url,
+        reason: "content-length",
+        bytes: declared,
+        limit: opts.maxBytes,
+        ms: Date.now() - startedAt,
+      });
       return { status: "too-large" };
     }
     const type = res.headers.get("content-type") ?? "";
     const body = await readBodyCapped(res, opts.maxBytes);
-    if (body === undefined) return { status: "too-large" };
+    if (body === undefined) {
+      // No declared length, or a lying one: the cap was hit while streaming, so the exact
+      // size is unknown — `limit` is what is known and `bytes` is deliberately absent.
+      debugEvent("fetch.too-large", { url, reason: "body-cap", limit: opts.maxBytes, ms: Date.now() - startedAt });
+      return { status: "too-large" };
+    }
     if (type.includes("text/html") && !url.endsWith(".md")) {
       // Some sites serve their 404 page with 200; a real llms.txt is plain text.
       if (body.slice(0, 500).toLowerCase().includes("<!doctype html")) {
