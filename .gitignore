@@ -3,3 +3,7 @@ dist/
 *.log
 .DS_Store
 .development-team-agents-backup/
+
+# BlackRaptor Workforce — local access and work only, never pushed
+.claude/
+CLAUDE.md
