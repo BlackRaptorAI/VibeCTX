@@ -34,6 +34,14 @@ import { join } from "node:path";
  * what is a regular file, the same rule the temp sweep in `atomic-store.ts` applies. The
  * cache directory is a trust boundary: a link planted in it must not be able to aim a
  * delete anywhere else.
+ *
+ * THE ROOT ITSELF is checked the same way (D-46, PAR-652b). It was the one position where
+ * nothing did: the walk refused to descend a symlinked LIBRARY directory but `readdirSync`
+ * followed a symlinked ROOT without a word, and the security gate measured the consequence —
+ * a link planted in the root position made this function delete `Documents/project/thesis.md`,
+ * a file it had never written. The root must now be PROVEN a real directory before a single
+ * `rmSync` runs; a symlink there is refused once on stderr and the sweep is skipped, never
+ * followed.
  */
 
 /** Default cap. ASSUMED: 512 MB is roughly 20 documents at the 25 MiB primary cap, which is
@@ -98,6 +106,8 @@ let bytesSinceSweep = 0;
 let sweeps = 0;
 let sweptEver = false;
 let lastSummary: EvictionSummary | undefined;
+/** Roots already refused under D-46 — the note is said once per root, not once per sweep. */
+let refusedRoots = new Set<string>();
 
 /** Test seam and per-process reset: forget which documents this run wrote and what it swept. */
 export function resetCacheEvictionState(): void {
@@ -106,6 +116,7 @@ export function resetCacheEvictionState(): void {
   sweeps = 0;
   sweptEver = false;
   lastSummary = undefined;
+  refusedRoots = new Set<string>();
 }
 
 /** How much sweeping this process has actually done — for tests and for the debug log. */
@@ -151,6 +162,40 @@ function isRealDirectory(path: string): boolean {
     return false;
   }
 }
+
+/**
+ * D-46: may this root be swept at all?
+ *
+ * `true` only when the root is a real directory, or does not exist yet — a cache that has
+ * not been created is not an attack and has nothing to evict, so it is walked (and found
+ * empty) exactly as before, silently.
+ *
+ * `false`, with one stderr line per root per process, when something IS there and it is a
+ * symlink or not a directory. Refusing is the whole point: `readdirSync`, `rmSync` and every
+ * other call in this file follow a link, so the only safe moment to notice one is before any
+ * of them run.
+ */
+function rootIsSweepable(root: string, warn: (message: string) => void): boolean {
+  let stats;
+  try {
+    stats = lstatSync(root);
+  } catch {
+    return true; // no such root: nothing exists to be aimed anywhere
+  }
+  if (stats.isDirectory()) return true;
+  if (!refusedRoots.has(root)) {
+    refusedRoots.add(root);
+    warn(
+      stats.isSymbolicLink()
+        ? `vibectx: refusing to manage the cache at ${root} — it is a symlink, not a directory. ` +
+            `Nothing was evicted and the link was not followed. Remove it, or point VIBECTX_CACHE_DIR at a real directory.`
+        : `vibectx: refusing to manage the cache at ${root} — it exists but is not a directory. ` +
+            `Nothing was evicted. Remove it, or point VIBECTX_CACHE_DIR at a real directory.`,
+    );
+  }
+  return false;
+}
+
 
 /** Walk the cache root one level deep: its own files, then each real library directory. */
 function scanCache(root: string): { totalBytes: number; candidates: CandidateDocument[] } {
@@ -236,6 +281,8 @@ export function enforceCacheSizeCap(
   sweptEver = true;
   if (capBytes === undefined) return undefined;
   const warn = opts.warn ?? ((m: string) => process.stderr.write(`${m}\n`));
+  // D-46: prove the root before anything below can delete through it.
+  if (!rootIsSweepable(root, warn)) return undefined;
   const { totalBytes, candidates } = scanCache(root);
   const summary: EvictionSummary = {
     sweptAt: new Date().toISOString(),

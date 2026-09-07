@@ -231,3 +231,115 @@ describe("doctor reports what was evicted", () => {
     expect(text).toContain(`react/${urlSlug(url("old"))}`);
   });
 });
+
+/**
+ * D-46 (oversight, PAR-652b) — the cache root must be PROVEN a real directory this tool
+ * owns before a single `rmSync` runs.
+ *
+ * The security gate measured the alternative: with a symlink planted in the root position,
+ * `enforceCacheSizeCap` walked through it and deleted `Documents/project/thesis.md` — a real
+ * file it had never written. `scanCache` already refused to descend a symlinked LIBRARY
+ * directory; the root itself was the one position where nothing checked.
+ */
+describe("D-46: the cache root is refused unless it is a real directory", () => {
+  /** A directory of real user files, shaped so eviction would treat one as a document. */
+  function userFiles(): { home: string; thesis: string; notes: string } {
+    const home = mkdtempSync(join(tmpdir(), "vibectx-userfiles-"));
+    mkdirSync(join(home, "project"), { recursive: true });
+    const thesis = join(home, "project", "thesis.md");
+    writeFileSync(thesis, "# My thesis\n" + "words ".repeat(2000), "utf8");
+    writeFileSync(
+      join(home, "project", "thesis.meta.json"),
+      JSON.stringify({ url: "https://example.com/thesis.md", fetchedAt: "1999-01-01T00:00:00.000Z" }),
+      "utf8",
+    );
+    const notes = join(home, "notes.md");
+    writeFileSync(notes, "keep me", "utf8");
+    return { home, thesis, notes };
+  }
+
+  it("evicts nothing at all through a symlinked root, and says so once", () => {
+    const { home, thesis, notes } = userFiles();
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+    try {
+      const linked = join(parent, "root");
+      symlinkSync(home, linked);
+      resetCacheEvictionState();
+      process.env.VIBECTX_CACHE_MAX_MB = String(1000 / (1024 * 1024)); // far under: it WOULD evict
+
+      const said: string[] = [];
+      expect(enforceCacheSizeCap(linked, { warn: (m) => said.push(m) })).toBeUndefined();
+
+      expect(existsSync(thesis)).toBe(true); // zero unlinks outside the real cache
+      expect(existsSync(notes)).toBe(true);
+      expect(existsSync(join(home, "project", "thesis.meta.json"))).toBe(true);
+      expect(lastEvictionSummary()).toBeUndefined();
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("symlink");
+      expect(said[0]).toContain(linked);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("says it ONCE per root, however many sweeps run against it", () => {
+    const { home } = userFiles();
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+    try {
+      const linked = join(parent, "root");
+      symlinkSync(home, linked);
+      resetCacheEvictionState();
+      process.env.VIBECTX_CACHE_MAX_MB = String(1000 / (1024 * 1024));
+      const said: string[] = [];
+      const warn = (m: string) => said.push(m);
+      enforceCacheSizeCap(linked, { warn });
+      enforceCacheSizeCap(linked, { warn });
+      enforceCacheSizeCap(linked, { warn });
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("symlink");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a root that exists but is not a directory", () => {
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-fileroot-"));
+    try {
+      const asFile = join(parent, "root");
+      writeFileSync(asFile, "not a cache", "utf8");
+      resetCacheEvictionState();
+      process.env.VIBECTX_CACHE_MAX_MB = String(1 / (1024 * 1024));
+      const said: string[] = [];
+      expect(enforceCacheSizeCap(asFile, { warn: (m) => said.push(m) })).toBeUndefined();
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("not a directory");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it("a root that does not exist yet is not an attack — no note, nothing evicted", () => {
+    const missing = join(dir, "no-such-cache");
+    resetCacheEvictionState();
+    process.env.VIBECTX_CACHE_MAX_MB = String(1 / (1024 * 1024));
+    const said: string[] = [];
+    const summary = enforceCacheSizeCap(missing, { warn: (m) => said.push(m) })!;
+    expect(summary.evicted).toEqual([]);
+    expect(said).toEqual([]);
+  });
+
+  it("still evicts normally on a real root — the guard costs the good case nothing", () => {
+    seed("react", "a", 4000, "2020-01-01T00:00:00.000Z");
+    seed("react", "b", 4000, "2021-01-01T00:00:00.000Z");
+    resetCacheEvictionState();
+    process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
+    const said: string[] = [];
+    const summary = enforceCacheSizeCap(dir, { warn: (m) => said.push(m) })!;
+    expect(summary.evicted.map((e) => e.document)).toEqual([urlSlug(url("a"))]);
+    expect(existsSync(contentPath("react", "a"))).toBe(false);
+    expect(existsSync(contentPath("react", "b"))).toBe(true);
+    expect(said.some((m) => m.includes("symlink"))).toBe(false);
+  });
+});
