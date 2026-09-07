@@ -58,9 +58,65 @@ describe("cacheCapBytes (VIBECTX_CACHE_MAX_MB)", () => {
   });
 
   it("a typo falls back to the default rather than silently removing the bound", () => {
-    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "lots" })).toBe(512 * 1024 * 1024);
-    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "-5" })).toBe(512 * 1024 * 1024);
+    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "lots" }, () => {})).toBe(512 * 1024 * 1024);
+    resetCacheEvictionState();
+    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "-5" }, () => {})).toBe(512 * 1024 * 1024);
     expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "" })).toBe(512 * 1024 * 1024);
+  });
+
+  /**
+   * K3 (PAR-652c). The fallback was right and silent, which is the worst pair: a mistyped
+   * variable produced a 512 MB cache indistinguishable from one the user had asked for.
+   */
+  it("says once, on stderr, that a bad value fell back — naming the value it refused", () => {
+    for (const bad of ["abc", "-1", "2GB", "1e", "NaN"]) {
+      resetCacheEvictionState();
+      const said: string[] = [];
+      expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: bad }, (m) => said.push(m))).toBe(512 * 1024 * 1024);
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain(bad);
+      expect(said[0]).toContain("VIBECTX_CACHE_MAX_MB");
+      expect(said[0]).toContain("512 MB");
+    }
+  });
+
+  it("says it once per process, not once per sweep", () => {
+    resetCacheEvictionState();
+    const said: string[] = [];
+    const warn = (m: string) => said.push(m);
+    for (let i = 0; i < 5; i++) cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "abc" }, warn);
+    expect(said).toHaveLength(1);
+  });
+
+  it("says nothing for a value it accepts, or for no value at all", () => {
+    resetCacheEvictionState();
+    const said: string[] = [];
+    const warn = (m: string) => said.push(m);
+    for (const ok of ["512", "0", "0.5", "  4 ", undefined, ""]) {
+      cacheCapBytes(ok === undefined ? {} : { VIBECTX_CACHE_MAX_MB: ok }, warn);
+    }
+    expect(said).toEqual([]);
+  });
+
+  it("a control character in the value cannot drive the terminal through the note", () => {
+    resetCacheEvictionState();
+    const said: string[] = [];
+    cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "5[2K‮GB" }, (m) => said.push(m));
+    expect(said[0]).not.toContain("");
+    expect(said[0]).not.toContain("‮");
+  });
+
+  it("the sweep itself carries the note, so a server says it too", () => {
+    resetCacheEvictionState();
+    process.env.VIBECTX_CACHE_MAX_MB = "abc";
+    const said: string[] = [];
+    enforceCacheSizeCap(dir, { warn: (m) => said.push(m) });
+    expect(said.some((m) => m.includes("VIBECTX_CACHE_MAX_MB"))).toBe(true);
+  });
+
+  it("the arithmetic is MiB even though the name says MB", () => {
+    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "1" })).toBe(1024 * 1024); // not 1_000_000
+    expect(cacheCapBytes({ VIBECTX_CACHE_MAX_MB: "512" })).toBe(536_870_912);
   });
 
   it("accepts a fractional cap", () => {

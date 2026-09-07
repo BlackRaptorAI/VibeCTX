@@ -685,6 +685,17 @@ Three things the cap deliberately does not do:
   So the cache can sit over the cap by up to that amount plus one document between sweeps —
   a bound tied to the cap you set, not to a constant sized for the default one.
 
+**Units: the name says MB, the arithmetic is MiB.** `VIBECTX_CACHE_MAX_MB=512` is
+512 × 1024 × 1024 = 536,870,912 bytes, and the `MB`/`KB`/`GB` in the stderr and `doctor`
+lines are the same binary units. Fractional values work (`VIBECTX_CACHE_MAX_MB=0.5` is
+512 KiB). A value that is not a number, or is negative, falls back to the 512 default rather
+than switching the cap off — a typo must not be a way to lose the bound — and says so once on
+stderr, so a mistyped variable does not look like a variable that worked:
+
+```
+vibectx: VIBECTX_CACHE_MAX_MB=2GB is not a size — using the default 512 MB cap. Set a non-negative number of megabytes (0 turns the cap off).
+```
+
 **When a library will not cache: `VIBECTX_DEBUG=1`.** Every fetch failure looks the same
 from the outside — the library is simply not cached — because a 404, a connection timeout, a
 name that does not resolve, a redirect the SSRF guard refused and a document over the byte

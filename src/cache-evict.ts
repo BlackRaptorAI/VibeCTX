@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { debugField } from "./debug.js";
 
 /**
  * PAR-652 item 7a — a total size cap on the cache, with least-recently-used eviction.
@@ -125,6 +126,7 @@ export function resetCacheEvictionState(): void {
   sweptEver = false;
   lastSummary = undefined;
   refusedRoots = new Set<string>();
+  badCapNoted = false;
 }
 
 /** How much sweeping this process has actually done — for tests and for the debug log. */
@@ -143,12 +145,33 @@ export function lastEvictionSummary(): EvictionSummary | undefined {
  * would be arbitrary); `0` turns the cap off entirely; anything unparsable or negative
  * falls back to the default rather than silently disabling the cap — a typo must not be a
  * way to lose the bound.
+ *
+ * AND IT SAYS SO (K3, PAR-652c). Falling back silently made a typo indistinguishable from a
+ * setting that worked: `VIBECTX_CACHE_MAX_MB=2GB` or `=-1` produced a 512 MB cache and no
+ * clue why, which is the worst of both — the bound is kept, and the user's intent is thrown
+ * away without a word. One line per process, on the first substitution, naming the value that
+ * was refused. An absent or empty variable is not a typo and says nothing.
+ *
+ * NOTE THE UNITS: the variable says MB and the arithmetic is MiB (×1024×1024), matching the
+ * `formatBytes` labels on the stderr and `doctor` lines. Documented at README "Size cap".
  */
-export function cacheCapBytes(env: NodeJS.ProcessEnv = process.env): number | undefined {
+let badCapNoted = false;
+
+export function cacheCapBytes(env: NodeJS.ProcessEnv = process.env, warn?: (message: string) => void): number | undefined {
+  const fallback = DEFAULT_CACHE_MAX_MB * 1024 * 1024;
   const raw = env.VIBECTX_CACHE_MAX_MB;
-  if (raw === undefined || raw.trim().length === 0) return DEFAULT_CACHE_MAX_MB * 1024 * 1024;
+  if (raw === undefined || raw.trim().length === 0) return fallback;
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_CACHE_MAX_MB * 1024 * 1024;
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    if (!badCapNoted) {
+      badCapNoted = true;
+      (warn ?? ((m: string) => void process.stderr.write(`${m}\n`)))(
+        `vibectx: VIBECTX_CACHE_MAX_MB=${debugField(raw)} is not a size — using the default ` +
+          `${DEFAULT_CACHE_MAX_MB} MB cap. Set a non-negative number of megabytes (0 turns the cap off).`,
+      );
+    }
+    return fallback;
+  }
   if (parsed === 0) return undefined;
   return Math.floor(parsed * 1024 * 1024);
 }
@@ -315,12 +338,12 @@ export function enforceCacheSizeCap(
   opts: { env?: NodeJS.ProcessEnv; warn?: (message: string) => void } = {},
 ): EvictionSummary | undefined {
   const env = opts.env ?? process.env;
-  const capBytes = cacheCapBytes(env);
+  const warn = opts.warn ?? ((m: string) => void process.stderr.write(`${m}\n`));
+  const capBytes = cacheCapBytes(env, warn); // may say once that a bad value fell back (K3)
   sweeps += 1;
   bytesSinceSweep = 0;
   sweptEver = true;
   if (capBytes === undefined) return undefined;
-  const warn = opts.warn ?? ((m: string) => process.stderr.write(`${m}\n`));
   // D-46: prove the root before anything below can delete through it.
   if (!rootIsSweepable(root, warn)) return undefined;
   const { totalBytes, candidates } = scanCache(root);
