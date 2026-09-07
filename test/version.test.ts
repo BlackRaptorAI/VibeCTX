@@ -63,6 +63,80 @@ describe("the version is read from package.json, never written twice", () => {
 });
 
 /**
+ * PAR-652c schema K4 — a deprecation that names a removal version needs a mechanism, not a
+ * promise. `src/cache.ts` and README both say `DOCS_CACHE_DIR` "will stop being read after
+ * 0.2.x", and nothing anywhere would have noticed 0.3.0 shipping with the branch still in.
+ * The same is true of the two other things this product promised to remove on that version.
+ *
+ * This is that mechanism, and it is deliberately strict in BOTH directions: past the removal
+ * version the marker must be gone, and before it the marker must still be there — so removing
+ * something early without retiring its row here also reds, rather than leaving a test that
+ * quietly asserts nothing. When a row goes, delete the row.
+ */
+describe("every 0.2.x deprecation is removed the moment the version passes it", () => {
+  const root = (p: string) => fileURLToPath(new URL(`../${p}`, import.meta.url));
+
+  /** Is `version` at or past `removeAt`? Major.minor only; a prerelease suffix is ignored. */
+  function atOrPast(version: string, removeAt: string): boolean {
+    const [major, minor] = version.split(".").map((part) => Number.parseInt(part, 10));
+    const [removeMajor, removeMinor] = removeAt.split(".").map((part) => Number.parseInt(part, 10));
+    return major > removeMajor || (major === removeMajor && minor >= removeMinor);
+  }
+
+  /** file → the exact text whose presence means the deprecated path is still shipped. */
+  const promises = [
+    {
+      what: "the DOCS_CACHE_DIR fallback",
+      marker: "DOCS_CACHE_DIR",
+      file: "src/cache.ts",
+      removeAt: "0.3.0",
+      promisedAt: "src/cache.ts (cacheRoot docstring + the deprecation note) and README, 'Upgrading from ~/.docs-cache-mcp'",
+    },
+    {
+      what: "the legacy config filename",
+      marker: "docs-cache.config.json",
+      file: "src/config.ts",
+      removeAt: "0.3.0",
+      promisedAt: "src/config.ts LEGACY_CONFIG_FILENAME (D-16) and README, 'Team config, no flags'",
+    },
+    {
+      what: "the docs-cache-mcp bin alias",
+      marker: '"docs-cache-mcp"',
+      file: "package.json",
+      removeAt: "0.3.0",
+      promisedAt: "README, 'Upgrading from ~/.docs-cache-mcp'",
+    },
+  ] as const;
+
+  it("the gate flips at the removal version — the cases below are not vacuous", () => {
+    expect(VERSION).toMatch(/^\d+\.\d+\.\d+/); // the comparison has something to compare
+    expect(atOrPast("0.1.3", "0.3.0")).toBe(false);
+    expect(atOrPast("0.2.9", "0.3.0")).toBe(false);
+    expect(atOrPast("0.3.0", "0.3.0")).toBe(true);
+    expect(atOrPast("0.3.0-rc.1", "0.3.0")).toBe(true);
+    expect(atOrPast("1.0.0", "0.3.0")).toBe(true);
+  });
+
+  for (const p of promises) {
+    it(`${p.what} is gone at ${p.removeAt}, and present until then (${p.file})`, () => {
+      const past = atOrPast(VERSION, p.removeAt);
+      const present = readFileSync(root(p.file), "utf8").includes(p.marker);
+      if (past) {
+        expect(
+          present,
+          `VERSION is ${VERSION}, at or past ${p.removeAt}: remove ${p.what} from ${p.file} (promised at ${p.promisedAt}) and delete this row.`,
+        ).toBe(false);
+      } else {
+        expect(
+          present,
+          `${p.what} is documented as supported until ${p.removeAt} (${p.promisedAt}) but is not in ${p.file}: retire the promise, or this row.`,
+        ).toBe(true);
+      }
+    });
+  }
+});
+
+/**
  * PAR-652c review R2. The docstring promised a `0.0.0-unknown` fallback "so a manifest that
  * somehow cannot be read degrades … rather than throwing at import time and taking the server
  * down with it" — and the `require` was unguarded, so it did exactly the thing the comment
