@@ -7,3 +7,11 @@ dist/
 # BlackRaptor Workforce — local access and work only, never pushed
 .claude/
 CLAUDE.md
+
+# Build-time only — the agent pack and its governance live locally, never in the repo
+docs/TEAM.md
+docs/agent-operating-standard.md
+docs/AGENT-RETROS.md
+docs/workflow-diagram.png
+docs/agent-evals/
+docs/plans/vibectx-build-loop-state.md
