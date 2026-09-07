@@ -97,6 +97,7 @@ interface CandidateDocument {
   contentPath: string;
   metaPath: string;
   bytes: number;
+  /** Both are filled in by `resolveRecency`, and only when the cache is over the cap. */
   fetchedAtMs: number;
   fetchedAt?: string;
 }
@@ -196,6 +197,33 @@ function rootIsSweepable(root: string, warn: (message: string) => void): boolean
   return false;
 }
 
+/**
+ * Read `meta.fetchedAt` for candidates that are actually about to be sorted for eviction.
+ *
+ * Deliberately NOT done during the walk. The walk runs on every sweep, and the overwhelming
+ * majority of sweeps find the cache under the cap and evict nothing — parsing every meta file
+ * to reach that answer was 103 ms of JSON for 10,000 documents that needed no work at all.
+ * The size total needs only `lstat`; recency is needed only once the cap is exceeded.
+ *
+ * A meta that cannot be read or parsed keeps `fetchedAtMs` at 0 and sorts as oldest — the
+ * same judgement `readCache` makes (an unparsable `fetchedAt` reads as stale, N-6).
+ */
+function resolveRecency(candidates: CandidateDocument[]): void {
+  for (const doc of candidates) {
+    try {
+      const parsed = JSON.parse(readFileSync(doc.metaPath, "utf8")) as { fetchedAt?: unknown };
+      if (typeof parsed.fetchedAt === "string") {
+        const ms = new Date(parsed.fetchedAt).getTime();
+        if (Number.isFinite(ms)) {
+          doc.fetchedAt = parsed.fetchedAt;
+          doc.fetchedAtMs = ms;
+        }
+      }
+    } catch {
+      /* oldest */
+    }
+  }
+}
 
 /** Walk the cache root one level deep: its own files, then each real library directory. */
 function scanCache(root: string): { totalBytes: number; candidates: CandidateDocument[] } {
@@ -235,29 +263,14 @@ function scanCache(root: string): { totalBytes: number; candidates: CandidateDoc
       const metaName = `${slug}.meta.json`;
       const metaBytes = sizes.get(metaName);
       if (metaBytes === undefined) continue; // a document without its meta is not one readCache serves
-      const metaPath = join(path, metaName);
-      let fetchedAt: string | undefined;
-      let fetchedAtMs = 0; // unreadable or unparsable meta sorts as oldest, as readCache treats it
-      try {
-        const parsed = JSON.parse(readFileSync(metaPath, "utf8")) as { fetchedAt?: unknown };
-        if (typeof parsed.fetchedAt === "string") {
-          const ms = new Date(parsed.fetchedAt).getTime();
-          if (Number.isFinite(ms)) {
-            fetchedAt = parsed.fetchedAt;
-            fetchedAtMs = ms;
-          }
-        }
-      } catch {
-        /* oldest */
-      }
       candidates.push({
         library: name,
         document: slug,
         contentPath: join(path, child),
-        metaPath,
+        metaPath: join(path, metaName),
         bytes: bytes + metaBytes,
-        fetchedAtMs,
-        fetchedAt,
+        fetchedAtMs: 0, // recency is read later, and only if the cap is actually exceeded
+        fetchedAt: undefined,
       });
     }
   }
@@ -293,8 +306,9 @@ export function enforceCacheSizeCap(
     protectedFromEviction: 0,
     stillOverCap: false,
   };
-  if (totalBytes <= capBytes) return summary;
+  if (totalBytes <= capBytes) return summary; // the common case: no meta file was parsed to get here
 
+  resolveRecency(candidates);
   candidates.sort((a, b) => a.fetchedAtMs - b.fetchedAtMs || a.contentPath.localeCompare(b.contentPath));
   let running = totalBytes;
   for (const doc of candidates) {
