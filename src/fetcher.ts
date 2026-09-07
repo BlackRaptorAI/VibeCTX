@@ -106,7 +106,9 @@ async function readBodyCapped(res: Response, maxBytes: number): Promise<string |
 export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOutcome> {
   // PAR-652 item 7b: VIBECTX_DEBUG diagnostics are ADDITIVE — every `debugEvent` below is a
   // stderr line and nothing else. No policy, redirect decision, byte cap or returned value
-  // in this function is read from, or changed by, any of them.
+  // in this function is read from, or changed by, any of them. Nor can one THROW past a
+  // return: `debugEvent` never raises (PAR-652b), which is what makes the call in the catch
+  // block below safe — a diagnostic must not turn a handled failure into an unhandled one.
   const startedAt = Date.now();
   try {
     const headers: Record<string, string> = {

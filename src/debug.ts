@@ -8,7 +8,9 @@
  *
  * It is ADDITIVE and nothing else: no call here changes a return value, a redirect
  * decision, a byte cap or a policy check. Diagnostics that can alter behaviour are not
- * diagnostics.
+ * diagnostics. That is ENFORCED, not asserted — `debugEvent` catches everything it can
+ * raise, including a stderr that throws, so no call site can be made to fail by a
+ * diagnostic (PAR-652b; see the note on `debugEvent`).
  *
  * Everything goes to STDERR. This process is a stdio MCP server: stdout carries the
  * protocol and a stray byte on it corrupts the session.
@@ -37,19 +39,40 @@ export function debugField(value: string | number | undefined): string {
   return /[\s"]/.test(clipped) ? JSON.stringify(clipped) : clipped;
 }
 
-/** One structured line: `vibectx [debug] <event> k=v k=v`. No-op unless VIBECTX_DEBUG is on. */
+/**
+ * One structured line: `vibectx [debug] <event> k=v k=v`. No-op unless VIBECTX_DEBUG is on.
+ *
+ * NEVER THROWS, and that is the feature (PAR-652b). "Additive and nothing else" was written
+ * at the top of this file and at `fetcher.ts:107` as a claim about the call sites; the
+ * security gate measured that it was not true — with `VIBECTX_DEBUG=1` and a
+ * `process.stderr.write` that throws (a closed or full stderr: the piped MCP client went
+ * away), the `debugEvent` in `fetchUrl`'s catch block threw out of the catch block and a DNS
+ * failure surfaced as an exception instead of the `{ status: "miss" }` every caller is typed
+ * to receive. A diagnostic that can turn a handled failure into an unhandled one is not
+ * additive.
+ *
+ * The guard is HERE, not at that one call site, because this is the only place that makes
+ * every caller safe — the ones that exist and the ones added later. The cost of losing a
+ * debug line when stderr is broken is nothing; the cost of losing the return value is a
+ * crash. Writing the line is the last thing done, so a throw mid-render cannot half-write one.
+ */
 export function debugEvent(
   event: string,
   fields: Record<string, string | number | undefined>,
   opts: { env?: NodeJS.ProcessEnv; write?: (line: string) => void } = {},
 ): void {
-  if (!debugEnabled(opts.env ?? process.env)) return;
-  const rendered = Object.entries(fields)
-    .filter(([, v]) => v !== undefined)
-    .map(([k, v]) => `${k}=${debugField(v)}`)
-    .join(" ");
-  const line = `vibectx [debug] ${event}${rendered.length > 0 ? ` ${rendered}` : ""}\n`;
-  (opts.write ?? ((s: string) => void process.stderr.write(s)))(line);
+  try {
+    if (!debugEnabled(opts.env ?? process.env)) return;
+    const rendered = Object.entries(fields)
+      .filter(([, v]) => v !== undefined)
+      .map(([k, v]) => `${k}=${debugField(v)}`)
+      .join(" ");
+    const line = `vibectx [debug] ${event}${rendered.length > 0 ? ` ${rendered}` : ""}\n`;
+    (opts.write ?? ((s: string) => void process.stderr.write(s)))(line);
+  } catch {
+    // Deliberately silent: the only channel available to report a diagnostic failure is the
+    // channel that just failed, and re-raising is the bug this catch exists to prevent.
+  }
 }
 
 export type FetchFailureReason =

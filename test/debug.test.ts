@@ -148,3 +148,61 @@ describe("debugEvent", () => {
     expect(out).toEqual(["vibectx [debug] fetch.miss url=https://x/y ms=12\n"]);
   });
 });
+
+/**
+ * PAR-652b — the additive claim, enforced instead of asserted.
+ *
+ * `debug.ts` and `fetcher.ts:107` both say a diagnostic can never change a return value.
+ * The security gate measured that it could: with `VIBECTX_DEBUG=1` and a `process.stderr.write`
+ * that throws (a closed or full stderr — a piped MCP client that went away), the `debugEvent`
+ * in `fetchUrl`'s catch block threw out of the catch block, so a DNS failure came back as an
+ * exception instead of `{ status: "miss" }`.
+ *
+ * The fix is in `debugEvent` itself rather than at that one call site: it is the only place
+ * that makes EVERY caller safe, present and future, and "diagnostics that can alter behaviour
+ * are not diagnostics" is a property of the diagnostic, not of who calls it.
+ */
+describe("a diagnostic can never change what a caller sees", () => {
+  it("debugEvent swallows a stderr that throws", () => {
+    expect(() =>
+      debugEvent(
+        "fetch.miss",
+        { url: "https://x/y" },
+        {
+          env: { VIBECTX_DEBUG: "1" },
+          write: () => {
+            throw new Error("EPIPE: broken pipe");
+          },
+        },
+      ),
+    ).not.toThrow();
+  });
+
+  it("debugEvent swallows a field that throws while being rendered", () => {
+    const hostile = { toString() { throw new Error("nope"); } } as unknown as string;
+    const out: string[] = [];
+    expect(() =>
+      debugEvent("fetch.miss", { url: hostile }, { env: { VIBECTX_DEBUG: "1" }, write: (l) => out.push(l) }),
+    ).not.toThrow();
+  });
+
+  it("a DNS failure still returns miss when writing the diagnostic throws", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    (process.stderr.write as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error("EPIPE: broken pipe");
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND example.com"), { code: "ENOTFOUND" }) });
+    }));
+    await expect(fetchOnce()).resolves.toEqual({ status: "miss" });
+  });
+
+  it("a 404 still returns miss when writing the diagnostic throws", async () => {
+    process.env.VIBECTX_DEBUG = "1";
+    (process.stderr.write as unknown as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error("EPIPE: broken pipe");
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    await expect(fetchOnce()).resolves.toEqual({ status: "miss" });
+  });
+});
