@@ -7,6 +7,11 @@ dist/
 # Change Records, the build plan and the strategy documents live here.
 .vibectx-plan/
 
+# Project context for the agent packs — written by context-onboarding at the repo root.
+# Local-only: it describes how WE work, not how VibeCTX works, and it never ships.
+BUSINESS-CONTEXT.md
+USER-PREFS.md
+
 # Local-only agent tooling. Kept here so a reinstall cannot re-add any of it to the
 # repository: the pack writes several of these paths into the working tree on install.
 .claude/
