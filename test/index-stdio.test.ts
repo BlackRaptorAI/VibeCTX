@@ -1,5 +1,5 @@
-import { describe, it, expect, afterEach } from "vitest";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,8 +15,12 @@ import { fileURLToPath } from "node:url";
  * `process.stdin.once("end", …)` (index.ts:46) actually ending a REAL process's REAL stdin,
  * observed as an `exit` event, never a sleep.
  *
- * Requires `dist/index.js` — run `npm run build` first (as CI does). `dist/` is gitignored
- * and not committed.
+ * Requires `dist/index.js`, built fresh by the `beforeAll` below — NOT "as CI does": CI's own
+ * `.github/workflows/ci.yml` runs `npm test` BEFORE `npm run build`, so on a clean checkout
+ * `dist/` does not exist yet when this file runs. `dist/` is also gitignored, so nothing here
+ * can assume a prior manual build either. The `beforeAll` builds unconditionally (not just
+ * when `dist/index.js` is missing) so a stale local `dist/` — built from an older `src/` —
+ * can never produce a false-positive pass.
  *
  * Handshake: written by hand rather than through the SDK's `Client` / `StdioClientTransport`,
  * because the client transport's own `close()` races a 2 s timeout and falls back to
@@ -26,7 +30,14 @@ import { fileURLToPath } from "node:url";
  * `"end"` handler.
  */
 
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const DIST_INDEX = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+
+beforeAll(() => {
+  // Budget generously: the reviewer measured ~1 s locally, but a cold/loaded CI runner (fresh
+  // `npm ci`, no TS build cache, shared CPU) can be much slower — this is not a hot path.
+  execFileSync("npm", ["run", "build"], { cwd: REPO_ROOT, stdio: "inherit" });
+}, 120_000);
 
 /** How long after `child.stdin.end()` an exit driven only by index.ts's own shutdown path
  *  (index.ts:13 `CLOSE_GRACE_MS = 100`, index.ts:46-49) may take. No autowarm fetch is ever
@@ -49,11 +60,27 @@ interface Rpc {
 
 /** Minimal newline-delimited JSON-RPC pump over a child's stdio — the same framing
  *  `@modelcontextprotocol/sdk`'s `shared/stdio.js` uses (`JSON.stringify(msg) + "\n"`, split
- *  on the next `\n`), reimplemented here so nothing but the child's own code can end it. */
+ *  on the next `\n`), reimplemented here so nothing but the child's own code can end it.
+ *
+ *  A pending `nextMessage()` must never dangle: if the child dies (or a stdout line can't be
+ *  parsed as JSON) before it answers, every outstanding and future waiter rejects immediately
+ *  with the collected stderr attached, instead of hanging until vitest's own test timeout
+ *  reports an opaque "Test timed out in 8000ms" with the real cause discarded. */
 function frame(child: ChildProcessWithoutNullStreams) {
   let buf = Buffer.alloc(0);
-  const pending: ((msg: Rpc) => void)[] = [];
+  let stderr = "";
+  child.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+
+  const pending: { resolve: (msg: Rpc) => void; reject: (err: Error) => void }[] = [];
   const queued: Rpc[] = [];
+  let dead: Error | undefined;
+
+  function fail(err: Error): void {
+    if (dead) return; // already dead; don't overwrite the first cause
+    dead = err;
+    while (pending.length > 0) pending.shift()!.reject(err);
+  }
+
   child.stdout.on("data", (chunk: Buffer) => {
     buf = Buffer.concat([buf, chunk]);
     for (;;) {
@@ -62,12 +89,30 @@ function frame(child: ChildProcessWithoutNullStreams) {
       const line = buf.subarray(0, nl).toString("utf8");
       buf = buf.subarray(nl + 1);
       if (line.trim().length === 0) continue;
-      const msg = JSON.parse(line) as Rpc;
+      let msg: Rpc;
+      try {
+        msg = JSON.parse(line) as Rpc;
+      } catch (err) {
+        fail(new Error(`malformed JSON-RPC line on child stdout: ${JSON.stringify(line)} (${(err as Error).message})`));
+        return;
+      }
+      // Skip server-initiated notifications (a "method" with no "id") rather than matching
+      // send/receive order blindly — nothing in src/ sends one today, but this keeps
+      // nextMessage()'s FIFO correlation safe against one appearing later.
+      if (msg.id === undefined && msg.method !== undefined) continue;
       const waiter = pending.shift();
-      if (waiter) waiter(msg);
+      if (waiter) waiter.resolve(msg);
       else queued.push(msg);
     }
   });
+
+  child.once("exit", (code, signal) => {
+    fail(new Error(`child exited (code=${code}, signal=${signal}) before answering; stderr: ${stderr || "<empty>"}`));
+  });
+  child.once("error", (err) => {
+    fail(new Error(`child process error: ${err.message}; stderr: ${stderr || "<empty>"}`));
+  });
+
   return {
     send(msg: Rpc): void {
       child.stdin.write(`${JSON.stringify(msg)}\n`);
@@ -75,7 +120,12 @@ function frame(child: ChildProcessWithoutNullStreams) {
     nextMessage(): Promise<Rpc> {
       const already = queued.shift();
       if (already) return Promise.resolve(already);
-      return new Promise((resolve) => pending.push(resolve));
+      if (dead) return Promise.reject(dead);
+      return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+    },
+    /** stderr collected so far — used instead of a second, redundant listener on the caller's side. */
+    stderr(): string {
+      return stderr;
     },
   };
 }
@@ -85,10 +135,17 @@ let home: string | undefined;
 let cache: string | undefined;
 let liveChild: ChildProcessWithoutNullStreams | undefined;
 
-afterEach(() => {
+afterEach(async () => {
   // Belt and braces: an assertion that throws mid-test must not leave a spawned server
   // running against the next test's (deleted) temp directories.
-  if (liveChild && liveChild.exitCode === null && liveChild.signalCode === null) liveChild.kill("SIGKILL");
+  if (liveChild && liveChild.exitCode === null && liveChild.signalCode === null) {
+    const child = liveChild;
+    const reaped = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    child.kill("SIGKILL");
+    // Bounded: SIGKILL reaping should be near-instant, but never let a slow OS scheduler turn
+    // this into an indefinite hang in an already-failed test's cleanup.
+    await Promise.race([reaped, new Promise((resolve) => setTimeout(resolve, 500))]);
+  }
   liveChild = undefined;
   for (const d of [cwd, home, cache]) if (d) rmSync(d, { recursive: true, force: true });
   cwd = home = cache = undefined;
@@ -118,8 +175,6 @@ describe("spawn(node, [dist/index.js]) — the real stdio process (A10)", () => 
       const env = sandboxEnv();
       const child = spawn(process.execPath, [DIST_INDEX], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
       liveChild = child;
-      let stderr = "";
-      child.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
       const io = frame(child);
 
       io.send({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "a10-probe", version: "0" } } });
@@ -153,7 +208,7 @@ describe("spawn(node, [dist/index.js]) — the real stdio process (A10)", () => 
       expect(signal).toBeNull();
       expect(code).toBe(0);
       expect(exitElapsedMs).toBeLessThan(EXIT_CEILING_MS);
-      expect(stderr).toBe("");
+      expect(io.stderr()).toBe("");
     },
     8000,
   );

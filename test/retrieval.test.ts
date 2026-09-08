@@ -370,13 +370,17 @@ describe("rankSections — performance bound (D-24)", () => {
     // suite — smallMs is floored by Math.max(…, 1), so a fast small run collapses the
     // denominator and the ratio spikes on any scheduling hiccup, with no change in largeMs at
     // all. [MEASURED] locally the ratio sits at ~4.0-4.2 against the old `< 6` bound — real
-    // margin, but not much on a loaded machine. Assert the number that actually matters
-    // instead — an absolute, generous ceiling on the large run — and print the ratio for a
-    // human reader without gating on it. The ceiling mirrors bigMs's own margin (roughly 60x
-    // the locally [MEASURED] value) rather than picking a tight number that only trades one
-    // flaky shape for another (see A10).
+    // margin, but not much on a loaded machine. Assert the number that actually matters most
+    // — an absolute, generous ceiling on the large run — and ALSO keep a much wider ratio
+    // bound than before: `< 10` still catches ~16x quadratic blowup (vs. the true ~4x linear
+    // scaling measured here) with ~2.4x margin over the [MEASURED] 4.0-4.2 values, versus the
+    // old `< 6` bound's ~1.4x margin, which is what made it F-1's leading suspect in the first
+    // place. The absolute ceiling mirrors bigMs's own margin (roughly 60x the locally
+    // [MEASURED] value) rather than picking a tight number that only trades one flaky shape
+    // for another (see A10).
     console.log(`[D-24 MEASURED] rankSections linearity: small(1000-section) ${smallMs.toFixed(1)} ms, large(4000-section) ${largeMs.toFixed(1)} ms, ratio ${(largeMs / smallMs).toFixed(2)}`);
     expect(largeMs).toBeLessThan(4000);
+    expect(largeMs / smallMs).toBeLessThan(10);
   });
 });
 
