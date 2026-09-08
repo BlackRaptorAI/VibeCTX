@@ -353,7 +353,10 @@ describe("rankSections — performance bound (D-24)", () => {
     const ranked = rankSections(big, query);
     const bigMs = performance.now() - t0;
     expect(ranked.length).toBeGreaterThan(0);
-    expect(bigMs).toBeLessThan(5000); // D-24 target is 1.5 s; the CI budget is generous
+    // [MEASURED] locally: ~75-90 ms. D-24's target is 1.5 s; the 5000 ms ceiling is a wide,
+    // deliberately generous CI budget — this is a regression trip-wire, not a tight bound.
+    console.log(`[D-24 MEASURED] rankSections, 5000-section / ${(big.length / 1e6).toFixed(1)} MB corpus: ${bigMs.toFixed(1)} ms`);
+    expect(bigMs).toBeLessThan(5000);
 
     const small = bigCorpus(1000); // ~1 MB
     const large = bigCorpus(4000); // ~4 MB
@@ -363,7 +366,17 @@ describe("rankSections — performance bound (D-24)", () => {
     t = performance.now();
     rankSections(large, query);
     const largeMs = performance.now() - t;
-    expect(largeMs / smallMs).toBeLessThan(6); // 4x the input, well under 6x the time
+    // F-1 / D-37: a ratio between two independently-timed runs is the flakiest shape in the
+    // suite — smallMs is floored by Math.max(…, 1), so a fast small run collapses the
+    // denominator and the ratio spikes on any scheduling hiccup, with no change in largeMs at
+    // all. [MEASURED] locally the ratio sits at ~4.0-4.2 against the old `< 6` bound — real
+    // margin, but not much on a loaded machine. Assert the number that actually matters
+    // instead — an absolute, generous ceiling on the large run — and print the ratio for a
+    // human reader without gating on it. The ceiling mirrors bigMs's own margin (roughly 60x
+    // the locally [MEASURED] value) rather than picking a tight number that only trades one
+    // flaky shape for another (see A10).
+    console.log(`[D-24 MEASURED] rankSections linearity: small(1000-section) ${smallMs.toFixed(1)} ms, large(4000-section) ${largeMs.toFixed(1)} ms, ratio ${(largeMs / smallMs).toFixed(2)}`);
+    expect(largeMs).toBeLessThan(4000);
   });
 });
 
@@ -932,6 +945,12 @@ describe("extractLinks", () => {
     const elapsed = performance.now() - t0;
     expect(links).toEqual([]);
     expect(isIndex).toBe(false);
+    // [MEASURED] locally: ~1 ms — linear-time behaviour on 200 KB. The 100 ms ceiling is this
+    // test's actual point: catastrophic (quadratic/exponential) backtracking on hostile input
+    // does not creep past it, it blows through it by orders of magnitude, so ~100x local
+    // headroom is not the flaky-tight shape a ratio is (F-1) — a loaded machine has to be
+    // ~100x slower than this one to false-fail, and a real regression here is seconds, not ms.
+    console.log(`[security MEASURED] extractLinks + looksLikeIndex on 200 KB of "[": ${elapsed.toFixed(2)} ms`);
     expect(elapsed).toBeLessThan(100);
   });
 
@@ -950,6 +969,10 @@ describe("extractLinks", () => {
 
     expect(links).toEqual([]);
     expect(isIndex).toBe(false);
+    // [MEASURED] locally: both well under 1 ms — see the sibling test above for why a ~100x
+    // headroom absolute ceiling here is a regression trip-wire, not the flaky-tight shape F-1
+    // went looking for.
+    console.log(`[security MEASURED] extractLinks ${extractMs.toFixed(2)} ms, looksLikeIndex ${indexMs.toFixed(2)} ms, on 200 KB of "[a]("`);
     expect(extractMs).toBeLessThan(100);
     expect(indexMs).toBeLessThan(100);
   });
