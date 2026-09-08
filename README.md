@@ -3,10 +3,14 @@
 **A local MCP server that fetches official library documentation (llms.txt-first), caches it to disk, and serves the relevant sections to your coding agents — offline, deterministic, zero recurring cost.**
 
 > Installed from source — clone this repository and build it. See [Install](#install).
-> npm is no longer the distribution channel. The last version published there was
-> `@blackraptorai/vibectx` **0.1.2** (July 2026); everything since — including the 0.1.3
-> hotfix and all of the work above it — exists only in this repository. (Older still:
-> `@blackraptorai/docs-cache-mcp` ≤ 0.1.1, superseded by the rename.)
+>
+> **Do not install the npm package.** npm is no longer the distribution channel, and the
+> copy still sitting there — `@blackraptorai/vibectx` **0.1.2**, published July 2026 — is
+> both stale and unsafe: it predates the 0.1.3 hotfix that closed a redirect escape in the
+> fetcher, a quadratic link regex, and unbounded response bodies. 0.1.3 was never published,
+> the account is no longer maintained, and that version will not be superseded or withdrawn.
+> Everything since 0.1.2 exists only in this repository. (Older still:
+> `@blackraptorai/docs-cache-mcp` ≤ 0.1.1, superseded by the rename — same advice.)
 
 By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
 [BlackRaptor Agents — development](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/development) and
@@ -27,6 +31,12 @@ VibeCTX runs from a local clone. You need git and Node — `package.json` declar
 **Node ≥ 18**, and CI builds and tests on **Node 22**, which is the version this is actually
 proven on. Running the test suite needs Node ≥ 20.19 regardless (vitest's `vite` dependency
 declares `^20.19.0 || >=22.12.0`); building and running the server does not.
+
+```bash
+git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
+```
+
+The same thing, one step at a time:
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git
