@@ -401,7 +401,7 @@ describe("doctor reports what was evicted", () => {
 });
 
 /**
- * D-46 (oversight, PAR-652b) — the cache root must be PROVEN a real directory this tool
+ * D-46 — the cache root must be PROVEN a real directory this tool
  * owns before a single `rmSync` runs.
  *
  * The security gate measured the alternative: with a symlink planted in the root position,

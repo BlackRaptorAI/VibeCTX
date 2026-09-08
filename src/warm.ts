@@ -38,14 +38,14 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
  *      original `failedAt` carried over so the window never slides — unless `force`. The
  *      memo never applies to a name the registry now knows.
  *
- * D-11 (oversight, 2026-09-06): registry entries match by name regardless of ecosystem.
+ * D-11 (2026-09-06): registry entries match by name regardless of ecosystem.
  * When the manifest's ecosystem differs from the entry's evident one — a default entry is
  * the npm package by the NAMING RULE; a resolved entry is `resolved.source`; a config entry
  * has none — the row carries `curated entry is the <npm|pypi> package` (or `resolved entry
  * is …`), so a Python project asking for `stripe` sees it got stripe-node. An `ecosystem`
  * field on entries is a queued follow-up.
  *
- * D-10 (oversight, 2026-09-06, amended): the MCP tool (`warmToolText`) accepts only the
+ * D-10 (2026-09-06, amended): the MCP tool (`warmToolText`) accepts only the
  * server's working directory or a directory beneath it, decided on REAL paths — a symlink
  * inside the working directory that points elsewhere is refused (S-A). The CLI is
  * unrestricted (the user typed it).
@@ -331,7 +331,7 @@ export async function runWarm(registry: Registry, opts: WarmOptions = {}): Promi
     total: rows.length,
   };
   if (!report.offline) {
-    // D-13 (oversight, 2026-09-06): the record is a memo, not the product. An unwritable
+    // D-13 (2026-09-06): the record is a memo, not the product. An unwritable
     // cache costs the next run one resolution retry — it must never cost the user the report
     // they asked for, so a failure is a warn line plus a note, and the exit code is unchanged.
     try {
@@ -412,7 +412,7 @@ function realWithNonExistentTail(path: string): string | undefined {
 }
 
 /**
- * D-10 (amended by oversight, 2026-09-06): is `dir` the working directory or beneath it,
+ * D-10 (amended 2026-09-06): is `dir` the working directory or beneath it,
  * decided on REAL paths? The target's real path must be the working directory's real path or
  * beneath it, compared component-wise, so a symlink inside the working directory pointing
  * anywhere else on the filesystem is refused (S-A) and a sibling that merely shares the prefix

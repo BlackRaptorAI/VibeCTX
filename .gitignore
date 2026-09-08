@@ -2,16 +2,33 @@ node_modules/
 dist/
 *.log
 .DS_Store
-.development-team-agents-backup/
 
-# BlackRaptor Workforce — local access and work only, never pushed
+# Release planning, strategy and local governance — never shipped, never committed.
+# Change Records, the build plan and the strategy documents live here.
+.vibectx-plan/
+
+# Local-only agent tooling. Kept here so a reinstall cannot re-add any of it to the
+# repository: the pack writes several of these paths into the working tree on install.
 .claude/
 CLAUDE.md
-
-# Build-time only — the agent pack and its governance live locally, never in the repo
+.development-team-agents-backup/
 docs/TEAM.md
 docs/agent-operating-standard.md
 docs/AGENT-RETROS.md
 docs/workflow-diagram.png
 docs/agent-evals/
-docs/plans/vibectx-build-loop-state.md
+docs/plans/
+docs/specs/
+
+# Internal strategy — removed from the repository and from its history on 2026-09-08.
+# Local copies are in .vibectx-plan/. Do not re-add these to the repository.
+docs/PRODUCT-STRATEGY.md
+docs/LAUNCH-STRATEGY.md
+
+# Internal governance — Change Records are written and signed locally, in
+# .vibectx-plan/change-records/. They are not published.
+docs/change-records/
+docs/change-record-policy.md
+docs/change-record-template.md
+docs/gate-enforcement-map.md
+docs/branch-protection-checklist.md

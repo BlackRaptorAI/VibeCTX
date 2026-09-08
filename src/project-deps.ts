@@ -33,7 +33,7 @@ import { normalisePyPiName, npmNameError, pypiNameError } from "./package-names.
  *                            are reported, not read.
  *
  * Trust boundary. A manifest is a file anyone with write access to the repo can edit, so:
- *   - Symlinks are refused (oversight decision D-09, 2026-09-06). Containment is checked
+ *   - Symlinks are refused (decision D-09, 2026-09-06). Containment is checked
  *     first: every manifest and every `-r` target's REAL path must lie under the project
  *     root's real path, so the project directory itself may live behind a symlink but
  *     nothing it links OUT to is read — a path that lands outside is reported `is outside

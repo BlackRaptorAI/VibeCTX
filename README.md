@@ -12,9 +12,7 @@
 > Everything since 0.1.2 exists only in this repository. (Older still:
 > `@blackraptorai/docs-cache-mcp` ≤ 0.1.1, superseded by the rename — same advice.)
 
-By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT · Companion to
-[BlackRaptor Agents — development](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/development) and
-[BlackRaptor Agents — council](https://github.com/BlackRaptorAI/BlackRaptor_Agents/tree/main/council).
+By [BlackRaptor AI](https://github.com/BlackRaptorAI) · MIT
 
 ## Why
 

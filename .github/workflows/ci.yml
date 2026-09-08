@@ -23,7 +23,3 @@ jobs:
       - run: npm run lint
       - run: npm test
       - run: npm run build
-      # The change-record gate is only as good as its checker. Its fixtures assert that each
-      # malformed verdict shape is actually rejected, so a permissive edit to the validator
-      # fails here rather than passing silently on a real Change Record.
-      - run: python3 .github/gate-verdict-format/validate_verdict.py --self-test

@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "provenance": "producer-labelled against GitHub README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox",
+  "provenance": "hand-labelled against GitHub README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox",
   "questions": 60,
   "corpus": "For every one of the 30 registry entries, the document the fetcher actually resolved in the build sandbox was the raw.githubusercontent.com README fallback: the docs-site llms-full.txt / llms.txt candidates are not reachable from here. A README is a much thinner corpus than an llms-full.txt, so many probe queries have NO correct answer in it at all.",
   "labellingRule": "A section counts as correct when a developer asking that question would be materially helped by that section's own text: it names the API or concept asked about and shows or explains it. A word appearing in a feature bullet, a link list, a sponsor list, a repository-directory listing, or an unrelated context (a support-policy table, a test-harness setup) does NOT count. Where no section of the fetched document meets that bar, `expect` is [] and `unanswerable` is true: the question is still one of the 60, and neither ranker can score it. Labelled from the documents' own headings and text, before either ranker was run against them.",

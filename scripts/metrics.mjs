@@ -4,10 +4,8 @@
  *
  *   node scripts/metrics.mjs
  *
- * Deliberately NOT wired to a schedule or to an issue tracker. A new workflow is a
- * `.github/` change, and this repository's change-record policy (docs/change-record-policy.md)
- * exists to REMOVE governance machinery nobody asked for, not to add a cron job that posts
- * numbers into a tracker where they will rot.
+ * Deliberately NOT wired to a schedule or to an issue tracker — this prints numbers for a
+ * human to read, not a cron job that posts them into a tracker where they will rot.
  *
  * It reads the repository's public, unauthenticated figures from api.github.com:
  * open issues, stars and forks.

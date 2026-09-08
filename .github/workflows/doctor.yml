@@ -1,7 +1,6 @@
 # doctor — weekly retrieval-coverage check (PAR-707)
 #
-# Placed under CR-20260906-par-707-doctor (Tier-3: .github/). Action versions
-# mirror .github/workflows/ci.yml (major tags); SHA-pinning both workflows is a
+# Action versions mirror .github/workflows/ci.yml (major tags); SHA-pinning both is a
 # tracked follow-up — the pins could not be verified against GitHub from the
 # build sandbox, and an unverified SHA is worse than a tag.
 #

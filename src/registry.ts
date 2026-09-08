@@ -56,8 +56,7 @@ export interface LibraryEntry {
 /*
  * DEFAULT REGISTRY — the vibe-coder top-30 (PAR-654).
  *
- * Who it is for: solo vibe coders and 2–20-dev startups (docs/PRODUCT-STRATEGY.md, segments
- * A/B). Paragon's own platform stack (fastify, timescaledb, pgvector, aws-cdk,
+ * Who it is for: solo vibe coders and small teams. Paragon's own platform stack (fastify, timescaledb, pgvector, aws-cdk,
  * fastify-type-provider-zod) moved to docs/examples/paragon.vibectx.config.json — the
  * "keep a private stack via committed config" example.
  *
@@ -555,7 +554,7 @@ function applyLayer(
  * Config names and aliases are normalised with trim().toLowerCase() before validation and
  * storage, so {name: "Next.js"} overrides "next.js" rather than adding an entry.
  *
- * Precedence (oversight decisions D-06 / D-07, 2026-09-06):
+ * Precedence (decisions D-06 / D-07, 2026-09-06):
  * - D-06 — config beats default alias. A config entry whose name or alias equals a DEFAULT
  *   alias is not an error: the config wins and that alias is silently dropped from the default
  *   (a 0.1.3 config with {name: "next"} keeps loading). Still errors: a config alias equal to

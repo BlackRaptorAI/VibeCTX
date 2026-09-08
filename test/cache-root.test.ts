@@ -167,7 +167,7 @@ describe("D-45 one-time migration of ~/.docs-cache-mcp", () => {
 });
 
 /**
- * D-46 (oversight, PAR-652b) — the legacy path must be PROVEN a real directory before it is
+ * D-46 — the legacy path must be PROVEN a real directory before it is
  * renamed.
  *
  * `existsSync` follows symlinks, so at HEAD a symlinked `~/.docs-cache-mcp` passed rule 2 and
