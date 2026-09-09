@@ -30,20 +30,29 @@ const require = createRequire(import.meta.url);
  * spawning `dist/index.js`). Left as a genuine, named gap rather than closed here.
  *
  * What this file does NOT prove, corrected after a round-2 review caught the claim below being
- * false (mutation-tested: deleting index.ts:46 entirely and rebuilding still leaves this test
+ * false (mutation-tested: deleting index.ts:46 entirely and rebuilding still leaves THIS FILE
  * green): it does NOT prove `process.stdin.once("end", …)` at index.ts:46 specifically fires.
  * Every test here runs with `VIBECTX_NO_AUTOWARM=1`, so `autowarmStatus().inFlight.size` is
  * always 0 and index.ts:46's handler is never the thing keeping the event loop open — nothing
  * is. When stdin ends, Node's own event loop drains and the child exits on its own, with or
- * without index.ts:46 existing. The line remains genuinely untested; proving it would require
- * an in-flight autowarm-shaped condition to hold the loop open without hitting the network
- * (`src/link-policy.ts` blocks loopback/private hosts on the normal fetch path), which is a
- * `src/` change out of this file's scope. What IS proven, and is a meaningful upgrade over no
- * process-level test at all: the process starts, answers real MCP calls over real stdio, and
- * exits promptly and cleanly — no hang, no signal, no stack, no stderr noise — when its client
- * goes away. A `process.exit(2)` flipped to a different code, or the exit code/signal/timing
- * assertions below being wrong, would be caught by this file; index.ts:46's handler being
- * deleted would not.
+ * without index.ts:46 existing. Proving the handler actually fires and does something would
+ * require an in-flight autowarm-shaped condition to hold the loop open without hitting the
+ * network (`src/link-policy.ts` blocks loopback/private hosts on the normal fetch path), which
+ * is a `src/` change out of this file's scope.
+ *
+ * Round-4 review mutation-tested the line's DELETION suite-wide (not just this file): deleting
+ * index.ts:46 entirely, rebuilding, and running the FULL suite gives `1 failed | 1060 passed` —
+ * `test/autowarm.test.ts:248` carries a source tripwire that regex-matches this exact line's
+ * text (`expect(index).toMatch(/process\.stdin\.once\("end", ...\)/)`), so the line's PRESENCE
+ * is caught suite-wide even though this file alone would not catch it. What remains genuinely
+ * untested anywhere in the suite is the line's BEHAVIOR — that the handler actually fires and
+ * closes the server when stdin ends — which is the honest, narrower gap. What IS proven here,
+ * and is a meaningful upgrade over no process-level test at all: the process starts, answers
+ * real MCP calls over real stdio, and exits promptly and cleanly — no hang, no signal, no
+ * stack, no stderr noise — when its client goes away. A `process.exit(2)` flipped to a
+ * different code, or the exit code/signal/timing assertions below being wrong, would be caught
+ * by this file; index.ts:46's handler being deleted would not be caught by this file alone, but
+ * is caught by the suite as a whole via the tripwire above.
  *
  * Requires `dist/index.js`, built fresh by the `beforeAll` below. This is necessary because
  * CI's own `.github/workflows/ci.yml` runs `npm test` before `npm run build`, so on a clean

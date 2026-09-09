@@ -345,6 +345,12 @@ describe("rankSections — performance bound (D-24)", () => {
   }
 
   it("ranks a 5 MB corpus with a 4-term query well inside the budget, and stays linear in size", () => {
+    // this test is timed on purpose, so an explicit per-test timeout (rather than vitest's
+    // default 5000 ms testTimeout) is the hang-detector budget, not a performance assertion —
+    // round-4 review measured this test taking 4121-4958 ms under 4x-core CPU load (11/11
+    // samples), as little as 42 ms of margin against the 5000 ms default. 30 s matches the
+    // precedent already set by SPAWN_TEST_TIMEOUT_MS in test/index-stdio.test.ts for the same
+    // class of problem: real hangs stay caught, no cost to erring generous.
     const big = bigCorpus(5000);
     expect(big.length).toBeGreaterThan(5_000_000);
     const query = "streaming reply cache policy";
@@ -376,15 +382,23 @@ describe("rankSections — performance bound (D-24)", () => {
     // corpora ~4x larger (4000/16000 sections here, up from 1000/4000): with timings large
     // enough that jitter is proportionally small, [MEASURED] 10 iterations under identical
     // 2x-core load gave ratio 3.35-6.55 (small 122-219 ms, large 708-799 ms) — real separation
-    // restored. The `< 10` bound is kept (still catches ~2.5x quadratic blowup over the true
-    // ~4x linear scaling measured here) but now has real margin under load instead of failing
-    // outright. The absolute ceiling on `largeMs` mirrors bigMs's own margin (a wide, generous
-    // regression trip-wire) rather than picking a tight number that only trades one flaky
-    // shape for another (see A10).
+    // restored. The ratio bound is loosened from main's original `< 6` to `< 10` (still catches
+    // ~2.5x quadratic blowup over the true ~4x linear scaling measured here): both corpus sizes
+    // were widened 4x to keep real ratio separation from a 16x quadratic-regression signal under
+    // load, per the round-2/round-3 investigation above, and `< 10` gives that a real margin
+    // instead of the tighter bound failing outright.
+    //
+    // The absolute ceiling on `largeMs` does NOT mirror bigMs's own margin — round-4 review
+    // measured them separately: bigMs's `< 5000` ceiling carries ~46x margin idle and ~4.1x
+    // under 4x-core load; largeMs's original `< 4000` ceiling carried only ~11.5x idle and, the
+    // number that matters, ~1.26x under 4x-core load (measured max 3169.6 ms) — one bad scheduler
+    // tick from a false failure. Raised to `< 10_000` for ~3.15x margin at that same worst
+    // observed load, closer to bigMs's own headroom rather than picking a tight number that only
+    // trades one flaky shape for another (see A10).
     console.log(`[D-24 MEASURED] rankSections linearity: small(4000-section) ${smallMs.toFixed(1)} ms, large(16000-section) ${largeMs.toFixed(1)} ms, ratio ${(largeMs / smallMs).toFixed(2)}`);
-    expect(largeMs).toBeLessThan(4000);
+    expect(largeMs).toBeLessThan(10_000);
     expect(largeMs / smallMs).toBeLessThan(10);
-  });
+  }, 30_000);
 });
 
 describe("rankSnippets — performance bound (D-26)", () => {
