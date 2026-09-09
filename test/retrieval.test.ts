@@ -402,6 +402,15 @@ describe("rankSections — performance bound (D-24)", () => {
 });
 
 describe("rankSnippets — performance bound (D-26)", () => {
+  // this test is timed on purpose, so an explicit per-test timeout (rather than vitest's
+  // default 5000 ms testTimeout) is the hang-detector budget, not a performance assertion —
+  // same defect class already fixed above for D-24's bigMs/largeMs: without this, the harness
+  // timeout (5000 ms, covering corpus construction *and* the rankSnippets call) is at least as
+  // tight as the `< 5000` assertion below (which covers only the rankSnippets call), so a
+  // slow-enough run dies via an opaque "Test timed out in 5000ms" before the assertion can ever
+  // cleanly fail and report its actual number. 30 s matches the precedent already set twice in
+  // this file (rankSections above, SPAWN_TEST_TIMEOUT_MS in test/index-stdio.test.ts) for the
+  // same class of problem: real hangs stay caught, no cost to erring generous.
   it("extracts and ranks a multi-megabyte code-heavy corpus inside the same budget as sections mode", () => {
     const lines: string[] = [];
     for (let i = 0; i < 5000; i++) {
@@ -415,8 +424,22 @@ describe("rankSnippets — performance bound (D-26)", () => {
     const ranked = rankSnippets(big, "streaming reply cache policy");
     const ms = performance.now() - t0;
     expect(ranked.length).toBe(5000);
+    // [MEASURED] locally (idle, 5 runs): 86.8-88.9 ms — same order of magnitude as D-24's bigMs
+    // (~75-90 ms idle) against the same 5000 ms ceiling, and this test's rankSnippets call is
+    // comparable-scale work (5000 sections, ~3.9 MB here vs. D-24's 5000 sections, ~5 MB).
+    // Kept the `< 5000` ceiling as-is rather than widening it: D-24's bigMs — the directly
+    // comparable single-call measurement, not the whole-test one — was separately load-tested
+    // (round-4 review, 4x-core CPU) and retained ~4.1x margin against this same 5000 ms bound
+    // (measured max ~1220 ms under load vs. ~75-90 ms idle, roughly a 14-16x idle-to-load
+    // slowdown). Applying that same ratio conservatively to this test's 86.8-88.9 ms idle
+    // measurement extrapolates to roughly 1.2-1.4 s under comparable load — still ~3.5-4x
+    // margin under the 5000 ms ceiling, not the thin ~42 ms margin that forced D-24's whole-test
+    // (corpus-generation-inclusive) timeout to widen. No load-measurement contradicts this
+    // extrapolation; if a future CI run shows otherwise, widen this ceiling then rather than
+    // pre-emptively loosening a bound with no evidence it's tight.
+    console.log(`[D-26 MEASURED] rankSnippets, 5000-section / ${(big.length / 1e6).toFixed(1)} MB code-heavy corpus: ${ms.toFixed(1)} ms`);
     expect(ms).toBeLessThan(5000);
-  });
+  }, 30_000);
 });
 
 describe("extractSnippets (D-26)", () => {
