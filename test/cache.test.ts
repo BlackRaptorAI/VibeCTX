@@ -463,6 +463,12 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
     const fooUnderscoreBarPrimary = "https://foo-bar.example.com/underscore/llms.txt";
     writeCache("foo.bar", fooBarPrimary, "# foo.bar's own primary");
     writeCache("foo_bar", fooUnderscoreBarPrimary, "# foo_bar's own primary"); // libDirIn folds "." and "_" alike: same directory as "foo.bar"
+    // Round 3 (test-auditor, F8a): pin the PRECONDITION, not only the outcome — without this,
+    // a future fix that rejects/normalises colliding names (rather than hash-suffixing the
+    // directory) could remove the collision entirely and leave this test silently green,
+    // proving nothing. Confirms both writes actually landed as two distinct, real files first.
+    expect(readCache("foo.bar", fooBarPrimary, 168)?.content).toBe("# foo.bar's own primary");
+    expect(readCache("foo_bar", fooUnderscoreBarPrimary, 168)?.content).toBe("# foo_bar's own primary");
 
     // "foo.bar" refreshes: its own drop call only keeps ITS OWN new candidate URL.
     const fooBarNewUrl = "https://foo-bar.example.com/dot/llms-full.txt";
@@ -580,10 +586,19 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
     it("round 4: dropFollowedPageCache(\"\", ...) is a no-op — an empty library never collapses the scan to the cache root", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
       writeCache("react", "https://react.dev/streaming.md", "# Streaming");
+      // Round 3 (test-auditor, F12): plant a REAL, C2/SF-C-proven pair DIRECTLY at the cache
+      // ROOT — the only shape that actually exercises `library.length === 0`'s guard. Without
+      // this, `readdirSync(root)` finds nothing ending in `.md`/`.meta.json` (only the "react"
+      // subdirectory) and the test passes whether or not the guard exists.
+      const rootUrl = "https://example.com/planted-at-root.md";
+      const rootSlug = urlSlug(rootUrl);
+      writeFileSync(join(dir, `${rootSlug}.md`), "planted directly at the cache root", "utf8");
+      writeFileSync(join(dir, `${rootSlug}.meta.json`), JSON.stringify({ url: rootUrl, fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
 
       dropFollowedPageCache("", ["https://react.dev/llms.txt"]);
 
       expect(readCache("react", "https://react.dev/streaming.md", 168)?.content).toBe("# Streaming");
+      expect(existsSync(join(dir, `${rootSlug}.md`))).toBe(true); // the root-level pair survives too
     });
 
     it("C3: a successful drop reports the count once, through the injected warn", () => {

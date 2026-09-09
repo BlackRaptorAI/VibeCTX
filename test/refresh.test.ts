@@ -254,6 +254,31 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(readCache("hono", HONO_URL, 168)?.content).toBe("# Hono unrelated"); // another library, untouched
     });
 
+    /**
+     * Round 3 (test-auditor, F9, blocking) — the S2 fix (round 1, code-reviewer) is
+     * `dropFollowedPageCache(entry.name, [doc.url, ...entry.urls])`, not `[doc.url]` alone.
+     * Every OTHER test in this file gives its registry entries exactly one candidate URL, so
+     * the two keep-lists are the same set everywhere else and narrowing `refresh.ts` back to
+     * `[doc.url]` would break nothing. `test/cache.test.ts`'s own S2 test proves the PROPERTY
+     * but supplies the keep-list itself — it does not prove `refresh.ts` actually BUILDS that
+     * list correctly. This test uses a real multi-candidate entry (the shape every default
+     * registry entry actually has, registry.ts:90-114) and proves the caller-side construction.
+     */
+    it("S2: a refresh keeps every REMAINING candidate URL's cache, not just the one it fetched", async () => {
+      const FALLBACK = "https://react.dev/llms.txt";
+      const reg: Registry = { entries: new Map([["react", { name: "react", urls: [REACT_URL, FALLBACK], aliases: ["reactjs"] }]]) };
+      writeCache("react", REACT_URL, "# React old");
+      writeCache("react", FALLBACK, "# React fallback"); // a candidate URL, NOT a followed page
+      writeCache("react", FOLLOWED_URL, "# Streaming");
+      expect(readCache("react", FALLBACK, 168)?.content).toBe("# React fallback");
+
+      stubFetch({ [REACT_URL]: "# React new" });
+      await refreshToolText(reg, "reactjs");
+
+      expect(readCache("react", FALLBACK, 168)?.content).toBe("# React fallback"); // survives — the fallback chain
+      expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined(); // still dropped
+    });
+
     it("a refresh with NOTHING cached and no candidate reachable is FAILED outright — nothing to drop", async () => {
       stubFetch({}); // react 404s everywhere, no prior cache to fall back on
       const out = await refreshToolText(registry, "reactjs");
