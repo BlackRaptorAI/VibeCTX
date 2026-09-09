@@ -3,7 +3,7 @@ import { ConfigError } from "./config.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
-import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS, MAX_TOKENS_BUDGET } from "./search.js";
+import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS, MAX_TOKENS_BUDGET, type SearchOutcome } from "./search.js";
 
 /**
  * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm` and `search`;
@@ -278,7 +278,19 @@ export async function runResolveCli(args: string[], io: CliIo): Promise<number> 
     io.stderr(configError(e));
     return 2;
   }
-  const text = await resolveToolText(registry, parsed.name, parsed.ecosystem);
+  // A5 (PAR-718): the same defensive wrap runDoctorCli/runWarmCli already carry — the MCP
+  // transport catches a thrown tool handler on its own, but this dispatch loop does not, and
+  // index.ts's top-level await turns an uncaught throw here into an unhandled rejection with
+  // a stack trace, not a clean exit 2. resolveToolText is now backed by a resolvePackage that
+  // no longer throws for a disk failure it can catch (see resolve.ts), so this is defense in
+  // depth for any other error class, not a fix for one specific known throw.
+  let text: string;
+  try {
+    text = await resolveToolText(registry, parsed.name, parsed.ecosystem);
+  } catch (e) {
+    io.stderr(`${message(e)}\n`);
+    return 2;
+  }
   io.stdout(`${text}\n`);
   return text.startsWith("Could not resolve") ? 1 : 0;
 }
@@ -332,17 +344,28 @@ export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
     return 2;
   }
   if (parsed.clipped) io.stderr(`vibectx: the query was clipped to its first ${MAX_QUERY_CHARS} characters\n`);
-  const outcome = runSearch(registry, {
-    query: parsed.query,
-    maxTokens: parsed.maxTokens,
-    libraries: parsed.libraries.length > 0 ? parsed.libraries : undefined,
-    // The clip happened at parse time, so `runSearch` cannot see it: the query it receives is
-    // exactly at the bound. Carried in so the note lands in `outcome.notes` — a `--json`
-    // consumer reads stdout and would otherwise have no way to know its tail was dropped, and
-    // the stderr line above is for the person at the terminal, not for the machine.
-    queryClipped: parsed.clipped,
-    warn: io.stderr,
-  });
+  // A5 (PAR-718): same defensive wrap as runResolveCli, for the same reason — this dispatch
+  // loop has no catch of its own, unlike the MCP transport. `runSearch`'s own index write
+  // (`search-index.ts`'s `writeIndex`) already never throws (MEASURED: a real read-only cache
+  // directory answers the query by tokenizing at query time and exits 0/1 normally); this is
+  // defense in depth for any other error class, not a fix for a live throw found here.
+  let outcome: SearchOutcome;
+  try {
+    outcome = runSearch(registry, {
+      query: parsed.query,
+      maxTokens: parsed.maxTokens,
+      libraries: parsed.libraries.length > 0 ? parsed.libraries : undefined,
+      // The clip happened at parse time, so `runSearch` cannot see it: the query it receives is
+      // exactly at the bound. Carried in so the note lands in `outcome.notes` — a `--json`
+      // consumer reads stdout and would otherwise have no way to know its tail was dropped, and
+      // the stderr line above is for the person at the terminal, not for the machine.
+      queryClipped: parsed.clipped,
+      warn: io.stderr,
+    });
+  } catch (e) {
+    io.stderr(`${message(e)}\n`);
+    return 2;
+  }
   io.stdout(parsed.json ? `${JSON.stringify(outcome, null, 2)}\n` : `${formatSearchResults(outcome)}\n`);
   return searchExitCode(outcome);
 }

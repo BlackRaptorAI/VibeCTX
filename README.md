@@ -589,16 +589,24 @@ different-case spelling of a curated one (record names must already be lowercase
 names are stored in their PEP 503 form, so `typing_extensions` and `Typing-Extensions`
 are one record). Records are re-validated on every load (bad ones are skipped; a corrupt
 file is ignored; a file written by a **newer** vibectx — a higher `schemaVersion` — is left
-alone and new resolutions stay in memory, with a note on stderr; a lower one is replaced). `list_libraries` marks
-them `[resolved]` and prefixes their descriptions `(package-supplied)`; `doctor` checks
-them like any entry; `refresh` re-resolves them through the same ecosystem, so a project
-that later publishes `llms.txt` is picked up.
+alone and new resolutions stay in memory, with a note on stderr; a lower one is replaced). The
+`resolved.json` record stays in memory the same way, with the same kind of note, when the
+write itself fails — a read-only `$HOME` or a full disk — rather than being refused by schema
+version. `list_libraries` marks them `[resolved]` and prefixes their descriptions
+`(package-supplied)`; `doctor` checks them like any entry; `refresh` re-resolves them through
+the same ecosystem, so a project that later publishes `llms.txt` is picked up.
 
 When `get_docs` resolves a name on the spot, its response starts with one provenance line
-— ecosystem, the package's own description, homepage / repository, and the nearest
-curated name when the request looks like a typo of one — ending in *"not a curated
+— ecosystem, the package's own description, homepage / repository, the nearest
+curated name when the request looks like a typo of one, and (when the write above
+failed) `resolution not saved: <reason>` — ending in *"not a curated
 entry; verify this is the package you meant"*. A typo can resolve to a real, unrelated
-package; that line is how you notice.
+package; that line is how you notice. A failed save of the *record* never costs you the
+answer: the document itself was already fetched and cached before the record write is
+attempted, so it is still returned, and the resolution still works for the rest of this
+process. (A cache directory that is read-only from before this library was ever cached is a
+different case — there the document cannot be cached either, and the name reports as
+unresolvable rather than resolved-but-unsaved.)
 
 **Command line.** `vibectx resolve <name> [--npm | --pypi] [--config <path>]` exits `0`
 when resolved (or already curated), `1` when it could not resolve, `2` on a usage or

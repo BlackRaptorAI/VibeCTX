@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -753,5 +753,106 @@ describe("PAR-659 D-34 · an unsaved resolution leaves no orphan index entry", (
     const out = await resolvePackage("hono");
     expect(out.saved).toBe(true);
     expect(readIndex().libraries.get("hono")?.url).toBe(README_URL);
+  });
+});
+
+/**
+ * A5 (PAR-718) — `resolvePackage` honours its documented "Never throws for bad input or bad
+ * network" contract against a REAL read-only cache directory, not a mocked failure (Gate 3:
+ * "the read-only-directory cases need a real read-only directory"). `fetch` is still stubbed —
+ * only the disk is real — because the network half of this chain is exercised by every other
+ * test in this file, and a real npm/GitHub fetch would make this file's determinism depend on
+ * this machine's network reachability.
+ *
+ * Two REAL failure sites, deliberately distinguished (MEASURED live against this fix, not
+ * assumed from the plan text — see the go-card handoff for the full finding):
+ *
+ *   1. The cache ROOT is read-only, but this library's per-document directory was already
+ *      created (and left writable) before the chmod — exactly what a second run against an
+ *      already-partially-warmed, since-locked-down cache looks like. `getLibraryDoc` succeeds
+ *      (it can still write the content+meta files inside the writable subdirectory); only
+ *      `saveResolvedEntry`'s write of `resolved.json`, which lives directly in the read-only
+ *      root, fails. This is `resolved-store.ts:114,127`, exactly as the plan cites it.
+ *   2. The cache root is read-only AND this library has never been cached before, so
+ *      `getLibraryDoc` itself must create a NEW per-library subdirectory — and creating any
+ *      new entry under a read-only root fails before `saveResolvedEntry` is ever reached. This
+ *      is `cache.ts`'s `writeCache`, a file this item does not touch (A4 already landed there,
+ *      and the go-card says not to touch it again for A5) — so the document is genuinely lost
+ *      in this branch, and `resolvePackage` reports it as unresolvable rather than crashing.
+ *      Recorded as a carried, disclosed gap, not silently papered over.
+ *
+ * PRECONDITION (code-reviewer / test-auditor, A5 round 2): every test below relies on POSIX
+ * mode bits being enforced against the user running this suite. A root-running CI container
+ * bypasses `chmod 500` entirely — no EACCES occurs, and every test in this block fails LOUDLY
+ * (the "never throws" assertion still passes; the specific EACCES/`saveNote`/exit-code
+ * assertions do not) rather than silently passing for the wrong reason. GitHub-hosted runners
+ * (this project's actual CI) are non-root, so this holds today; stated here so a future
+ * container change is diagnosed quickly rather than reported as this fix regressing.
+ */
+describe("A5 (PAR-718) — resolvePackage never throws, against a real read-only cache directory", () => {
+  const README = "# Hono\n\nUltrafast web framework.\n\n## Middleware\n\nUse app.use().";
+  const README_URL = "https://raw.githubusercontent.com/honojs/hono/HEAD/README.md";
+
+  /** chmod back to writable before the shared afterEach's rmSync runs — a read-only directory
+   *  left behind would make that cleanup itself throw and cascade into every later test. */
+  function restoreWritable(): void {
+    chmodSync(dir, 0o700);
+    const libDir = join(dir, "hono");
+    if (existsSync(libDir)) chmodSync(libDir, 0o700);
+  }
+
+  it("saveResolvedEntry throws (root read-only, this library's directory pre-existing): caught, ok:true, saved:false, saveNote carries the real EACCES, the document is still usable", async () => {
+    resetSearchIndexMemo();
+    mkdirSync(join(dir, "hono"), { recursive: true });
+    chmodSync(join(dir, "hono"), 0o700);
+    chmodSync(dir, 0o500);
+    try {
+      const warns: string[] = [];
+      stubFetch({ [NPM_HONO]: honoNpm, [README_URL]: README });
+      let out: Awaited<ReturnType<typeof resolvePackage>> | undefined;
+      await expect(
+        (async () => {
+          out = await resolvePackage("hono", { warn: (m) => warns.push(m) });
+        })(),
+      ).resolves.not.toThrow();
+      expect(out?.ok).toBe(true);
+      expect(out?.saved).toBe(false);
+      expect(out?.saveNote).toMatch(/EACCES/);
+      expect(out?.chosen).toBe(README_URL);
+      expect(out?.chars).toBe(README.length);
+      expect(warns.join("")).toMatch(/resolution not saved for "hono": EACCES/);
+      // The document really did land on disk — only resolved.json's write failed. The "hono"
+      // subdirectory was never made read-only (only the root was), so this read needs no
+      // permission change of its own.
+      expect(readCache("hono", README_URL, 168)?.content).toBe(README);
+      // Same invariant the neighbouring K2 test pins (PAR-659 D-34, above): both reach
+      // `saved: false` through the same `if (saved) indexCachedDocument(...)` gate at
+      // resolve.ts, just via a different assignment (a caught throw here, `warn` there) — an
+      // unsaved resolution leaves no orphan index entry either way.
+      expect(readIndex().libraries.has("hono")).toBe(false);
+    } finally {
+      restoreWritable();
+    }
+  });
+
+  it("getLibraryDoc throws (root read-only, no pre-existing directory): caught, treated as this candidate set serving nothing — resolvePackage still never throws", async () => {
+    chmodSync(dir, 0o500);
+    try {
+      stubFetch({ [NPM_HONO]: honoNpm, [README_URL]: README });
+      let out: Awaited<ReturnType<typeof resolvePackage>> | undefined;
+      await expect(
+        (async () => {
+          out = await resolvePackage("hono");
+        })(),
+      ).resolves.not.toThrow();
+      // RESIDUAL, disclosed (see the describe block's docstring): the document is genuinely
+      // lost in this branch — `cache.ts` is out of this item's scope — so this reports as
+      // unresolvable, not as "resolved but not saved". The contract under test is narrower and
+      // still real: never throws, and says why.
+      expect(out?.ok).toBe(false);
+      expect(out?.attempts.join(" ")).toMatch(/the cache write failed while probing its candidates: .*EACCES/);
+    } finally {
+      restoreWritable();
+    }
   });
 });

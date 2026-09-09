@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache } from "../src/cache.js";
@@ -290,10 +290,45 @@ describe("dispatchCli resolve (PAR-655)", () => {
     expect(a.out.join("")).toMatch(/^Could not resolve "doctor"/);
     expect(spy).toHaveBeenCalledTimes(2);
   });
+
+  it("A5 (PAR-718): with the cache directory read-only, resolving a real, previously-uncached name never throws — exits cleanly with a 'NOT saved' note, no stack trace, real EACCES", async () => {
+    mkdirSync(join(dir, "elysia"), { recursive: true });
+    chmodSync(join(dir, "elysia"), 0o700);
+    chmodSync(dir, 0o500);
+    try {
+      stubFetch({
+        "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+        "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia",
+      });
+      const a = io();
+      let code: number | undefined;
+      await expect(
+        (async () => {
+          code = await dispatchCli(["node", "dist/index.js", "resolve", "elysia"], a);
+        })(),
+      ).resolves.not.toThrow();
+      // resolvePackage's own guard (resolve.ts) already turns this into a graceful outcome
+      // before runResolveCli's own defensive try/catch would ever need to fire — exit 0, not
+      // the cruder "exit 2" a bare catch-all would give, because the resolution genuinely
+      // succeeded; only persisting it to disk failed.
+      expect(code).toBe(0);
+      const text = a.out.join("");
+      expect(text).toMatch(/^Resolved "elysia" via npm/);
+      expect(text).toContain("NOT saved:");
+      expect(text).toMatch(/EACCES/);
+      expect(text).not.toMatch(/\n\s+at\s/); // a Node stack trace's own line shape
+      // Not asserted here: `resolveToolText` doesn't thread a `warn` callback through to
+      // `resolvePackage` (pre-existing, unrelated to A5), so the warn line lands on the real
+      // process.stderr, not this test's `io()` capture — the stdout report above (the same
+      // text `vibectx resolve` actually prints) is the assertion that matters.
+    } finally {
+      chmodSync(dir, 0o700);
+      if (existsSync(join(dir, "elysia"))) chmodSync(join(dir, "elysia"), 0o700);
+    }
+  });
 });
 
 import { parseWarmArgs, WARM_USAGE } from "../src/cli.js";
-import { existsSync } from "node:fs";
 import { mkdtempSync as mkdtemp2 } from "node:fs";
 import { projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 
@@ -618,6 +653,32 @@ describe("dispatchCli search (PAR-659)", () => {
     expect(await dispatchCli(["node", "vibectx", "search", "kubernetes", "--config", config()], o)).toBe(1);
     expect(o.out.join("")).toContain("No sections matched");
     expect(o.out.join("")).toContain("searched 1 cached library: hono");
+  });
+
+  it("A5 (PAR-718): with the cache directory read-only, a search that must rebuild the index never throws — it answers by tokenizing at query time instead", async () => {
+    writeCache("hono", HONO_URL, HONO_DOC);
+    const cfg = config();
+    chmodSync(dir, 0o500);
+    try {
+      const o = io();
+      let code: number | undefined;
+      await expect(
+        (async () => {
+          code = await dispatchCli(["node", "vibectx", "search", "server-sent events", "--config", cfg], o);
+        })(),
+      ).resolves.not.toThrow();
+      // search-index.ts's own writeIndex already never throws (MEASURED against a real
+      // read-only directory before this item touched anything) — this pins the CLI's own
+      // outer guard added by A5 does not regress that, and that "cannot write the index" and
+      // "cannot answer the query" are genuinely different failures: this one still answers.
+      expect(code).toBe(0);
+      const text = o.out.join("");
+      expect(text).toContain("# hono");
+      expect(text).not.toMatch(/\n\s+at\s/); // a Node stack trace's own line shape
+      expect(o.err.join("")).toMatch(/search index not written: EACCES/);
+    } finally {
+      chmodSync(dir, 0o700);
+    }
   });
 
   it("exits 2 on a usage error and prints the usage line", async () => {

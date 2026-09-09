@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
@@ -633,6 +633,40 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(again).toContain("onBeforeHandle");
     expect(again).not.toContain("Resolved ");
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("A5 (PAR-718): with the cache directory read-only, get_docs on an unknown package still returns the resolved document, plus a 'resolution not saved: <reason>' note — real directory, real EACCES, not a mocked failure", async () => {
+    mkdirSync(join(dir, "elysia"), { recursive: true });
+    chmodSync(join(dir, "elysia"), 0o700);
+    chmodSync(dir, 0o500);
+    try {
+      stubFetch({
+        "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+        "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia\n\n## Middleware\n\nUse .onBeforeHandle() for middleware.",
+      });
+      const reg: Registry = { entries: new Map(registry.entries) };
+      let out = "";
+      await expect(
+        (async () => {
+          out = await getDocsToolText(reg, { library: "Elysia", topic: "middleware" });
+        })(),
+      ).resolves.not.toThrow();
+      const first = out.split("\n")[0];
+      expect(first).toContain('Resolved "Elysia" via npm on this call');
+      expect(first).toMatch(/resolution not saved: .*EACCES/);
+      // Gate 3: the document is still returned, not lost, and the call still "exits 0" —
+      // there is no exit code at this layer, but no exception reaching the caller is the
+      // MCP-tool equivalent of it.
+      expect(out).toContain("Source: https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md");
+      expect(out).toContain("onBeforeHandle");
+      // "This resolution lives in memory until restart" (formatResolved's own words for the
+      // K2 case) holds here too: the live in-memory registry gets the entry regardless of
+      // whether the disk write succeeded, so the NEXT call in this same process is a plain hit.
+      expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
+    } finally {
+      chmodSync(dir, 0o700);
+      if (existsSync(join(dir, "elysia"))) chmodSync(join(dir, "elysia"), 0o700);
+    }
   });
 
   it("R3: the provenance line carries the package-supplied description and the nearest curated name for a likely typo", async () => {

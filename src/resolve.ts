@@ -88,7 +88,9 @@ export interface ResolveOutcome {
   kind?: SourceKind;
   chars?: number;
   entry?: LibraryEntry;
-  /** False when resolved.json could not be written (another schema version on disk); `saveNote` says why. */
+  /** False when resolved.json could not be written — another schema version on disk (K2), or
+   *  (A5, PAR-718) the write itself failing on a read-only `$HOME` or a full disk; `saveNote`
+   *  says which. */
   saved?: boolean;
   saveNote?: string;
   /** What was attempted, one phrase per step; the failure message is built from it. */
@@ -333,8 +335,18 @@ function hasDocsSite(meta: PackageMetadata): boolean {
 }
 
 /**
- * Resolve one package name. Never throws for bad input or bad network: the outcome's
- * `text` is always a plain message. `ecosystem` restricts the lookup to one registry.
+ * Resolve one package name. Never throws — not for bad input, not for a bad network, and
+ * (A5, PAR-718) not for a failed cache or record write (EACCES/ENOSPC/EROFS: a read-only
+ * `$HOME` or a full disk): the outcome's `text` is always a plain message. `ecosystem`
+ * restricts the lookup to one registry.
+ *
+ * RESIDUAL, disclosed rather than silently accepted (see the `getLibraryDoc` call site
+ * below): when the cache write fails before ANY document has been fetched for this library
+ * (no per-library directory existed yet), the document itself is lost — recovering it is
+ * `cache.ts`'s job, out of this item's authorised scope — and this reports the name as
+ * unresolvable rather than serving the fetched text. When the write that fails is only
+ * `resolved.json`'s (the document was already cached), the document IS still returned, with
+ * `saved: false` and `saveNote` explaining why.
  *
  * Ecosystem choice without an override — npm first, then PyPI, with a docs-site
  * preference: an ecosystem whose metadata carries a homepage / docs URL is taken at
@@ -410,7 +422,27 @@ export async function resolvePackage(
     // PyPI names are keyed by their PEP 503 form (L3): typing_extensions and Typing-Extensions are one record.
     const entryName = eco === "pypi" ? normalisePyPiName(name) : folded;
     const entry = buildEntry(entryName, meta, urls, now());
-    const doc = await getLibraryDoc(entry, { forceRefresh: true });
+    // A5 (PAR-718): this function's contract is "never throws for bad input or bad network"
+    // (see the docstring above) — but `getLibraryDoc` also WRITES the document to the cache
+    // (`cache.ts`'s `writeCache`), and that write throws on EACCES/ENOSPC/EROFS (a read-only
+    // `$HOME` or a full disk), not just on a bad network. Caught here rather than left to
+    // propagate: the caller only ever sees "this candidate set produced nothing", not a stack
+    // trace. RESIDUAL, disclosed rather than silently accepted: the document itself is lost in
+    // this branch — it WAS fetched, but a throw during the cache write aborts `getLibraryDoc`
+    // before it returns the content, and recovering that content is `cache.ts`'s job, not this
+    // function's (out of A5's authorised scope — carried forward, see the go-card handoff).
+    let doc: Awaited<ReturnType<typeof getLibraryDoc>>;
+    try {
+      doc = await getLibraryDoc(entry, { forceRefresh: true });
+    } catch (e) {
+      // Not "none of N candidates served a document" (the sibling message below, where all N
+      // really were tried) — `getLibraryDoc` stops at the first candidate that fetched
+      // successfully and aborts on ITS cache write, so fewer than `urls.length` were probed.
+      attempts.push(
+        `${LABEL[eco]} metadata found (${describeMeta(meta)}); the cache write failed while probing its candidates: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      continue;
+    }
     if (!doc) {
       attempts.push(
         `${LABEL[eco]} metadata found (${describeMeta(meta)}); none of ${urls.length} candidate URLs served a document: ${urls.join(", ")}`,
@@ -431,10 +463,31 @@ export async function resolvePackage(
     // deliberately does not index — it would have filed a followed page under the library's
     // name and displaced its primary document.)
     let saveNote: string | undefined;
-    const saved = saveResolvedEntry(entry, (m) => {
-      saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();
-      (opts.warn ?? ((x: string) => process.stderr.write(x)))(m);
-    });
+    let saved: boolean;
+    // A5 (PAR-718): `saveResolvedEntry` throws on EACCES/ENOSPC/EROFS (`resolved-store.ts`'s
+    // own `mkdirSync`/`writeAtomic`) — a read-only `$HOME` or a full disk turned a resolution
+    // that HAD already produced a real document (the fetch and cache-write above succeeded)
+    // into an uncaught exception through `get-docs.ts`. `saved`/`saveNote` are already on
+    // `ResolveOutcome` for exactly this case (the K2 "newer schema on disk" refusal below sets
+    // them via `warn` without throwing); a caught write exception now sets them the same way,
+    // so the caller sees "resolved, not saved, here is why" rather than a stack trace.
+    //
+    // Deliberately broad, not narrowed to the I/O errors above: `saveResolvedEntry` also
+    // throws two invariant errors (`resolved-store.ts:110,112`, "not a resolved entry" / "does
+    // not pass resolved-record validation") that `buildEntry`'s own construction should make
+    // unreachable here. Catching them too means an invariant violation degrades to the same
+    // "not saved" outcome BY DESIGN rather than surfacing as a distinct crash — the same
+    // trade-off this item makes everywhere else, made explicit rather than left implicit.
+    try {
+      saved = saveResolvedEntry(entry, (m) => {
+        saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();
+        (opts.warn ?? ((x: string) => process.stderr.write(x)))(m);
+      });
+    } catch (e) {
+      saved = false;
+      saveNote = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").trim();
+      (opts.warn ?? ((x: string) => process.stderr.write(x)))(`vibectx: resolution not saved for "${entry.name}": ${saveNote}\n`);
+    }
     // …and the index is written only once the RECORD is, in that order. Indexing first filed a
     // posting list under a library name that a refused save leaves no trace of anywhere else —
     // an orphan no later process could ever use, spending the index's size budget (D-40) that a

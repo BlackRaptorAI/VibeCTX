@@ -1,10 +1,11 @@
 import { describe, it, expect, afterEach, beforeAll } from "vitest";
 import { spawn, execFileSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { writeCache } from "../src/cache.js";
 
 // This file is ESM (`package.json`'s `"type": "module"`), so `require` isn't ambient — imported
 // explicitly, only to resolve `typescript/bin/tsc`'s on-disk path for the `beforeAll` build below.
@@ -20,14 +21,27 @@ const require = createRequire(import.meta.url);
  * handshake over stdio — exiting cleanly (code 0, no signal, no stderr) within
  * `EXIT_CEILING_MS` after its stdin is closed.
  *
- * NOT covered here (round-3 review finding): `process.exitCode = cliExit` at index.ts:21-22,
- * the path taken when a subcommand (`doctor`/`resolve`/`warm`/`search`) runs. Neither spawn
- * below passes a subcommand — test 1 spawns `[DIST_INDEX]` (the server path), test 2 spawns
- * `[DIST_INDEX, "--config", badConfig]` (the config-error path) — so index.ts:21-22 never
- * executes in this file. Mutation-tested: changing it to `process.exitCode = 0`, rebuilding,
- * and rerunning this file still leaves both tests green. No other test file covers it either
- * (`test/cli.test.ts` and `test/autowarm.test.ts` call `dispatchCli` in-process, never
- * spawning `dist/index.js`). Left as a genuine, named gap rather than closed here.
+ * PARTIALLY CLOSED (A5, PAR-718): `process.exitCode = cliExit` at index.ts:21-22, the path
+ * taken when a subcommand (`doctor`/`resolve`/`warm`/`search`) runs, was a genuine, named gap
+ * through Phase 2 — neither spawn above passes a subcommand, and `test/cli.test.ts` /
+ * `test/autowarm.test.ts` call `dispatchCli` in-process, never spawning `dist/index.js`. Gate
+ * 3 required the `resolve` and `search` subcommands specifically, against a REAL read-only
+ * cache directory, "so an unhandled rejection cannot hide behind an in-process test" — the
+ * describe block below closes that much (a real spawn, real subcommand args, a real chmod'd
+ * directory) via `search`, the network-free half; `resolve`'s equivalent is proven at the
+ * in-process level instead (`test/cli.test.ts`'s "A5 (PAR-718)" test), because a spawned child
+ * cannot see this file's own `vi.stubGlobal("fetch")` and a real-network spawn test does not
+ * belong in the required CI job — see the round-2 note on the describe block below for the
+ * full reasoning. `doctor` and `warm` still take the untested path (still index.ts:21-22,
+ * still only reachable through this exact wiring) — not required by A5, not claimed here.
+ *
+ * `index.ts:21-22`'s ASSIGNMENT specifically (not just "search runs and prints something"):
+ * a code-0 spawn alone cannot prove `process.exitCode = cliExit` actually carries a NON-zero
+ * code out of a real process — 0 is Node's own default, so a no-op in that line's place would
+ * leave a code-0-only test green too (test-auditor, A5 round 2). The describe block below
+ * therefore pins BOTH a success (0) and a usage-error (2) spawn of the same subcommand, the
+ * second network-free and requiring no seeded cache — a mutant that drops the assignment
+ * turns the second one red without changing the first.
  *
  * What this file does NOT prove, corrected after a round-2 review caught the claim below being
  * false (mutation-tested: deleting index.ts:46 entirely and rebuilding still leaves THIS FILE
@@ -319,6 +333,102 @@ describe("spawn(node, [dist/index.js]) — the real stdio process (A10)", () => 
       expect(lines).toHaveLength(1); // one line, never a stack (index.ts:37-39)
       expect(lines[0]).toContain("does-not-exist.json");
       expect(lines[0]).toContain("not found");
+      expect(stderr).not.toMatch(/\n\s+at\s/); // a Node stack trace's own line shape
+      expect(stderr).not.toContain(".js:"); // no source-location noise from an uncaught throw
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+});
+
+/** Spawn a subcommand and collect stdout/stderr/exit — simpler than `frame()` above, since a
+ *  subcommand run is a plain CLI process, not an MCP session (no handshake, no stdin to end;
+ *  the process exits on its own once the subcommand finishes). */
+function spawnCli(
+  args: string[],
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
+  const child = spawn(process.execPath, [DIST_INDEX, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+  liveChild = child;
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (d: Buffer) => (stdout += d.toString("utf8")));
+  child.stderr.on("data", (d: Buffer) => (stderr += d.toString("utf8")));
+  return new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal, stdout, stderr }));
+  });
+}
+
+/**
+ * A5 (PAR-718) — Gate 3: "vibectx search and vibectx resolve exit ... one line, no stack
+ * trace ... verified through the Phase 1 spawn harness, so an unhandled rejection cannot hide
+ * behind an in-process test." A real spawned process, a real chmod'd read-only directory, not
+ * a mocked failure — closing `index.ts:21-22`'s `process.exitCode = cliExit`, the one path
+ * A10's own header names as untested by any spawn in this file (search, chosen over resolve:
+ * see the round-2 review note below).
+ *
+ * MEASURED (not the plan's original guess): `search` does not reach Gate 3's literal "exit 2"
+ * — `search-index.ts`'s pre-existing `writeIndex` guard catches the disk failure BEFORE it
+ * would reach `runSearchCli`'s own defensive try/catch (added by this item, as belt-and-braces
+ * for any OTHER error class), so the command reports a real outcome (0) instead of falling
+ * back to a generic "something broke, exit 2". Better than the plan anticipated, not a
+ * shortfall: the actual property under test — no crash, no stack trace, one honest line —
+ * holds, and is what this test pins. `resolve`'s equivalent (`resolvePackage`'s own new
+ * guard, also exit 0) is proven in-process against the same kind of real read-only directory
+ * at `test/cli.test.ts`'s "A5 (PAR-718)" test — not here (see below for why).
+ *
+ * ROUND-2 REVIEW NOTE (code-reviewer and test-auditor, independently): this describe block
+ * originally also spawned `resolve` against a real, previously-uncached package, which
+ * genuinely requires real network — `resolvePackage` hardcodes `registry.npmjs.org` with no
+ * injection seam, and a spawned child cannot see the parent test's `vi.stubGlobal("fetch")`.
+ * That test was the only real-network-dependent test in this ~1130-test suite, and both
+ * reviewers were right to flag it: `.github/workflows/ci.yml` runs `npm test` on every PR and
+ * push, `CLAUDE.md` treats any suite deviation as a stop-and-report condition, and a test that
+ * can fail on a bad DNS lookup or a rate limit is not a fair tripwire. REMOVED rather than
+ * gated permanently off behind an env flag that nothing sets by default (CI included) — a
+ * flag nobody flips proves nothing an outright removal doesn't already say honestly, and the
+ * resolve-specific real-directory proof still exists at the in-process level in
+ * `test/cli.test.ts`, just not as a spawned OS process.
+ */
+describe("spawn(node, [dist/index.js, subcommand]) — real read-only cache directory (A5, PAR-718)", () => {
+  it(
+    "search: never throws — answers by tokenizing at query time instead of rebuilding the index (no network)",
+    async () => {
+      const env = sandboxEnv();
+      const HONO_URL = "https://hono.dev/llms.txt";
+      process.env.VIBECTX_CACHE_DIR = cache;
+      try {
+        writeCache("hono", HONO_URL, "# Hono\n\n## Streaming\n\nUse streamSSE to send server-sent events.");
+      } finally {
+        delete process.env.VIBECTX_CACHE_DIR;
+      }
+      const config = join(cwd!, "vibectx.config.json");
+      writeFileSync(config, JSON.stringify({ libraries: [{ name: "hono", urls: [HONO_URL] }] }), "utf8");
+      chmodSync(cache!, 0o500);
+      try {
+        const { code, signal, stdout, stderr } = await spawnCli(["search", "server-sent events", "--config", config], env);
+        expect(signal).toBeNull();
+        expect(code).toBe(0);
+        expect(stdout).toContain("# hono");
+        expect(stderr).toMatch(/search index not written: EACCES/);
+        expect(stdout).not.toMatch(/\n\s+at\s/); // a Node stack trace's own line shape
+        expect(stderr).not.toMatch(/\n\s+at\s/);
+        expect(stderr).not.toContain(".js:"); // no source-location noise from an uncaught throw
+      } finally {
+        chmodSync(cache!, 0o700);
+      }
+    },
+    SPAWN_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    "search: a usage error carries a NON-zero code out of a real process — the other half of proving index.ts:21-22's assignment, not just that 0 is possible (no network, no directory needed)",
+    async () => {
+      const env = sandboxEnv();
+      const { code, signal, stdout, stderr } = await spawnCli(["search", "--json"], env); // no query text: usage error
+      expect(signal).toBeNull();
+      expect(code).toBe(2); // dispatchCli's own documented usage-error code for search (src/cli.ts)
+      expect(stdout).toBe(""); // the usage line is on stderr, not stdout
+      expect(stderr.length).toBeGreaterThan(0);
       expect(stderr).not.toMatch(/\n\s+at\s/); // a Node stack trace's own line shape
       expect(stderr).not.toContain(".js:"); // no source-location noise from an uncaught throw
     },

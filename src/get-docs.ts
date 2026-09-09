@@ -100,7 +100,14 @@ export async function getDocsToolText(
 
 /** R3: one line the agent sees before docs that were resolved on this very call — where
  *  the package came from, its own (untrusted) description, and a nearby curated name
- *  when the request looks like a typo of one. */
+ *  when the request looks like a typo of one.
+ *
+ *  A5 (PAR-718): also the ONLY place `get_docs`'s implicit-resolution path surfaces
+ *  `out.saved === false` (a write failure the process could not avoid — a read-only
+ *  `$HOME` or a full disk — now caught in `resolvePackage` instead of thrown). The
+ *  document is still returned and the call still exits 0: the resolution lives in memory
+ *  for the rest of this process even when `resolved.json` could not be written, so losing
+ *  the save is not losing the answer. */
 function provenanceLine(registry: Registry, requested: string, out: ResolveOutcome): string {
   const label = out.source === "pypi" ? "PyPI" : "npm";
   const facts: string[] = [];
@@ -110,6 +117,7 @@ function provenanceLine(registry: Registry, requested: string, out: ResolveOutco
   if (out.repository) facts.push(`repository github.com/${out.repository.owner}/${out.repository.repo}`);
   const near = nearestLibraryName(registry, requested);
   if (near) facts.push(`nearest curated name: "${near}"`);
+  if (out.saved === false) facts.push(`resolution not saved: ${out.saveNote ?? "resolved.json could not be written"}`);
   return `> Resolved "${requested}" via ${label} on this call — not a curated entry; verify this is the package you meant. ${facts.join(" · ")}`.trimEnd();
 }
 
