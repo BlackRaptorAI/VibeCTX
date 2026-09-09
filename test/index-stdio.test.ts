@@ -15,10 +15,19 @@ const require = createRequire(import.meta.url);
  * and launched exactly as an MCP client launches it — `spawn(node, [dist/index.js])`, real
  * stdin/stdout, no `InMemoryTransport`. `test/server.test.ts` proves the tool set and the
  * autowarm/close wiring against `startServer` directly; this file proves the process wrapped
- * around it: the top-level `await dispatchCli`, `process.exitCode` on a subcommand, the
- * `process.exit(2)` config-error path (index.ts:40), and a real spawned process — real pipes,
- * a real MCP `initialize`/`tools/list` handshake over stdio — exiting cleanly (code 0, no
- * signal, no stderr) within `EXIT_CEILING_MS` after its stdin is closed.
+ * around it: the top-level `await dispatchCli`, the `process.exit(2)` config-error path
+ * (index.ts:40), and a real spawned process — real pipes, a real MCP `initialize`/`tools/list`
+ * handshake over stdio — exiting cleanly (code 0, no signal, no stderr) within
+ * `EXIT_CEILING_MS` after its stdin is closed.
+ *
+ * NOT covered here (round-3 review finding): `process.exitCode = cliExit` at index.ts:21-22,
+ * the path taken when a subcommand (`doctor`/`resolve`/`warm`/`search`) runs. Neither spawn
+ * below passes a subcommand — test 1 spawns `[DIST_INDEX]` (the server path), test 2 spawns
+ * `[DIST_INDEX, "--config", badConfig]` (the config-error path) — so index.ts:21-22 never
+ * executes in this file. Mutation-tested: changing it to `process.exitCode = 0`, rebuilding,
+ * and rerunning this file still leaves both tests green. No other test file covers it either
+ * (`test/cli.test.ts` and `test/autowarm.test.ts` call `dispatchCli` in-process, never
+ * spawning `dist/index.js`). Left as a genuine, named gap rather than closed here.
  *
  * What this file does NOT prove, corrected after a round-2 review caught the claim below being
  * false (mutation-tested: deleting index.ts:46 entirely and rebuilding still leaves this test
@@ -69,10 +78,12 @@ beforeAll(() => {
  *  (index.ts:13 `CLOSE_GRACE_MS = 100`, index.ts:46-49) may take. No autowarm fetch is ever
  *  in flight in these tests (`VIBECTX_NO_AUTOWARM=1`), so the 100 ms grace timer itself is
  *  never armed and a real exit lands in single-digit milliseconds — [MEASURED] 2-6 ms across
- *  30 repeated runs on the machine this was authored on. This ceiling is 3x CLOSE_GRACE_MS
- *  (~75-100x the locally measured value) to absorb OS process-teardown jitter on a loaded CI
- *  box without excusing a real hang; see the assertion's own [MEASURED] print for what
- *  actually happened on this run. */
+ *  30 repeated runs idle on the machine this was authored on. This ceiling is 3x
+ *  CLOSE_GRACE_MS. Round-3 review measured it under load rather than idle: p50 7 ms, p95
+ *  49 ms, max 71 ms under 3x-core CPU oversubscription — a real loaded margin of ~4.2x, not
+ *  the 75-100x an idle-only measurement would suggest. The bound still held (0 of 200 samples
+ *  over ceiling) at that margin; see the assertion's own [MEASURED] print for what actually
+ *  happened on this run. */
 const EXIT_CEILING_MS = 300;
 
 /** Per-test hang-detector budget, not a performance assertion — real hangs stay caught however
@@ -251,8 +262,13 @@ describe("spawn(node, [dist/index.js]) — the real stdio process (A10)", () => 
       // VIBECTX_NO_AUTOWARM=1 (sandboxEnv, above) nothing holds the event loop open, so an
       // ordinary event-loop drain would produce this same clean exit even without that handler
       // — see the file header for the full mutation-testing finding behind this note.
+      //
+      // Waits on "close", not "exit": "exit" can fire before stdio streams are fully flushed,
+      // so a truncated stderr read could silently satisfy the `toBe("")` assertion below.
+      // "close" fires only after all stdio streams have ended, so `io.stderr()` here reflects
+      // everything the child actually wrote.
       const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
-        child.once("exit", (code, signal) => resolve({ code, signal }));
+        child.once("close", (code, signal) => resolve({ code, signal }));
       });
       const closeStart = Date.now();
       child.stdin.end();
