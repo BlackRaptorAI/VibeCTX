@@ -6,6 +6,7 @@ import {
   registrableDomain,
   derivedAllowedHosts,
   sanitizeRemoteUrl,
+  validateLibraryUrl,
 } from "../src/link-policy.js";
 
 const source = "https://docs.example.com/llms.txt";
@@ -159,6 +160,48 @@ describe("normaliseAllowedHost (config / persisted validation)", () => {
   it("rejects a hostname over 253 characters", () => {
     const long = `${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.example.com`;
     expect(() => normaliseAllowedHost(long)).toThrow(/allowedHosts/);
+  });
+});
+
+describe("validateLibraryUrl (A1, PAR-714; D-47, D-49): config `urls`, not just https", () => {
+  it("accepts a well-formed public https URL", () => {
+    expect(() => validateLibraryUrl("https://docs.example.com/llms.txt")).not.toThrow();
+  });
+
+  it.each([
+    ["not a string", 42],
+    ["an empty string", ""],
+    ["whitespace only", "   "],
+    ["unparseable", "not a url"],
+    ["http, not https", "http://docs.example.com/x"],
+    ["ftp", "ftp://docs.example.com/x"],
+    ["userinfo", "https://user:pw@docs.example.com/x"],
+    ["a loopback address", "https://127.0.0.1/x"],
+    ["an IPv4 literal", "https://10.0.0.1/x"],
+    ["an IPv6 literal", "https://[::1]/x"],
+    ["localhost", "https://localhost/x"],
+    ["localhost with a port", "https://localhost:8443/x"],
+    ["a .local host", "https://printer.local/x"],
+    ["a .internal host", "https://vault.internal/x"],
+    ["a single-label host", "https://intranet/x"],
+  ])("rejects %s", (_label, value) => {
+    expect(() => validateLibraryUrl(value)).toThrow(/^urls:/);
+  });
+
+  it("allowInternalHosts:true permits the same forbidden hosts, but not http or userinfo", () => {
+    for (const url of ["https://127.0.0.1/x", "https://169.254.169.254/x", "https://localhost:8443/x", "https://intranet/x"]) {
+      expect(() => validateLibraryUrl(url, { allowInternalHosts: true }), url).not.toThrow();
+    }
+    expect(() => validateLibraryUrl("http://169.254.169.254/x", { allowInternalHosts: true })).toThrow(/must use https:/);
+    expect(() => validateLibraryUrl("https://user:pw@169.254.169.254/x", { allowInternalHosts: true })).toThrow(/must not include userinfo/);
+  });
+
+  it("allowInternalHosts:false behaves exactly like omitting it", () => {
+    expect(() => validateLibraryUrl("https://127.0.0.1/x", { allowInternalHosts: false })).toThrow(/is a private, loopback or non-routable host/);
+  });
+
+  it("names the offending value in the message, clipped to nothing here (short values pass through)", () => {
+    expect(() => validateLibraryUrl("https://127.0.0.1/x")).toThrow('urls: "https://127.0.0.1/x" is a private, loopback or non-routable host');
   });
 });
 

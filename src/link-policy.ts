@@ -7,6 +7,10 @@
  * Content-derived URLs (index links, redirect targets, package-registry metadata)
  * are untrusted input. Without this, a compromised docs page or a malicious package
  * could steer fetches at internal endpoints.
+ *
+ * This file is also the sole owner of the URL trust decision for a config-authored
+ * library entry's `urls` (D-49): `config.ts` calls `validateLibraryUrl` rather than
+ * re-implementing any part of the host check. Records D-47 / D-49.
  */
 
 export interface LinkPolicy {
@@ -74,6 +78,32 @@ export function normaliseAllowedHost(raw: unknown): string {
   for (const label of labels) if (!LABEL_RE.test(label)) return fail("is not a valid hostname");
   if (isForbiddenHost(host)) return fail("is a private, loopback or non-routable host");
   return wildcard ? `*.${host}` : host;
+}
+
+/**
+ * Validate one library `urls` entry (D-47, D-49): must be a non-empty string that parses
+ * as `https:`, carries no userinfo, and whose host `isForbiddenHost` does not name — unless
+ * the config author set `allowInternalHosts` on that entry, the explicit per-entry opt-in
+ * for the air-gapped / internal-docs case the README markets. This is the sole gate between
+ * a committed `vibectx.config.json` and the fetch `startAutowarm` makes at server startup
+ * with no user action. Throws with a message that starts with `urls:` so config errors read
+ * naturally; returns nothing on success.
+ */
+export function validateLibraryUrl(raw: unknown, opts?: { allowInternalHosts?: boolean }): void {
+  const shown = typeof raw === "string" ? raw : JSON.stringify(raw);
+  const fail = (why: string): never => {
+    throw new Error(`urls: "${shown}" ${why}`);
+  };
+  if (typeof raw !== "string" || raw.trim().length === 0) return fail("must be a non-empty string");
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return fail("must be a valid URL");
+  }
+  if (url.protocol !== "https:") return fail("must use https:");
+  if (url.username !== "" || url.password !== "") return fail("must not include userinfo");
+  if (!opts?.allowInternalHosts && isForbiddenHost(url.hostname)) return fail("is a private, loopback or non-routable host");
 }
 
 /** `pattern` is a value `normaliseAllowedHost` returned; `host` is a lowercase hostname. */

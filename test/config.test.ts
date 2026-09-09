@@ -384,10 +384,12 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
     );
     expect(bad({ libraries: [{ name: "a" }] })).toThrow(/libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs/);
     expect(bad({ libraries: [{ name: "a", urls: ["http://a.example.com/x"] }] })).toThrow(
-      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs/,
+      /libraries\[0\]\.urls \("a"\): "http:\/\/a\.example\.com\/x" must use https:/,
     );
     expect(
-      bad({ libraries: [{ name: "a", urls: ["https://a.example.com/x"] }, { name: "b", urls: ["https://b/x"] }, { name: "c", urls: "nope" }] }),
+      bad({
+        libraries: [{ name: "a", urls: ["https://a.example.com/x"] }, { name: "b", urls: ["https://b.example.com/x"] }, { name: "c", urls: "nope" }],
+      }),
     ).toThrow(/libraries\[2\]\.urls \("c"\): must be a non-empty array of https URLs/);
   });
 
@@ -490,6 +492,93 @@ describe("readConfigFile: zod validation, one line per failure (D-17)", () => {
   it("validates docs/examples/paragon.vibectx.config.json against the new schema", () => {
     const example = fileURLToPath(new URL("../docs/examples/paragon.vibectx.config.json", import.meta.url));
     expect(readConfigFile(example).libraries.length).toBeGreaterThan(0);
+  });
+});
+
+describe("A1 (PAR-714): a library `urls` entry must clear the host policy, not just https (D-47, D-49)", () => {
+  const bad = (body: unknown): (() => unknown) => {
+    const path = write(repo, CONFIG_FILENAME, typeof body === "string" ? body : JSON.stringify(body));
+    return () => readConfigFile(path);
+  };
+
+  // The exact shapes Gate 2 (VibeCTX-020-phased-build-plan.md) names: a loopback address, an
+  // IPv4 literal, an IPv6 literal, a `.local` host, a `.internal` host, a single-label host,
+  // and `localhost:8443`. Mirrors the existing `allowedHosts` case at test/registry.test.ts:517,
+  // which proves the same grammar for the sibling field.
+  const FORBIDDEN_URLS: [label: string, url: string][] = [
+    ["a loopback address", "https://127.0.0.1/latest/meta-data"],
+    ["an IPv4 literal", "https://169.254.169.254/latest/meta-data/iam/security-credentials/"],
+    ["an IPv6 literal", "https://[::1]/latest/meta-data"],
+    [".local host", "https://printer.local/latest/meta-data"],
+    [".internal host", "https://vault.internal/latest/meta-data"],
+    ["a single-label host", "https://intranet/latest/meta-data"],
+    ["localhost with a non-default port", "https://localhost:8443/latest/meta-data"],
+  ];
+
+  it.each(FORBIDDEN_URLS)("rejects %s in `urls`, D-22 grammar, naming the value", (_label, url) => {
+    const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    expect(bad({ libraries: [{ name: "internal-docs", urls: [url] }] })).toThrow(
+      new RegExp(`^.*vibectx\\.config\\.json: libraries\\[0\\]\\.urls \\("internal-docs"\\): "${escaped}" is a private, loopback or non-routable host$`),
+    );
+  });
+
+  it("the exploit's own example — a committed config naming the cloud metadata endpoint — is rejected the same way", () => {
+    // Verbatim from VibeCTX-audit-2026-09-08.md §4.1: the exact JSON a compromised or careless
+    // `vibectx.config.json` would commit, and the exact host the exploit reaches for.
+    expect(
+      bad({
+        libraries: [{ name: "internal-docs", urls: ["https://169.254.169.254/latest/meta-data/iam/security-credentials/"] }],
+      }),
+    ).toThrow(/libraries\[0\]\.urls \("internal-docs"\): "https:\/\/169\.254\.169\.254\/.*" is a private, loopback or non-routable host/);
+  });
+
+  it("D-47: the SAME entry with allowInternalHosts: true loads (the opt-in is per-entry, author-written, default false)", () => {
+    const path = write(
+      repo,
+      CONFIG_FILENAME,
+      JSON.stringify({
+        libraries: [{ name: "internal-docs", urls: ["https://169.254.169.254/latest/meta-data/iam/security-credentials/"], allowInternalHosts: true }],
+      }),
+    );
+    const { libraries } = readConfigFile(path);
+    expect(libraries).toHaveLength(1);
+    expect(libraries[0].name).toBe("internal-docs");
+    expect(libraries[0].urls).toEqual(["https://169.254.169.254/latest/meta-data/iam/security-credentials/"]);
+  });
+
+  it("allowInternalHosts does not blanket-exempt the entry from the https-only and no-userinfo rules", () => {
+    expect(bad({ libraries: [{ name: "a", urls: ["http://169.254.169.254/x"], allowInternalHosts: true }] })).toThrow(
+      /libraries\[0\]\.urls \("a"\): "http:\/\/169\.254\.169\.254\/x" must use https:/,
+    );
+    expect(bad({ libraries: [{ name: "a", urls: ["https://user:pw@169.254.169.254/x"], allowInternalHosts: true }] })).toThrow(
+      /libraries\[0\]\.urls \("a"\): "https:\/\/user:pw@169\.254\.169\.254\/x" must not include userinfo/,
+    );
+  });
+
+  it("allowInternalHosts defaults to false: omitting it on an internal-host entry still rejects", () => {
+    expect(bad({ libraries: [{ name: "a", urls: ["https://169.254.169.254/x"] }] })).toThrow(
+      /libraries\[0\]\.urls \("a"\): "https:\/\/169\.254\.169\.254\/x" is a private, loopback or non-routable host/,
+    );
+    expect(bad({ libraries: [{ name: "a", urls: ["https://169.254.169.254/x"], allowInternalHosts: false }] })).toThrow(
+      /libraries\[0\]\.urls \("a"\): "https:\/\/169\.254\.169\.254\/x" is a private, loopback or non-routable host/,
+    );
+  });
+
+  it("rejects a non-boolean allowInternalHosts with the D-22 grammar", () => {
+    expect(bad({ libraries: [{ name: "a", urls: ["https://a.example.com/x"], allowInternalHosts: "yes" }] })).toThrow(
+      /libraries\[0\]\.allowInternalHosts \("a"\): must be a boolean/,
+    );
+  });
+
+  it("a legitimate public host is unaffected", () => {
+    const path = write(repo, CONFIG_FILENAME, CONFIG("acme", "https://docs.acme.com/llms.txt"));
+    expect(readConfigFile(path).libraries[0].urls).toEqual(["https://docs.acme.com/llms.txt"]);
+  });
+
+  it("only the first bad url in a multi-url entry is named (D-17: one line per failure)", () => {
+    expect(
+      bad({ libraries: [{ name: "a", urls: ["https://docs.acme.com/llms.txt", "https://127.0.0.1/x", "https://10.0.0.1/x"] }] }),
+    ).toThrow(/libraries\[0\]\.urls \("a"\): "https:\/\/127\.0\.0\.1\/x" is a private, loopback or non-routable host/);
   });
 });
 

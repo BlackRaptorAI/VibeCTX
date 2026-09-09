@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { readCache, writeCache } from "../src/cache.js";
-import type { Registry } from "../src/registry.js";
+import { DEFAULT_REGISTRY, loadDiscoveredRegistry, type Registry } from "../src/registry.js";
 import {
   AUTOWARM_CONCURRENCY,
   AUTOWARM_OPT_OUT_ENV,
@@ -284,5 +286,92 @@ describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
     expect(summary.cached).toBe(1);
     expect(summary.failed).toEqual([]);
     expect(notes.join("")).toMatch(/search index not written|ENOTDIR/);
+  });
+});
+
+/**
+ * A1 (PAR-714) enforcement liveness. VibeCTX-audit-2026-09-08.md §4.1: a `vibectx.config.json`
+ * COMMITTED TO THE REPO and auto-discovered (no `--config` flag — exactly what `startAutowarm`
+ * (server.ts:195) fetches at server startup with no user action) names an internal endpoint;
+ * this proves the fix holds on THAT path, not only on a direct `readConfigFile` call. Follows
+ * the "prove absence of request" pattern at test/fetcher.test.ts:425-562: a real `http.Server`
+ * on 127.0.0.1 stands in for the internal target, and `listenerHits` must stay empty.
+ */
+describe("enforcement liveness (A1, PAR-714): a committed config's forbidden urls entry never reaches startAutowarm's fetch", () => {
+  let repo: string;
+  let home: string;
+  let server: Server;
+  let listenerHits: string[];
+  let port: number;
+
+  beforeEach(async () => {
+    repo = mkdtempSync(join(tmpdir(), "vibectx-enforce-repo-"));
+    home = mkdtempSync(join(tmpdir(), "vibectx-enforce-home-"));
+    mkdirSync(join(repo, ".git")); // an ordinary clone — project-scope config discovery applies
+    listenerHits = [];
+    server = createServer((req, res) => {
+      listenerHits.push(`${req.method} ${req.url}`);
+      res.end("SECRET");
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    port = (server.address() as AddressInfo).port;
+    // Every DEFAULT_REGISTRY entry pre-warmed and fresh, so startAutowarm below has nothing
+    // legitimate left to fetch either — this test is entirely about the config-contributed
+    // entry, not the 30 real-network defaults (out of scope here; covered elsewhere).
+    for (const e of DEFAULT_REGISTRY) writeCache(e.name, e.urls[0], "# cached");
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((r) => server.close(() => r()));
+    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("the entry is rejected at discovery (never enters the registry) and startAutowarm makes zero requests", async () => {
+    const target = `https://127.0.0.1:${port}/latest/meta-data/iam/security-credentials/`;
+    writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target] }] }), "utf8");
+
+    // The exact call index.ts makes before starting the server (no --config flag: discovery
+    // finds the committed project file on its own, as the exploit relies on).
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {} });
+
+    expect(registry.entries.has("internal-docs")).toBe(false);
+    expect(registry.config?.files).toHaveLength(1);
+    expect(registry.config?.files[0].error).toMatch(
+      /^libraries\[0\]\.urls \("internal-docs"\): "https:\/\/127\.0\.0\.1:\d+\/latest\/meta-data\/iam\/security-credentials\/" is a private, loopback or non-routable host$/,
+    );
+
+    // The exact call server.ts:195 makes next, on this exact registry, with the REAL fetch
+    // path (no fetchDoc stub) — if enforcement ever regressed to a config-load-only check that
+    // some other path bypassed, this is where it would show up as a real request.
+    const summary = await startAutowarm(registry, { warn: () => {} });
+
+    expect(summary.attempted).toBe(0);
+    expect(listenerHits).toEqual([]);
+  });
+
+  it("D-47: the same entry with allowInternalHosts:true is admitted, and IS the one startAutowarm schedules for fetch", async () => {
+    const target = `https://127.0.0.1:${port}/docs.txt`;
+    writeFileSync(
+      join(repo, "vibectx.config.json"),
+      JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target], allowInternalHosts: true }] }),
+      "utf8",
+    );
+
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {} });
+    expect(registry.entries.has("internal-docs")).toBe(true);
+    expect(registry.config?.files[0].error).toBeUndefined();
+
+    // fetchDoc stubbed here (not the real network): the real TLS handshake against a plain
+    // http.Server is a separate concern from A1, which is about ADMISSION into the registry —
+    // that admission is what this asserts, via the exact entry startAutowarm hands to fetchDoc.
+    const fetchDoc = vi.fn(async (entry: { name: string; urls: string[] }) => ({ content: "# docs", url: entry.urls[0] }));
+    const summary = await startAutowarm(registry, { warn: () => {}, fetchDoc });
+
+    expect(summary.attempted).toBe(1);
+    expect(summary.cached).toBe(1);
+    expect(fetchDoc).toHaveBeenCalledTimes(1);
+    expect(fetchDoc.mock.calls[0][0]).toMatchObject({ name: "internal-docs", urls: [target] });
+    expect(listenerHits).toEqual([]); // fetchDoc stubbed: the listener is untouched either way
   });
 });

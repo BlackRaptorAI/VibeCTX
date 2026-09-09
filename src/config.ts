@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { cleanText } from "./project-deps.js";
+import { validateLibraryUrl } from "./link-policy.js";
 import type { LibraryEntry } from "./registry.js";
 
 /**
@@ -323,34 +324,54 @@ const TTL_MESSAGE = "must be a number of hours, 0 or greater (0 = always revalid
 
 const isNonEmptyString = (v: unknown): boolean => typeof v === "string" && v.trim().length > 0;
 const isStringList = (v: unknown): boolean => Array.isArray(v) && v.every(isNonEmptyString);
-const isHttpsUrl = (v: unknown): boolean => {
-  if (typeof v !== "string") return false;
-  try {
-    return new URL(v).protocol === "https:";
-  } catch {
-    return false;
-  }
-};
+
+/** `err` is what `validateLibraryUrl` threw for `raw`; strips its self-describing `urls:
+ *  "<value>" ` prefix so the D-22 locator (which already names the field and the value) is
+ *  not printed twice — the same idiom `registry.ts`'s `whyHostRefused` uses for `allowedHosts`. */
+function whyUrlRefused(err: unknown, raw: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const shown = typeof raw === "string" ? raw : JSON.stringify(raw);
+  const prefix = `urls: "${shown}" `;
+  return message.startsWith(prefix) ? message.slice(prefix.length) : message;
+}
 
 /** Unknown ENTRY keys are stripped, not rejected (forward-compatible): a config written for a
  *  later version still loads here. `resolved` goes with them — only the resolver may set it. */
-const EntrySchema = z.object({
-  name: z.custom<string>(isNonEmptyString, "must be a non-empty string"),
-  urls: z.custom<string[]>((v) => Array.isArray(v) && v.length > 0 && v.every(isHttpsUrl), URLS_MESSAGE),
-  aliases: z.custom<string[]>(isStringList, STRINGS_MESSAGE).optional(),
-  probeQueries: z.custom<string[]>(isStringList, STRINGS_MESSAGE).optional(),
-  allowedHosts: z
-    .custom<string[]>((v) => Array.isArray(v) && v.every((h) => typeof h === "string"), "must be an array of hostnames")
-    .optional(),
-  description: z.string({ invalid_type_error: "must be a string" }).optional(),
-  // D-21: 0 is a real setting — "always revalidate", which is what a 0.1.3 config meant by it
-  // and what cache.ts still does with it. Only a negative or non-finite value is a mistake.
-  ttlHours: z
-    .number({ invalid_type_error: TTL_MESSAGE, required_error: TTL_MESSAGE })
-    .finite(TTL_MESSAGE)
-    .min(0, TTL_MESSAGE)
-    .optional(),
-});
+const EntrySchema = z
+  .object({
+    name: z.custom<string>(isNonEmptyString, "must be a non-empty string"),
+    // Shape only here (non-empty array of non-empty strings): the URL trust decision itself
+    // — https-only, no userinfo, host not forbidden — is D-49's `validateLibraryUrl`, applied
+    // per-entry below so it can see `allowInternalHosts`. Never re-implement a subset of it here.
+    urls: z.custom<string[]>((v) => Array.isArray(v) && v.length > 0 && v.every(isNonEmptyString), URLS_MESSAGE),
+    aliases: z.custom<string[]>(isStringList, STRINGS_MESSAGE).optional(),
+    probeQueries: z.custom<string[]>(isStringList, STRINGS_MESSAGE).optional(),
+    allowedHosts: z
+      .custom<string[]>((v) => Array.isArray(v) && v.every((h) => typeof h === "string"), "must be an array of hostnames")
+      .optional(),
+    description: z.string({ invalid_type_error: "must be a string" }).optional(),
+    // D-21: 0 is a real setting — "always revalidate", which is what a 0.1.3 config meant by it
+    // and what cache.ts still does with it. Only a negative or non-finite value is a mistake.
+    ttlHours: z
+      .number({ invalid_type_error: TTL_MESSAGE, required_error: TTL_MESSAGE })
+      .finite(TTL_MESSAGE)
+      .min(0, TTL_MESSAGE)
+      .optional(),
+    // D-47: internal/loopback/non-routable hosts are reachable only through this explicit,
+    // per-entry, author-written opt-in — never the default. Ref: A1 / PAR-714.
+    allowInternalHosts: z.boolean({ invalid_type_error: "must be a boolean" }).optional(),
+  })
+  .superRefine((entry, ctx) => {
+    entry.urls.forEach((raw, i) => {
+      try {
+        validateLibraryUrl(raw, { allowInternalHosts: entry.allowInternalHosts });
+      } catch (err) {
+        const why = whyUrlRefused(err, raw);
+        const shown = clipText(raw, MAX_CONFIG_VALUE_CHARS);
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["urls", i], message: `"${shown}" ${why}` });
+      }
+    });
+  });
 
 /** Unknown TOP-LEVEL keys (`$comment`, `$schema`) are ignored the same way. D-21: `libraries`
  *  itself is OPTIONAL — `{}` (and an explicit `null`) load as "no entries", which is how a
