@@ -19,7 +19,12 @@ describe("createSlidingWindowLimiter", () => {
     expect(limiter.take(now)).toBe(false); // the 4th, same instant, is refused
   });
 
-  it("a refused take() leaves state untouched — the window does not grow past maxPerWindow", () => {
+  it("a refused take() stays refused on repeated calls at the same instant — no miscount from being asked again", () => {
+    // Round 2 (test-auditor, F2a): this alone cannot prove a refused take() records NOTHING —
+    // any extra entry it pushed would share this instant's timestamp and expire together with
+    // the genuine ones regardless, so no time-based test can distinguish the two from here.
+    // The actual "state left untouched" property is what the partial-slide test below proves:
+    // if a refusal recorded a start, the freed-slot count after a partial expiry would be wrong.
     const limiter = createSlidingWindowLimiter(2);
     const now = 1_000_000;
     expect(limiter.take(now)).toBe(true);

@@ -449,6 +449,32 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
     expect(readCache("hono", "https://hono.dev/llms.txt", 168)?.content).toBe("# Hono");
   });
 
+  /**
+   * Round 3 (test-auditor, F8) — a CHARACTERIZATION test, not a proof of correctness: pins
+   * TODAY's disclosed, known-destructive behaviour so the future item that makes `libDirIn`'s
+   * mapping injective has a tripwire showing exactly what changes. `libDirIn`'s regex folds any
+   * character outside `[a-z0-9_-]` to `_`, so two DISTINCT, independently valid npm names —
+   * `foo.bar` and `foo_bar` — share one cache directory. The C2/SF-C provenance checks above
+   * CANNOT catch this: the deleted pair genuinely is one vibectx wrote, just for the sibling
+   * library sharing the folded name. See `dropFollowedPageCache`'s own doc comment.
+   */
+  it("CHARACTERIZATION (disclosed, not fixed here): two library names that fold to the same directory collide — refreshing one deletes the other's cached primary", () => {
+    const fooBarPrimary = "https://foo-bar.example.com/dot/llms.txt";
+    const fooUnderscoreBarPrimary = "https://foo-bar.example.com/underscore/llms.txt";
+    writeCache("foo.bar", fooBarPrimary, "# foo.bar's own primary");
+    writeCache("foo_bar", fooUnderscoreBarPrimary, "# foo_bar's own primary"); // libDirIn folds "." and "_" alike: same directory as "foo.bar"
+
+    // "foo.bar" refreshes: its own drop call only keeps ITS OWN new candidate URL.
+    const fooBarNewUrl = "https://foo-bar.example.com/dot/llms-full.txt";
+    dropFollowedPageCache("foo.bar", [fooBarNewUrl]);
+
+    // TODAY's behaviour: "foo_bar"'s cache, sharing the SAME directory, is gone — even though
+    // "foo_bar" was never refreshed and its own candidate URL was never offered to keepUrls.
+    // Not a C2/SF-C bypass: the deleted pair genuinely is one vibectx wrote (for "foo_bar"),
+    // which is exactly why those provenance checks cannot help here.
+    expect(readCache("foo_bar", fooUnderscoreBarPrimary, 168)).toBeUndefined();
+  });
+
   it("never follows or removes a symlinked file inside a real library directory", () => {
     const outside = mkdtempSync(join(tmpdir(), "docs-cache-outside-"));
     try {
@@ -535,6 +561,29 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
 
       expect(existsSync(join(dir, "react", ".md"))).toBe(true);
       expect(existsSync(join(dir, "react", ".meta.json"))).toBe(true);
+    });
+
+    it("round 4 (code-reviewer, SF-C; security-architect, N1): a foreign pair with a NON-EMPTY, name-shaped slug whose meta names a DIFFERENT URL is never deleted", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      // A pair this tool did not write, named plausibly (not the empty-slug case above) but
+      // whose .meta.json's own `url` field does not map back to this filename via urlSlug —
+      // proof this file was not produced by writeCache for the URL it claims to describe.
+      writeFileSync(join(dir, "react", "my-notes.md"), "not vibectx's, foreign slug", "utf8");
+      writeFileSync(join(dir, "react", "my-notes.meta.json"), JSON.stringify({ url: "https://example.com/totally-different", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", "my-notes.md"))).toBe(true);
+      expect(existsSync(join(dir, "react", "my-notes.meta.json"))).toBe(true);
+    });
+
+    it("round 4: dropFollowedPageCache(\"\", ...) is a no-op — an empty library never collapses the scan to the cache root", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeCache("react", "https://react.dev/streaming.md", "# Streaming");
+
+      dropFollowedPageCache("", ["https://react.dev/llms.txt"]);
+
+      expect(readCache("react", "https://react.dev/streaming.md", 168)?.content).toBe("# Streaming");
     });
 
     it("C3: a successful drop reports the count once, through the injected warn", () => {

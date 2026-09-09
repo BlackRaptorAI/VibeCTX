@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
@@ -498,32 +498,43 @@ export function writeCache(
  *
  * Below the root, symlinked or non-regular entries are left alone, never followed or removed.
  * A candidate must be a REAL file whose name is one of this library's own `<slug>.md` /
- * `<slug>.meta.json` pairs (a non-empty slug — round 3, code-reviewer, SF-A: `urlSlug` can
- * never return `""` for a non-empty URL, so an empty-slug pair is provably not one this tool
- * wrote, and was deletable before this guard), its slug not one of `keepUrls`', AND (round 2,
- * security-architect, C2) its `.meta.json` half must exist, be no larger than
- * `MAX_META_FILE_BYTES` (R3 — the same `Stats` the existence check already paid for), and pass
- * the SAME validation `readCache` requires (`readCacheMeta`/`toCacheMeta`, A4's four corruption
- * classes) — a lone `.md`, a lone `.meta.json`, an oversized one, or one this process cannot
- * trust is left in place for eviction, rather than unlinked on name shape alone (the temp sweep
- * does NOT apply here: `TEMP_FILE_PATTERN` matches neither suffix). This bounds a
- * `VIBECTX_CACHE_DIR` aimed at a real directory this tool does not otherwise own: only files
- * that already look like ones this tool itself wrote are deleted.
+ * `<slug>.meta.json` pairs, its slug not one of `keepUrls`', AND (round 2, security-architect,
+ * C2) its `.meta.json` half must exist, be no larger than `MAX_META_FILE_BYTES` (R3 — the same
+ * `Stats` the existence check already paid for), pass the SAME validation `readCache` requires
+ * (`readCacheMeta`/`toCacheMeta`, A4's four corruption classes), AND (round 4, code-reviewer,
+ * SF-C — closing security-architect's N1 in full, not just its empty-slug instance) have a
+ * `url` field that `urlSlug` maps back to the SAME slug the filename carries — the actual
+ * proof that this is the file `writeCache` produced for that URL, not merely A file that
+ * happens to sit under a name shaped like one. A lone `.md`, a lone `.meta.json`, an oversized
+ * one, one this process cannot trust, or one whose meta names a different URL entirely is left
+ * in place for eviction, rather than unlinked on name shape alone (the temp sweep does NOT
+ * apply here: `TEMP_FILE_PATTERN` matches neither suffix). This bounds a `VIBECTX_CACHE_DIR`
+ * aimed at a real directory this tool does not otherwise own: only files this tool itself
+ * wrote — proven, not merely name-shaped — are deleted. `library` itself is also refused when
+ * empty, above, since `libDirIn(root, "")` would otherwise collapse the scan to `root` itself.
  *
  * NOT INJECTIVE, disclosed rather than fixed here (round 2, security-architect, second-order
- * note): `libDirIn`'s `library → directory` mapping folds distinct valid names that differ
- * only in a character this regex maps to `_` (e.g. an npm name `foo.bar` and `foo_bar`) onto
- * the SAME directory. Before this function existed that sharing was benign (distinct URL
- * slugs, distinct files); now, refreshing one such library can delete the other's cached
- * primary, because the other's candidate URLs are not in `keepUrls`. Pre-existing in `libDir`,
- * newly destructive because of this function — a follow-up item should make the mapping
- * injective (append a short hash of the raw name) rather than papering over it here.
+ * note; round 3, test-auditor, characterization test added — see `test/cache.test.ts`):
+ * `libDirIn`'s `library → directory` mapping folds distinct valid names that differ only in a
+ * character this regex maps to `_` (e.g. an npm name `foo.bar` and `foo_bar`) onto the SAME
+ * directory. Before this function existed that sharing was benign (distinct URL slugs, distinct
+ * files); now, refreshing one such library can delete the other's cached primary, because the
+ * other's candidate URLs are not in `keepUrls` — and the SF-C proof above cannot help here,
+ * because the deleted pair genuinely IS one this tool wrote, just for the OTHER library sharing
+ * the directory. Pre-existing in `libDir`, newly destructive because of this function — a
+ * follow-up item should make the mapping injective (append a short hash of the raw name) rather
+ * than papering over it here.
  */
 export function dropFollowedPageCache(
   library: string,
   keepUrls: readonly string[],
   warn: (message: string) => void = toStderr,
 ): void {
+  // Round 3 (security-architect, N1): an empty `library` collapses `libDirIn(root, "")` to
+  // `root` itself (`path.join` drops a zero-length segment) — unreachable from this item's own
+  // callers (`refresh.ts` always passes a Registry-resolved, non-empty `entry.name`), but this
+  // function is exported and guards neither end of its own contract otherwise. Refused here.
+  if (library.length === 0) return;
   const root = cacheRoot();
   if (!isRealDirectory(root)) return; // D-46 / C1: prove the ROOT — and use THIS value, not a second cacheRoot() call — before anything below can delete through it
   const dir = libDirIn(root, library);
@@ -545,13 +556,13 @@ export function dropFollowedPageCache(
     // Round 3 (code-reviewer, SF-A, MEASURED): `urlSlug` can never return "" for a non-empty
     // URL (its own `.replace` leaves at least one character per non-empty input), so a literal
     // `.md` / `.meta.json` pair — empty slug — cannot be a file THIS tool wrote under any URL.
-    // Without this guard a foreign pair with that exact name and any parseable `CacheMeta`
-    // inside its `.meta.json` passed every check below and was deleted, contradicting this
-    // function's own claim that only files that already look like vibectx's own are touched.
+    // Cheap early exit before the lstat calls below; SUPERSEDED as the security boundary by the
+    // `urlSlug(meta.url) === slug` check further down (round 4, code-reviewer, SF-C), which
+    // subsumes this case along with every other malformed slug — kept only as an optimisation.
     if (slug.length === 0 || keep.has(slug)) continue;
     const contentPath = join(dir, `${slug}.md`);
     const metaPath = join(dir, `${slug}.meta.json`);
-    let metaStat;
+    let metaStat: Stats;
     try {
       // C2: a candidate must be a REAL file with a META that PARSES — never a lone half of
       // the pair, and never one unlinked on name shape alone.
@@ -567,7 +578,19 @@ export function dropFollowedPageCache(
     // is either not this tool's or already unparseable; skip the read+parse either way rather
     // than paying for a `JSON.parse` a directory of many planted files could otherwise force.
     if (metaStat.size > MAX_META_FILE_BYTES) continue;
-    if (readCacheMeta(metaPath) === undefined) continue; // C2: unproven — leave it for eviction
+    const meta = readCacheMeta(metaPath);
+    if (meta === undefined) continue; // C2: unproven — leave it for eviction
+    // Round 4 (code-reviewer, SF-C; closes security-architect's N1 in full, not just the
+    // empty-slug instance): a real, parseable pair is STILL not proof this tool wrote it under
+    // THIS name — nothing before this line checks that the meta's own `url` is the one that
+    // produced `slug`. A directory entry named, say, `my-notes.md` / `my-notes.meta.json`
+    // carrying any OTHER valid `CacheMeta` passed every check above and was deleted. `urlSlug`
+    // is the same function `writeCache` used to NAME the file in the first place, so requiring
+    // `urlSlug(meta.url) === slug` is not a new rule — it is the one this function already
+    // claimed to enforce, actually checked. Validated safe for every legitimate pair (including
+    // one whose URL is long enough to hit `urlSlug`'s 120-char truncation): `urlSlug` is a pure
+    // function of the URL alone, so a slug `writeCache` produced from a URL always round-trips.
+    if (urlSlug(meta.url) !== slug) continue;
     try {
       rmSync(contentPath, { force: true });
       rmSync(metaPath, { force: true });

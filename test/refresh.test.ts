@@ -308,14 +308,15 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     it("characterization (disclosed, not a bug): a 304 revalidation — byte-identical content — still drops the followed-page cache", async () => {
       writeCache("react", REACT_URL, "# React", '"etag-1"');
       writeCache("react", FOLLOWED_URL, "# Streaming");
-      const fetchSpy = vi.fn(async (_url: unknown, init: any) => {
-        expect(init.headers["if-none-match"]).toBe('"etag-1"');
-        return new Response(null, { status: 304 });
-      });
+      // Round 2 (test-auditor, F6a): the header check moved OUTSIDE the mock — fetchUrl wraps
+      // its fetch call in try/catch, so an assertion thrown INSIDE the mock degrades to a
+      // network "miss" rather than a clean test failure, and surfaces confusingly elsewhere.
+      const fetchSpy = vi.fn(async () => new Response(null, { status: 304 }));
       vi.stubGlobal("fetch", fetchSpy);
 
       const out = await refreshToolText(registry, "reactjs");
 
+      expect(fetchSpy.mock.calls[0][1]?.headers?.["if-none-match"]).toBe('"etag-1"'); // genuinely revalidated, not a cold fetch
       expect(out).toBe(`react: refreshed from ${REACT_URL} (7 chars)`); // "# React" — unchanged
       expect(readCache("react", REACT_URL, 168)?.content).toBe("# React"); // byte-identical to before
       // TODAY's behaviour, disclosed as a cost rather than fixed: the followed page is dropped
