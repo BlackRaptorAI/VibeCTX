@@ -12,6 +12,7 @@ import {
   discoverConfig,
   readConfigFile,
 } from "../src/config.js";
+import { loadDiscoveredRegistry } from "../src/registry.js";
 
 /**
  * PAR-657 — config discovery. Every case injects cwd / env / home: nothing here may
@@ -586,6 +587,25 @@ describe("A1 (PAR-714): a library `urls` entry must clear the host policy, not j
       expect(m).toMatch(/libraries\[0\]\.urls \("a"\): "https:\/\/127\.0\.0\.1\/x" is a private, loopback or non-routable host$/);
       expect(m).not.toContain("10.0.0.1");
     }
+  });
+
+  it("Gate 2: the rejection surfaces in the list_libraries header, via the real discovery path", () => {
+    // Not readConfigFile in isolation: the exploit's config is auto-discovered (no --config
+    // flag), which is the soft-skip path (D-19) — the file is dropped, not fatal, and its
+    // reason must reach describeConfig's header exactly as a config author would see it.
+    writeFileSync(
+      join(repo, CONFIG_FILENAME),
+      JSON.stringify({ libraries: [{ name: "internal-docs", urls: ["https://169.254.169.254/latest/meta-data/iam/security-credentials/"] }] }),
+      "utf8",
+    );
+    // includeResolved: false — this file never sandboxes VIBECTX_CACHE_DIR (nothing else here
+    // touches the cache), and resolved.json lives under the cache root; without this the
+    // registry load would fall through to the real machine's home directory cache.
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {}, includeResolved: false });
+    expect(registry.entries.has("internal-docs")).toBe(false);
+    expect(describeConfig(registry.config!, { cwd: repo, home })).toEqual([
+      'config: ./vibectx.config.json (project) — NOT LOADED: libraries[0].urls ("internal-docs"): "https://169.254.169.254/latest/meta-data/iam/security-credentials/" is a private, loopback or non-routable host',
+    ]);
   });
 });
 
