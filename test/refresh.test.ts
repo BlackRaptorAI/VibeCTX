@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
@@ -185,6 +185,23 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     stubFetch({ [REACT_URL]: "# React new" });
     await expect(refreshToolText(registry, "reactjs")).resolves.toBe(`react: refreshed from ${REACT_URL} (11 chars)`);
     expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new"); // the corrupt meta was silently discarded, not fatal
+  });
+
+  describe("A3 (PAR-716), round 1 (code-reviewer, B2) · session.flush() survives a mid-loop throw", () => {
+    it("a throw partway through the loop still flushes the EARLIER libraries' index entries, not left stale behind an unflushed session", async () => {
+      // "react" is processed before "hono" (Map insertion order): react's writeCache must
+      // succeed and land in the index even though hono's writeCache throws immediately after.
+      const honoDir = join(dir, "hono");
+      mkdirSync(honoDir, { recursive: true });
+      chmodSync(honoDir, 0o555); // read + execute, no write: writeCache's writeFileSync throws EACCES
+      try {
+        stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+        await expect(refreshToolText(registry)).rejects.toThrow();
+        expect(readIndex().libraries.get("react")!.hash).toBe(documentHash("# React new"));
+      } finally {
+        chmodSync(honoDir, 0o755);
+      }
+    });
   });
 
   describe("A3 (PAR-716) · the full-refresh rate cap", () => {

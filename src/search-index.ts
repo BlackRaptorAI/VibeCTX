@@ -538,7 +538,13 @@ export function openIndexSession(
         if (!supersedesRemoval && memo.get(key) === hash) return;
         snapshot ??= readIndex().libraries; // the ONE read
         const existing = snapshot.get(key);
-        if (!supersedesRemoval && existing && existing.hash === hash && existing.url === url) {
+        if (existing && existing.hash === hash && existing.url === url) {
+          // Round 1 (code-reviewer, S5): the on-disk entry already matches — cancel a pending
+          // removal rather than rebuilding an identical posting list. A refresh that finds
+          // nothing changed across the whole loop ends this call with `pending` empty, so
+          // `flush()` below returns before its own re-read: one read, zero writes, not three
+          // and a 16.9 MB rewrite for a no-op.
+          if (supersedesRemoval) pending.delete(key);
           memo.set(key, hash);
           return;
         }
@@ -556,6 +562,10 @@ export function openIndexSession(
     },
     remove(library) {
       const key = library.trim().toLowerCase();
+      // Round 1 (code-reviewer, N1): same guard `add()` applies. Without it an invalid key
+      // still lands in `pending`, forcing a full read and a 16.9 MB rewrite at `flush()` for a
+      // delete that could never have matched anything in the index anyway.
+      if (!validLibraryKey(key)) return;
       // Same reason `invalidateIndex` clears both (D-42): a memo entry from BEFORE this
       // removal must not let a later `add()` in this or a future session believe the hash it
       // is offering is already on disk when this session is about to delete it.

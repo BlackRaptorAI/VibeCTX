@@ -13,15 +13,19 @@ import { join } from "node:path";
  * reads and writes of `index.json` proves the session was actually shared across the loop
  * rather than opened and closed per library.
  *
- * WHAT "one session" ACTUALLY COSTS, measured here rather than assumed: `add()`'s lazy
- * snapshot reads once; `flush()` re-reads once more before merging, by design, so a
- * concurrent writer is merged rather than clobbered (search-index.ts:503-504, unchanged by
- * this item); `writeIndex()` itself reads once more through `newerSchemaVersion`'s own guard
- * (atomic-store.ts:136-144, unchanged by this item). That is THREE reads and ONE write for
- * the whole loop — not the "exactly one read, exactly one write" the go-card's done-when
- * states verbatim. The claim this test actually proves, and the one that matters, is that the
+ * WHAT "one session" ACTUALLY COSTS, measured here rather than assumed: when at least one
+ * library's content CHANGED, `add()`'s lazy snapshot reads once; `flush()` re-reads once more
+ * before merging, by design, so a concurrent writer is merged rather than clobbered
+ * (search-index.ts:503-504, unchanged by this item); `writeIndex()` itself reads once more
+ * through `newerSchemaVersion`'s own guard (atomic-store.ts:136-144, unchanged by this item).
+ * That is THREE reads and ONE write for the whole loop — not the "exactly one read, exactly
+ * one write" the go-card's done-when states verbatim. Round 1 (code-reviewer, S5) found the
+ * FIRST of those three elidable: when nothing in the whole loop actually changed, `add()` now
+ * cancels a pending `remove()` instead of rebuilding an identical entry, so `pending` ends the
+ * loop empty and `flush()` returns before its own re-read — ONE read, ZERO writes, also
+ * measured below. The claim this test actually proves, and the one that matters, is that the
  * count is CONSTANT in the number of libraries refreshed, not the literal "1" — a 3-library
- * and a 30-library refresh cost the same three reads and one write. Reported to Tom as such;
+ * and a 30-library refresh cost the same reads and writes either way. Reported to Tom as such;
  * see the phase report for the full disposition of this done-when.
  */
 
@@ -157,5 +161,31 @@ describe("A3 (PAR-716) · one index session per refresh, not one per library", (
     const largeReads = counts.indexReads;
 
     expect(largeReads).toBe(smallReads); // O(1) in library count, not O(n) — the actual claim behind the done-when
+  });
+
+  it("[MEASURED] round 1 (S5): when nothing changed, a 30-library refresh reads index.json ONCE and writes NOTHING", async () => {
+    const SIZE = 30;
+    seedIndex(SIZE);
+    resetSearchIndexMemo();
+    const { registry, pages } = curatedRegistry(SIZE);
+    // The seeded index and the fetched pages must describe the SAME content for this to be a
+    // true no-op refresh — seedIndex writes "Old content <i>.", so fetch the same text back.
+    const unchangedPages: Record<string, string> = {};
+    for (let i = 0; i < SIZE; i++) unchangedPages[`https://lib${i}.example.com/llms.txt`] = `# lib-${i}\n\nOld content ${i}.`;
+    stubFetch(unchangedPages);
+    counts.indexReads = 0;
+    counts.indexWrites = 0;
+
+    await refreshToolText(registry);
+
+    // eslint-disable-next-line no-console
+    console.log(`[A3 MEASURED] ${SIZE}-library refresh, nothing changed: ${counts.indexReads} index.json read(s), ${counts.indexWrites} write(s)`);
+
+    expect(counts.indexReads).toBe(1); // the lazy snapshot read — nothing left to re-read or write for
+    expect(counts.indexWrites).toBe(0);
+
+    const untouched = readIndex().libraries;
+    for (let i = 0; i < SIZE; i++) expect(untouched.get(`lib-${i}`)!.hash).toBe(documentHash(`# lib-${i}\n\nOld content ${i}.`));
+    void pages; // the pre-seeded, deliberately-stale fixture from curatedRegistry is unused here
   });
 });

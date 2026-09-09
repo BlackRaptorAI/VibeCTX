@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta } from "../src/cache.js";
+import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache } from "../src/cache.js";
 import { sweepTempFiles, sweepCacheTempFiles, tempPathFor, SWEEP_MIN_AGE_MS } from "../src/atomic-store.js";
 
 let dir: string;
@@ -395,5 +395,77 @@ describe("S-C — orphan temp files are swept from the cache directories", () =>
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * A3 (PAR-716), round 1 (code-reviewer, B1) — `dropFollowedPageCache` must prove the cache
+ * ROOT is a real directory before it deletes anything, the same D-46 rule `cache-evict.ts`
+ * carries for eviction (see its own "the cache root is refused unless it is a real directory"
+ * suite, mirrored here). `libDir()` alone does not give this: `lstat` on
+ * `<symlinked-root>/<library>` answers `isDirectory() === true` because it stats the target,
+ * so checking only the library directory let a symlink planted at the root position aim every
+ * `rmSync` in this function wherever the link pointed.
+ */
+describe("A3 (PAR-716) · dropFollowedPageCache", () => {
+  it("D-46: deletes nothing through a symlinked cache root", () => {
+    const home = mkdtempSync(join(tmpdir(), "vibectx-userfiles-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+    try {
+      mkdirSync(join(home, "react"), { recursive: true });
+      const victim = join(home, "react", "thesis.md");
+      writeFileSync(victim, "# My thesis, not vibectx's to delete", "utf8");
+      writeFileSync(join(home, "react", "thesis.meta.json"), JSON.stringify({ url: "https://example.com/thesis.md", fetchedAt: "1999-01-01T00:00:00.000Z" }), "utf8");
+
+      const linked = join(parent, "root");
+      symlinkSync(home, linked);
+      process.env.VIBECTX_CACHE_DIR = linked;
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(victim)).toBe(true); // zero unlinks through the symlinked root
+      expect(existsSync(join(home, "react", "thesis.meta.json"))).toBe(true);
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it("drops every cached page for the library except the ones in keepUrls", () => {
+    const PRIMARY = "https://react.dev/llms.txt";
+    const FOLLOWED = "https://react.dev/streaming.md";
+    const SIBLING = "https://react.dev/llms-full.txt";
+    writeCache("react", PRIMARY, "# React");
+    writeCache("react", FOLLOWED, "# Streaming");
+    writeCache("react", SIBLING, "# React full");
+    writeCache("hono", "https://hono.dev/llms.txt", "# Hono"); // another library: untouched
+
+    dropFollowedPageCache("react", [PRIMARY, SIBLING]);
+
+    expect(readCache("react", PRIMARY, 168)?.content).toBe("# React");
+    expect(readCache("react", SIBLING, 168)?.content).toBe("# React full"); // a kept candidate, not a followed page
+    expect(readCache("react", FOLLOWED, 168)).toBeUndefined(); // dropped
+    expect(readCache("hono", "https://hono.dev/llms.txt", 168)?.content).toBe("# Hono");
+  });
+
+  it("never follows or removes a symlinked file inside a real library directory", () => {
+    const outside = mkdtempSync(join(tmpdir(), "docs-cache-outside-"));
+    try {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      const outsideVictim = join(outside, "victim.md");
+      writeFileSync(outsideVictim, "precious", "utf8");
+      symlinkSync(outsideVictim, join(dir, "react", "planted.md"));
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(readFileSync(outsideVictim, "utf8")).toBe("precious"); // not followed, not removed
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("is best-effort: an entry with no cache directory at all is a silent no-op", () => {
+    expect(() => dropFollowedPageCache("never-cached", ["https://example.com/llms.txt"])).not.toThrow();
   });
 });

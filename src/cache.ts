@@ -220,8 +220,9 @@ function noteStrandedLegacy(current: string, legacy: string, warn: (message: str
  *      into a rename and never removed.
  *      RESIDUAL, stated because it is real: writes during that one run still resolve through
  *      the link. What this closes is the PERMANENT capture (`~/.vibectx` is not made a link)
- *      and deletion — `enforceCacheSizeCap` refuses a root that is not a real directory, so
- *      nothing is evicted through it either.
+ *      and deletion — both `enforceCacheSizeCap` (cache-evict.ts) and `dropFollowedPageCache`
+ *      (A3, PAR-716) refuse a root that is not a real directory, so nothing is evicted or
+ *      dropped through it either.
  *   4. Otherwise rename `~/.docs-cache-mcp` to `~/.vibectx` — a rename, never a copy: a
  *      copy can half-succeed and leave two divergent caches, and a rename either happens
  *      or does not.
@@ -428,26 +429,47 @@ export function writeCache(
  * next `get_docs` on that library can silently blend fresh primary content with a followed
  * page fetched under the document this refresh just replaced.
  *
- * Scope: only pages, keyed by URL, other than `keepUrl` — the primary document just written.
- * Called only after a SUCCESSFUL refetch (both `refresh.ts` call sites), never on failure: a
- * failed refresh changes nothing about the primary document, so the followed pages fetched
- * under it are still exactly as valid as they were before the attempt.
+ * Scope: only pages, keyed by URL, other than one of `keepUrls` — the primary document just
+ * written, PLUS every other candidate URL still on the entry (round 1, code-reviewer, S2):
+ * `entry.urls[1..n]` are `getLibraryDoc`'s own fallback chain (fetcher.ts:289-299), not
+ * followed pages, and deleting them turned a future primary-candidate outage into a hard
+ * FAILED where the stale fallback used to serve a flagged document. Callers pass the full
+ * candidate list, not just the one URL that was just fetched.
+ *
+ * Called only after a refetch that changed something (both `refresh.ts` call sites): the
+ * direct-fetch path additionally guards on `doc.staleNote === undefined` — round 1 found a
+ * failed-network stale-cache fallback carries no `staleNote` distinction from a fresh 304
+ * revalidation, so BOTH a genuine failure-fallback and an unchanged-content revalidation reach
+ * here as a "success". The 304 case still drops followed pages even though the primary is
+ * byte-identical — disclosed, not fixed: propagating that distinction needs a `fetcher.ts`
+ * change (a Tier-2/3 gated path this item does not otherwise touch, and touching it would pull
+ * in a Change Record this item does not otherwise need). The resolved-entry re-resolution path
+ * (`resolvePackage`) has NO equivalent guard at all — `ResolveOutcome` carries no staleness
+ * signal, so a resolved library's followed pages are dropped on every successful re-resolution,
+ * including one that only reached a stale-cache fallback. Both are accepted, disclosed costs
+ * (a wasted future re-fetch), not correctness bugs — the pages that get dropped were valid and
+ * are simply re-fetched next time, never served wrong.
  *
  * Best effort (D-13): an unreadable directory or an unremovable file costs a page that
  * outlives its purpose, never a throw — refresh's own result is not this function's to fail.
- * Symlinked or non-regular entries are left alone, never followed or removed (D-46's rule,
- * the one `cache-evict.ts` learned the hard way): only a REAL file whose name is one of this
- * library's own `<slug>.md` / `<slug>.meta.json` pairs is a candidate, and only when its slug
- * is not `keepUrl`'s.
+ * D-46, in full this time (round 1, code-reviewer, B1): the ROOT is proven a real directory
+ * before anything below it is touched, not just the library directory — `cacheRoot()` itself
+ * does not make that guarantee (`lstat` on `<symlinked-root>/<library>` answers `isDirectory()
+ * true` because it stats the target), so checking only `libDir()` let a symlinked root aim
+ * every `rmSync` here wherever the link pointed, exactly the harm `cache-evict.ts` was fixed
+ * against. Below the root, symlinked or non-regular entries are left alone, never followed or
+ * removed: only a REAL file whose name is one of this library's own `<slug>.md` /
+ * `<slug>.meta.json` pairs is a candidate, and only when its slug is not one of `keepUrls`'.
  */
 export function dropFollowedPageCache(
   library: string,
-  keepUrl: string,
+  keepUrls: readonly string[],
   warn: (message: string) => void = toStderr,
 ): void {
+  if (!isRealDirectory(cacheRoot())) return; // D-46: prove the ROOT before anything below can delete through it
   const dir = libDir(library);
   if (!isRealDirectory(dir)) return; // nothing cached for this library, or not ours to touch
-  const keepSlug = urlSlug(keepUrl);
+  const keep = new Set(keepUrls.map(urlSlug));
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -456,7 +478,7 @@ export function dropFollowedPageCache(
   }
   for (const name of names) {
     const slug = name.endsWith(".meta.json") ? name.slice(0, -".meta.json".length) : name.endsWith(".md") ? name.slice(0, -".md".length) : undefined;
-    if (slug === undefined || slug === keepSlug) continue;
+    if (slug === undefined || keep.has(slug)) continue;
     const path = join(dir, name);
     try {
       if (!lstatSync(path).isFile()) continue; // a symlink or a directory: not a page file, not touched
