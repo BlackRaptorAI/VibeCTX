@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache } from "../src/cache.js";
+import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache, urlSlug } from "../src/cache.js";
 import { sweepTempFiles, sweepCacheTempFiles, tempPathFor, SWEEP_MIN_AGE_MS } from "../src/atomic-store.js";
 
 let dir: string;
@@ -455,11 +455,16 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
       const outsideVictim = join(outside, "victim.md");
       writeFileSync(outsideVictim, "precious", "utf8");
-      symlinkSync(outsideVictim, join(dir, "react", "planted.md"));
+      const planted = join(dir, "react", "planted.md");
+      symlinkSync(outsideVictim, planted);
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(readFileSync(outsideVictim, "utf8")).toBe("precious"); // not followed, not removed
+      expect(readFileSync(outsideVictim, "utf8")).toBe("precious"); // not followed
+      // Round 2 (test-auditor, F4): the SYMLINK ITSELF must also survive — asserting only the
+      // target's content cannot fail regardless of the guard, because `rmSync` on a plain path
+      // never resolves a final-component symlink, so the target is unreachable either way.
+      expect(existsSync(planted)).toBe(true); // not removed
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
@@ -467,5 +472,93 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
 
   it("is best-effort: an entry with no cache directory at all is a silent no-op", () => {
     expect(() => dropFollowedPageCache("never-cached", ["https://example.com/llms.txt"])).not.toThrow();
+  });
+
+  /**
+   * Round 2 (security-architect, C2; test-auditor, F1) — the provenance clamp that bounds this
+   * function's blast radius against a `VIBECTX_CACHE_DIR` aimed at a directory vibectx does not
+   * own. Every case here must leave the file(s) in place: the clamp exists precisely so a
+   * planted or corrupt file is NOT deleted on name shape alone.
+   */
+  describe("round 2 (security-architect, C2) · only a proven <slug>.md/<slug>.meta.json pair is deleted", () => {
+    it("a lone .md with no .meta.json companion survives", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeFileSync(join(dir, "react", "orphan.md"), "not vibectx's to delete", "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", "orphan.md"))).toBe(true);
+    });
+
+    it("a lone .meta.json with no .md companion survives", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeFileSync(join(dir, "react", "orphan.meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", "orphan.meta.json"))).toBe(true);
+    });
+
+    it("a .md whose .meta.json fails validation (truncated JSON) survives with both halves intact", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeCache("react", "https://react.dev/streaming.md", "# Streaming");
+      const slug = urlSlug("https://react.dev/streaming.md");
+      writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ not json", "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", `${slug}.md`))).toBe(true);
+      expect(existsSync(join(dir, "react", `${slug}.meta.json`))).toBe(true);
+    });
+
+    it("a .md whose .meta.json exceeds the size bound survives, without being parsed", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeCache("react", "https://react.dev/streaming.md", "# Streaming");
+      const slug = urlSlug("https://react.dev/streaming.md");
+      // Oversized but otherwise well-formed JSON, so a failure here can only be the size guard.
+      const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(5000) });
+      writeFileSync(join(dir, "react", `${slug}.meta.json`), oversized, "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", `${slug}.md`))).toBe(true);
+    });
+
+    it("round 3 (code-reviewer, SF-A): a foreign pair literally named .md / .meta.json (empty slug) is never deleted", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      // A pair this tool did not write, whose slug happens to be empty — urlSlug() can never
+      // produce "" for a non-empty URL, so no legitimate followed page ever has this name.
+      writeFileSync(join(dir, "react", ".md"), "not vibectx's, empty slug", "utf8");
+      writeFileSync(join(dir, "react", ".meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
+
+      expect(existsSync(join(dir, "react", ".md"))).toBe(true);
+      expect(existsSync(join(dir, "react", ".meta.json"))).toBe(true);
+    });
+
+    it("C3: a successful drop reports the count once, through the injected warn", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      writeCache("react", "https://react.dev/streaming.md", "# Streaming");
+      writeCache("react", "https://react.dev/guide.md", "# Guide");
+      const said: string[] = [];
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"], (m) => said.push(m));
+
+      expect(said).toHaveLength(1);
+      expect(said[0]).toContain("dropped 2 stale followed-pages");
+      expect(said[0]).toContain("react");
+      expect(readCache("react", "https://react.dev/streaming.md", 168)).toBeUndefined();
+      expect(readCache("react", "https://react.dev/guide.md", 168)).toBeUndefined();
+    });
+
+    it("nothing to drop: warn is never called", () => {
+      writeCache("react", "https://react.dev/llms.txt", "# React");
+      const said: string[] = [];
+
+      dropFollowedPageCache("react", ["https://react.dev/llms.txt"], (m) => said.push(m));
+
+      expect(said).toHaveLength(0);
+    });
   });
 });

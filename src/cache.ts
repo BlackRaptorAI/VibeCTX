@@ -44,6 +44,11 @@ const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 const MAX_META_URL = 2048;
 /** Longest `etag` — an HTTP validator token, not free text; well past anything real. */
 const MAX_META_ETAG = 512;
+/** Round 2 (security-architect, R3) — longest `.meta.json` file `dropFollowedPageCache` will
+ *  read before parsing it. A real one is a URL, an ISO instant and an optional etag; this is
+ *  generous headroom over `MAX_META_URL` + `MAX_META_ETAG` plus JSON overhead, not a measured
+ *  figure. */
+const MAX_META_FILE_BYTES = 4096;
 /** Deliberately a STRICT SUBSET of RFC 9110 §5.5's field-value grammar (`field-vchar = VCHAR
  *  / obs-text`, `obs-text = %x80-FF`, leading/trailing whitespace excluded) — printable ASCII
  *  only, no HTAB, no high-byte `obs-text`, no leading or trailing space (security-architect,
@@ -486,17 +491,24 @@ export function writeCache(
  * ways: this function's body is entirely synchronous (no `await` inside it for such a race to
  * land in), and `rmSync` on a plain path issues `unlink(2)` on the final path component, which
  * POSIX never resolves through a symlink — so even a same-instant swap of a FILE for a symlink
- * removes the link, not whatever it points at.
+ * removes the link, not whatever it points at. Round 3 (security-architect, N3): C2 below
+ * widens this same window by one `readFileSync` + `JSON.parse` per candidate — the residual's
+ * KIND is unchanged (still only the non-final path components are swappable, still fully
+ * synchronous), but its DURATION is longer than round 1's version.
  *
  * Below the root, symlinked or non-regular entries are left alone, never followed or removed.
  * A candidate must be a REAL file whose name is one of this library's own `<slug>.md` /
- * `<slug>.meta.json` pairs, its slug not one of `keepUrls`', AND (round 2, security-architect,
- * C2) its `.meta.json` half must exist and pass the SAME validation `readCache` requires
- * (`readCacheMeta`/`toCacheMeta`, A4's four corruption classes) — a lone `.md`, a lone
- * `.meta.json`, or a `.meta.json` this process cannot trust is left in place for eviction or
- * the temp sweep, rather than unlinked on name shape alone. This bounds a `VIBECTX_CACHE_DIR`
- * aimed at a real directory this tool does not otherwise own: only files that already look
- * like ones this tool itself wrote are deleted.
+ * `<slug>.meta.json` pairs (a non-empty slug — round 3, code-reviewer, SF-A: `urlSlug` can
+ * never return `""` for a non-empty URL, so an empty-slug pair is provably not one this tool
+ * wrote, and was deletable before this guard), its slug not one of `keepUrls`', AND (round 2,
+ * security-architect, C2) its `.meta.json` half must exist, be no larger than
+ * `MAX_META_FILE_BYTES` (R3 — the same `Stats` the existence check already paid for), and pass
+ * the SAME validation `readCache` requires (`readCacheMeta`/`toCacheMeta`, A4's four corruption
+ * classes) — a lone `.md`, a lone `.meta.json`, an oversized one, or one this process cannot
+ * trust is left in place for eviction, rather than unlinked on name shape alone (the temp sweep
+ * does NOT apply here: `TEMP_FILE_PATTERN` matches neither suffix). This bounds a
+ * `VIBECTX_CACHE_DIR` aimed at a real directory this tool does not otherwise own: only files
+ * that already look like ones this tool itself wrote are deleted.
  *
  * NOT INJECTIVE, disclosed rather than fixed here (round 2, security-architect, second-order
  * note): `libDirIn`'s `library → directory` mapping folds distinct valid names that differ
@@ -530,17 +542,32 @@ export function dropFollowedPageCache(
   }
   let dropped = 0;
   for (const slug of slugs) {
-    if (keep.has(slug)) continue;
+    // Round 3 (code-reviewer, SF-A, MEASURED): `urlSlug` can never return "" for a non-empty
+    // URL (its own `.replace` leaves at least one character per non-empty input), so a literal
+    // `.md` / `.meta.json` pair — empty slug — cannot be a file THIS tool wrote under any URL.
+    // Without this guard a foreign pair with that exact name and any parseable `CacheMeta`
+    // inside its `.meta.json` passed every check below and was deleted, contradicting this
+    // function's own claim that only files that already look like vibectx's own are touched.
+    if (slug.length === 0 || keep.has(slug)) continue;
     const contentPath = join(dir, `${slug}.md`);
     const metaPath = join(dir, `${slug}.meta.json`);
+    let metaStat;
     try {
       // C2: a candidate must be a REAL file with a META that PARSES — never a lone half of
       // the pair, and never one unlinked on name shape alone.
-      if (!lstatSync(contentPath).isFile() || !lstatSync(metaPath).isFile()) continue;
+      if (!lstatSync(contentPath).isFile()) continue;
+      metaStat = lstatSync(metaPath);
+      if (!metaStat.isFile()) continue;
     } catch {
       continue; // one half vanished, or is a symlink/directory: not ours to touch here
     }
-    if (readCacheMeta(metaPath) === undefined) continue; // C2: unproven — leave it for eviction/the temp sweep
+    // Round 2 (security-architect, R3): the same `Stats` already paid for above bounds the
+    // read C2 requires — no candidate this tool itself wrote is anywhere near this size (a
+    // `CacheMeta` is a URL, an ISO instant and an optional etag), so a directory entry over it
+    // is either not this tool's or already unparseable; skip the read+parse either way rather
+    // than paying for a `JSON.parse` a directory of many planted files could otherwise force.
+    if (metaStat.size > MAX_META_FILE_BYTES) continue;
+    if (readCacheMeta(metaPath) === undefined) continue; // C2: unproven — leave it for eviction
     try {
       rmSync(contentPath, { force: true });
       rmSync(metaPath, { force: true });

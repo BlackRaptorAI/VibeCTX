@@ -293,5 +293,36 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(readCache("hono", oldFollowed, 168)).toBeUndefined(); // dropped
       expect(readCache("hono", "https://hono.dev/llms-full.txt", 168)?.content).toBe("# Hono new"); // the new primary survives
     });
+
+    /**
+     * Round 2 (test-auditor, F6) — a characterization test for the DISCLOSED (not fixed) 304
+     * case: `doc.staleNote === undefined` cannot distinguish a genuine fresh fetch from a 304
+     * revalidation whose content is byte-identical to what was already cached, so a refresh
+     * that changes NOTHING still drops the library's followed pages. Documented at length in
+     * both `src/cache.ts`'s `dropFollowedPageCache` doc comment and `src/refresh.ts`'s call
+     * site as a real, accepted cost (an offline read now reports the page unavailable rather
+     * than serving it flagged STALE) on what the same comments call the COMMON case for a
+     * scheduled full refresh. This test pins TODAY'S behaviour so the future item that adds a
+     * `fetcher.ts` `notModified` distinction has a tripwire showing exactly what changes.
+     */
+    it("characterization (disclosed, not a bug): a 304 revalidation — byte-identical content — still drops the followed-page cache", async () => {
+      writeCache("react", REACT_URL, "# React", '"etag-1"');
+      writeCache("react", FOLLOWED_URL, "# Streaming");
+      const fetchSpy = vi.fn(async (_url: unknown, init: any) => {
+        expect(init.headers["if-none-match"]).toBe('"etag-1"');
+        return new Response(null, { status: 304 });
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const out = await refreshToolText(registry, "reactjs");
+
+      expect(out).toBe(`react: refreshed from ${REACT_URL} (7 chars)`); // "# React" — unchanged
+      expect(readCache("react", REACT_URL, 168)?.content).toBe("# React"); // byte-identical to before
+      // TODAY's behaviour, disclosed as a cost rather than fixed: the followed page is dropped
+      // even though nothing about the primary changed. If a future fetcher.ts change makes this
+      // assertion fail, that is the fix landing — update this test's expectation, don't just
+      // delete it (the same instruction test/retrieval.test.ts's own history follows for A6).
+      expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined();
+    });
   });
 });

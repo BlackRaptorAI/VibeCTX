@@ -114,15 +114,19 @@ describe("A3 (PAR-716) · one index session per refresh, not one per library", (
     counts.indexReads = 0;
     counts.indexWrites = 0;
 
-    const before = { reads: counts.indexReads, writes: counts.indexWrites };
     await refreshToolText(registry);
     const after = { reads: counts.indexReads, writes: counts.indexWrites };
 
+    // Round 2 (test-auditor, F3): the "after" figure is a real, observed count from this run.
+    // The "before" figure is NOT — it is arithmetic from the audit's own per-library estimate
+    // (src/refresh.ts's OLD invalidateIndex-then-indexCachedDocument shape: ~3 reads + ~2
+    // writes per library), never independently re-measured against the pre-A3 code by this
+    // test. Labelled ESTIMATED, not folded into the same MEASURED line, so the two registers
+    // are never confused with each other.
     // eslint-disable-next-line no-console
-    console.log(
-      `[A3 MEASURED] ${SIZE}-library refresh: ${after.reads} index.json read(s), ${after.writes} write(s) ` +
-        `(before this fix: ~${SIZE * 3} reads, ~${SIZE * 2} writes — one invalidate + one reindex per library)`,
-    );
+    console.log(`[A3 MEASURED] ${SIZE}-library refresh: ${after.reads} index.json read(s), ${after.writes} write(s)`);
+    // eslint-disable-next-line no-console
+    console.log(`[A3 ESTIMATED, pre-fix] ~${SIZE * 3} reads, ~${SIZE * 2} writes — one invalidate + one reindex per library, never independently re-measured here`);
 
     expect(after.writes).toBe(1); // ONE writeIndex for the whole loop, exactly as the done-when states
     expect(after.reads).toBeLessThanOrEqual(3); // one lazy read, one flush re-read, one writeIndex schema check

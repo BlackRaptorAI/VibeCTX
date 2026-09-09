@@ -136,6 +136,26 @@ describe("R2 · one index read per run, not one per library (PAR-659)", () => {
     expect([...readIndex().libraries.keys()]).toEqual(["solo"]);
     expect(searchIndexPath().endsWith("index.json")).toBe(true);
   });
+
+  /** A3 (PAR-716), round 2 (test-auditor, F5) — `remove()` mirrors `add()`'s `validLibraryKey`
+   *  guard, but no caller in this codebase ever offers `remove()` an invalid key (`refresh.ts`
+   *  only ever passes a Registry-resolved `entry.name`), so the guard is unreachable through
+   *  integration tests. Direct unit test instead. */
+  it("remove() ignores an invalid key rather than forcing a read+write for a delete that could never match anything", () => {
+    const session = openIndexSession(() => {});
+    session.remove(""); // empty after trim: not a valid library key
+    session.remove("   ");
+    expect(session.flush()).toBe(false); // nothing pending — the invalid removals never landed
+    expect(readIndex().libraries.size).toBe(0);
+  });
+
+  it("remove() supersedes a PRIOR add() in the same session — the last call for a library wins", () => {
+    const session = openIndexSession(() => {});
+    session.add("solo", "https://solo.example.com/llms.txt", "# Solo\n\n## Streaming\n\nStream events.");
+    session.remove("solo");
+    expect(session.flush()).toBe(true); // the removal still needs a write, even though nothing survives it
+    expect(readIndex().libraries.has("solo")).toBe(false);
+  });
 });
 
 /**
