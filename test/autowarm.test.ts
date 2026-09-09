@@ -342,12 +342,21 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
   it("the listener instrument is live: a direct plain-http request to it registers a connection and a hit", async () => {
     // Positive control (test/fetcher.test.ts:500-507's pattern): proves `connections` and
     // `listenerHits` actually increment on a real request, so their staying at zero in the
-    // next test is evidence of absence, not of a miswired counter. Talks plain http — this
+    // next tests is evidence of absence, not of a miswired counter. Talks plain http — this
     // is the harness proving itself, not the app under test.
     const res = await fetch(`http://127.0.0.1:${port}/probe`);
     await res.text();
     expect(connections).toBe(1);
     expect(listenerHits).toEqual(["GET /probe"]);
+
+    // Also probes via the literal string `localhost`, on THIS environment's actual DNS/family
+    // resolution (Node's autoSelectFamily default may prefer ::1 and fall back to 127.0.0.1,
+    // or resolve 127.0.0.1 directly — either way, if it reaches this server at all, this proves
+    // it) — so the localhost negative test below is proven live here, not assumed live.
+    const res2 = await fetch(`http://localhost:${port}/probe2`);
+    await res2.text();
+    expect(connections).toBe(2);
+    expect(listenerHits).toEqual(["GET /probe", "GET /probe2"]);
   });
 
   it("the entry is rejected at discovery (never enters the registry) and startAutowarm makes zero requests", async () => {
@@ -376,15 +385,15 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     expect(listenerHits).toEqual([]);
   });
 
-  it("also holds for `localhost:<port>` (a real, resolvable address, unlike the other six named shapes)", async () => {
-    // 169.254.169.254, an IPv6 literal, a .local/.internal name and a single-label host are
-    // NOT real bindable/resolvable addresses without OS-level network or DNS changes — a
-    // "real listener" proof for them would need to fake that infrastructure, not exercise
-    // more of this code. `localhost` is the one other Gate 2 shape that resolves to a
-    // controllable loopback address, so it gets the same live-listener treatment as
-    // 127.0.0.1; the other five are covered by test/config.test.ts's D-22-grammar assertions
-    // (readConfigFile rejection) and test/link-policy.test.ts's unit-level `validateLibraryUrl`
-    // coverage instead.
+  it("also holds for `localhost:<port>` (proven live above against this exact address resolution)", async () => {
+    // 169.254.169.254 (link-local) cannot be bound without assigning it to a real interface,
+    // and a .local/.internal name or a single-label host does not resolve to any address this
+    // process controls — a "real listener" proof for those three would need to fake OS-level
+    // network or DNS infrastructure, not exercise more of this code. They're covered instead
+    // by test/config.test.ts's D-22-grammar rejection assertions and test/link-policy.test.ts's
+    // unit-level `validateLibraryUrl` coverage. `localhost` and the IPv6 loopback (below) ARE
+    // real, controllable addresses, so they get the same live-listener treatment as 127.0.0.1 —
+    // and the positive control above already proved this exact server answers `localhost`.
     const target = `https://localhost:${port}/x`;
     writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target] }] }), "utf8");
 
@@ -395,6 +404,49 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     expect(summary.attempted).toBe(0);
     expect(connections).toBe(0);
     expect(listenerHits).toEqual([]);
+  });
+
+  it("also holds for an IPv6 loopback literal, `[::1]` — a second real, bindable listener", async () => {
+    let v6Hits: string[] = [];
+    let v6Connections = 0;
+    const v6Server = createServer((req, res) => {
+      v6Hits.push(`${req.method} ${req.url}`);
+      res.end("SECRET");
+    });
+    v6Server.on("connection", () => {
+      v6Connections += 1;
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        v6Server.once("error", reject);
+        v6Server.listen(0, "::1", resolve);
+      });
+    } catch {
+      return; // no IPv6 loopback on this machine/CI runner — nothing to test here
+    }
+    try {
+      const v6Port = (v6Server.address() as AddressInfo).port;
+
+      // Positive control on this server too — [::1]'s reachability isn't guaranteed on every
+      // host the suite runs on, so prove it before trusting a zero count from it.
+      const probe = await fetch(`http://[::1]:${v6Port}/probe`);
+      await probe.text();
+      expect(v6Connections).toBe(1);
+      expect(v6Hits).toEqual(["GET /probe"]);
+
+      const target = `https://[::1]:${v6Port}/latest/meta-data`;
+      writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target] }] }), "utf8");
+
+      const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {} });
+      expect(registry.entries.has("internal-docs")).toBe(false);
+
+      const summary = await startAutowarm(registry, { warn: () => {} });
+      expect(summary.attempted).toBe(0);
+      expect(v6Connections).toBe(1); // unchanged since the positive-control probe above
+      expect(v6Hits).toEqual(["GET /probe"]);
+    } finally {
+      await new Promise<void>((r) => v6Server.close(() => r()));
+    }
   });
 
   it("D-47: the same entry with allowInternalHosts:true is admitted, and IS the one startAutowarm schedules for fetch", async () => {
