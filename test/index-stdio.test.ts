@@ -97,7 +97,7 @@ const EXIT_CEILING_MS = 300;
 
 /** Per-test hang-detector budget, not a performance assertion — real hangs stay caught however
  *  wide this is, so there is no cost to erring generous. 8000 ms measured [MEASURED] at 4205 ms
- *  idle-to-loaded (a ~1.9x margin) for test 1 alone under 2x-core CPU oversubstription, and both
+ *  idle-to-loaded (a ~1.9x margin) for test 1 alone under 2x-core CPU oversubscription, and both
  *  tests timed out outright under 3x-core load in 5/5 runs — dominated by Node cold-start + SDK
  *  import + the `beforeAll` build sharing a CPU with the rest of the suite. 30 s keeps a genuine
  *  hang (which would otherwise run to completion or throw) caught well before it could be
