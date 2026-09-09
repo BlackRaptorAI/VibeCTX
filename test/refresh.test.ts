@@ -189,6 +189,14 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
 
   describe("A3 (PAR-716), round 1 (code-reviewer, B2) · session.flush() survives a mid-loop throw", () => {
     it("a throw partway through the loop still flushes the EARLIER libraries' index entries, not left stale behind an unflushed session", async () => {
+      // Round 2 (code-reviewer, Nit 1): react's index entry is pre-seeded under OLD content,
+      // so a broken fix is caught as STALE (wrong hash) rather than merely ABSENT — the exact
+      // defect shape round 1 measured (react's cache held NEW bytes while its index entry
+      // still hashed to OLD). Without this seed, a reverted fix fails with "Cannot read
+      // properties of undefined" (absent), which is a valid regression but not this one.
+      writeCache("react", REACT_URL, "# React old");
+      indexCachedDocument("react", REACT_URL, "# React old");
+      resetSearchIndexMemo(); // a fresh process: the memo must not short-circuit this session's own add()
       // "react" is processed before "hono" (Map insertion order): react's writeCache must
       // succeed and land in the index even though hono's writeCache throws immediately after.
       const honoDir = join(dir, "hono");
@@ -197,7 +205,7 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       try {
         stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
         await expect(refreshToolText(registry)).rejects.toThrow();
-        expect(readIndex().libraries.get("react")!.hash).toBe(documentHash("# React new"));
+        expect(readIndex().libraries.get("react")!.hash).toBe(documentHash("# React new")); // NOT the old, pre-seeded hash
       } finally {
         chmodSync(honoDir, 0o755);
       }

@@ -544,6 +544,22 @@ export function openIndexSession(
           // nothing changed across the whole loop ends this call with `pending` empty, so
           // `flush()` below returns before its own re-read: one read, zero writes, not three
           // and a 16.9 MB rewrite for a no-op.
+          //
+          // Round 2 (code-reviewer, SF-1... SF-3, named as a gap not fixed here): `memo.set`
+          // below is set UNCONDITIONALLY, including when `supersedesRemoval` is true and this
+          // key is about to leave `pending` — so if THIS SAME flush()'s write ends up shedding
+          // this entry (D-40, largest-first, over the whole re-read map, not just `pending`),
+          // nothing corrects `memo` afterward: `flush()`'s post-write shed-exclusion loop only
+          // walks `pending`, and this key is no longer in it. A pre-existing class, not a new
+          // one — the ORIGINAL matching-`existing` fast path this cancel branch extends has
+          // carried the identical gap since before this item, for the plain (non-remove())
+          // `add()` path every caller of `indexCachedDocument`/`openIndexSession` already
+          // uses. Bounded, not silent: `writeIndex`'s own `shedMemo` records the shed hash
+          // separately and `search.ts:484` tokenizes a shed library at query time regardless
+          // of what `memo` claims — so the cost is a slower search until the next successful
+          // write settles it, never a wrong answer. Fixing it for real means changing what the
+          // shared `add()` fast path does for EVERY caller (`warm`, `autowarm`, `get_docs`,
+          // `resolve`), which is bigger than this item's scope — named here rather than fixed.
           if (supersedesRemoval) pending.delete(key);
           memo.set(key, hash);
           return;

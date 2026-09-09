@@ -91,7 +91,7 @@ node /absolute/path/to/VibeCTX/dist/index.js
 | `list_libraries()` | Registry + per-library cache status |
 | `get_docs(library, topic?, maxTokens?, mode?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head |
 | `search(query, maxTokens?, libraries?)` | Search **every cached library at once** and get the best sections grouped by library — for when you don't know which library owns a concept. Cache-only and offline; see [Don't know which library? `search`](#dont-know-which-library-search) |
-| `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved). A successful refresh also drops that library's other cached pages — the ones followed from links in the document being replaced — so a later `get_docs` re-follows fresh links rather than blending old followed pages into new content. Omitting `library` (a full refresh of everything) is capped at a few calls per hour per running server; a call past the cap is refused with a stated reason. Refreshing one named library at a time has no such cap |
+| `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved). A successful refresh also drops that library's other cached pages — the ones followed from links in the document being replaced — so a later `get_docs` re-follows fresh links rather than blending old followed pages into new content. They are re-fetched the next time `get_docs` follows a link online; until then, an offline read or an upstream outage reports them as unavailable rather than serving the older copy. Omitting `library` (a full refresh of everything) is capped at a few calls per hour per running server; a call past the cap is refused with a stated reason. Refreshing one named library at a time has no such cap |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
 | `doctor(library?)` | Prove retrieval works per library — same report as `vibectx doctor` below |
 | `warm_project(dir?)` | Read the project's dependency manifests and cache every dependency's docs — same table as `vibectx warm` below; reads only the server's working directory or one beneath it (real paths, so a symlink out of it is refused) |
@@ -711,7 +711,9 @@ A `vibectx.config.json` committed to your repo is picked up with **no flag at al
 
 URLs are **candidates probed in order** — list `llms-full.txt` first, then `llms.txt`,
 then any curated fallback page (raw GitHub READMEs work well). Cache lives at
-`~/.vibectx/` (override with `VIBECTX_CACHE_DIR`). Default TTL is 7 days.
+`~/.vibectx/` (override with `VIBECTX_CACHE_DIR`). Default TTL is 7 days. A `VIBECTX_CACHE_DIR`
+override must point at a directory vibectx owns: `refresh` deletes files inside it (its own
+stale followed-page cache) as part of normal operation, not only under a byte cap.
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
 killed process left behind before they write anything — but only once it is at least a

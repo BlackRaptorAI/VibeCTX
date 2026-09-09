@@ -167,7 +167,7 @@ describe("A3 (PAR-716) · one index session per refresh, not one per library", (
     const SIZE = 30;
     seedIndex(SIZE);
     resetSearchIndexMemo();
-    const { registry, pages } = curatedRegistry(SIZE);
+    const { registry } = curatedRegistry(SIZE);
     // The seeded index and the fetched pages must describe the SAME content for this to be a
     // true no-op refresh — seedIndex writes "Old content <i>.", so fetch the same text back.
     const unchangedPages: Record<string, string> = {};
@@ -186,6 +186,5 @@ describe("A3 (PAR-716) · one index session per refresh, not one per library", (
 
     const untouched = readIndex().libraries;
     for (let i = 0; i < SIZE; i++) expect(untouched.get(`lib-${i}`)!.hash).toBe(documentHash(`# lib-${i}\n\nOld content ${i}.`));
-    void pages; // the pre-seeded, deliberately-stale fixture from curatedRegistry is unused here
   });
 });

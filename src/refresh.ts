@@ -110,8 +110,12 @@ export async function refreshToolText(registry: Registry, library?: string, opts
         // changed. Disclosed, not fixed: distinguishing the two needs a `DocResult` field this
         // item does not add, because `fetcher.ts` is a Tier-2/3 gated path this item does not
         // otherwise touch and touching it would pull in a Change Record this item does not
-        // otherwise need. Cost, not a correctness bug: the dropped pages were valid and are
-        // simply re-fetched next time, never served wrong.
+        // otherwise need. Round 2 (code-reviewer, SF-1): this is a REAL cost, not only a
+        // wasted re-fetch — MEASURED, a dropped page that used to be served flagged `STALE:`
+        // during an upstream outage or under `offline` now reports "Could not fetch N index
+        // links" instead (fetcher.ts:330-331 has nothing left to fall back to). Never served
+        // WRONG, so not a correctness bug, but not free, and it lands on the COMMON case above
+        // — see `dropFollowedPageCache`'s own doc comment for the full disposition.
         if (doc.staleNote === undefined) dropFollowedPageCache(entry.name, [doc.url, ...entry.urls]);
       }
       results.push(

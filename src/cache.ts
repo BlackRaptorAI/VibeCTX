@@ -2,6 +2,7 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
+import { clipText, MAX_CONFIG_VALUE_CHARS, MAX_DISPLAY_PATH_CHARS } from "./config.js";
 // Carried forward, not fixed here (F5, security-architect A4 round 2) — outside A4's
 // authorised scope (`src/cache.ts` + tests): `cache-evict.ts`'s `resolveRecency` reads the
 // same `.meta.json` files with a laxer check than `toCacheMeta` below (`typeof === "string"`
@@ -300,9 +301,19 @@ export function cacheRoot(opts: CacheRootOptions = {}): string {
   return defaultCacheRoot(warn);
 }
 
-function libDir(library: string): string {
+/** Round 2 (security-architect, C1) — the library directory for a ROOT the caller already
+ *  has in hand, so a caller that must prove the root is real (D-46) checks and uses the SAME
+ *  value rather than one `cacheRoot()` call proving a root a second, later call re-resolves.
+ *  `cacheRoot()` is memoised (`resolvedDefaultRoot`) so the two calls agree in practice, but
+ *  that agreement is an invariant of `cacheRoot()`'s implementation, not a property this
+ *  function's callers should have to depend on. */
+function libDirIn(root: string, library: string): string {
   // One directory per library; page files keyed by a slug of their URL.
-  return join(cacheRoot(), library.replace(/[^a-z0-9_-]/gi, "_"));
+  return join(root, library.replace(/[^a-z0-9_-]/gi, "_"));
+}
+
+function libDir(library: string): string {
+  return libDirIn(cacheRoot(), library);
 }
 
 export function urlSlug(url: string): string {
@@ -446,28 +457,64 @@ export function writeCache(
  * in a Change Record this item does not otherwise need). The resolved-entry re-resolution path
  * (`resolvePackage`) has NO equivalent guard at all — `ResolveOutcome` carries no staleness
  * signal, so a resolved library's followed pages are dropped on every successful re-resolution,
- * including one that only reached a stale-cache fallback. Both are accepted, disclosed costs
- * (a wasted future re-fetch), not correctness bugs — the pages that get dropped were valid and
- * are simply re-fetched next time, never served wrong.
+ * including one that only reached a stale-cache fallback.
+ *
+ * THE COST IS REAL, NOT ONLY A WASTED RE-FETCH (round 2, code-reviewer, SF-1 — the earlier
+ * wording here claimed the dropped pages are "simply re-fetched next time, never served
+ * wrong"; MEASURED false for the offline path and corrected). A dropped page that used to be
+ * served flagged `STALE:` during an upstream outage or under `offline` now reports "Could not
+ * fetch N index links" instead — `fetchLinkedPage`'s offline/unavailable branch
+ * (fetcher.ts:330-331) has nothing to fall back to once the cached copy is gone. This is a
+ * genuine, disclosed cost against this project's offline-first convention, on the common path
+ * (a 304 revalidation, per the paragraph above) — not a correctness bug, because nothing is
+ * ever served WRONG, but not free either. Never fixed here: it needs the same `fetcher.ts`
+ * change the 304 case does.
  *
  * Best effort (D-13): an unreadable directory or an unremovable file costs a page that
  * outlives its purpose, never a throw — refresh's own result is not this function's to fail.
- * D-46, in full this time (round 1, code-reviewer, B1): the ROOT is proven a real directory
- * before anything below it is touched, not just the library directory — `cacheRoot()` itself
- * does not make that guarantee (`lstat` on `<symlinked-root>/<library>` answers `isDirectory()
- * true` because it stats the target), so checking only `libDir()` let a symlinked root aim
- * every `rmSync` here wherever the link pointed, exactly the harm `cache-evict.ts` was fixed
- * against. Below the root, symlinked or non-regular entries are left alone, never followed or
- * removed: only a REAL file whose name is one of this library's own `<slug>.md` /
- * `<slug>.meta.json` pairs is a candidate, and only when its slug is not one of `keepUrls`'.
+ *
+ * D-46, in full (round 1, code-reviewer, B1; round 2, security-architect, C1): the ROOT is
+ * proven a real directory before anything below it is touched, not just the library directory
+ * — `cacheRoot()` itself does not make that guarantee (`lstat` on `<symlinked-root>/<library>`
+ * answers `isDirectory() true` because it stats the target) — and the checked root is captured
+ * once into `root` and threaded through `libDirIn`, so the value proven real is provably the
+ * value used, not a second, later `cacheRoot()` call this function has to trust agrees with
+ * the first. RESIDUAL, stated rather than silently accepted: an external process could still
+ * replace the root or this library's directory with a symlink between the `isRealDirectory`
+ * checks and the `readdirSync`/`rmSync` calls below (CWE-367) — the same residual
+ * `enforceCacheSizeCap` (cache-evict.ts) carries and does not document either. Bounded two
+ * ways: this function's body is entirely synchronous (no `await` inside it for such a race to
+ * land in), and `rmSync` on a plain path issues `unlink(2)` on the final path component, which
+ * POSIX never resolves through a symlink — so even a same-instant swap of a FILE for a symlink
+ * removes the link, not whatever it points at.
+ *
+ * Below the root, symlinked or non-regular entries are left alone, never followed or removed.
+ * A candidate must be a REAL file whose name is one of this library's own `<slug>.md` /
+ * `<slug>.meta.json` pairs, its slug not one of `keepUrls`', AND (round 2, security-architect,
+ * C2) its `.meta.json` half must exist and pass the SAME validation `readCache` requires
+ * (`readCacheMeta`/`toCacheMeta`, A4's four corruption classes) — a lone `.md`, a lone
+ * `.meta.json`, or a `.meta.json` this process cannot trust is left in place for eviction or
+ * the temp sweep, rather than unlinked on name shape alone. This bounds a `VIBECTX_CACHE_DIR`
+ * aimed at a real directory this tool does not otherwise own: only files that already look
+ * like ones this tool itself wrote are deleted.
+ *
+ * NOT INJECTIVE, disclosed rather than fixed here (round 2, security-architect, second-order
+ * note): `libDirIn`'s `library → directory` mapping folds distinct valid names that differ
+ * only in a character this regex maps to `_` (e.g. an npm name `foo.bar` and `foo_bar`) onto
+ * the SAME directory. Before this function existed that sharing was benign (distinct URL
+ * slugs, distinct files); now, refreshing one such library can delete the other's cached
+ * primary, because the other's candidate URLs are not in `keepUrls`. Pre-existing in `libDir`,
+ * newly destructive because of this function — a follow-up item should make the mapping
+ * injective (append a short hash of the raw name) rather than papering over it here.
  */
 export function dropFollowedPageCache(
   library: string,
   keepUrls: readonly string[],
   warn: (message: string) => void = toStderr,
 ): void {
-  if (!isRealDirectory(cacheRoot())) return; // D-46: prove the ROOT before anything below can delete through it
-  const dir = libDir(library);
+  const root = cacheRoot();
+  if (!isRealDirectory(root)) return; // D-46 / C1: prove the ROOT — and use THIS value, not a second cacheRoot() call — before anything below can delete through it
+  const dir = libDirIn(root, library);
   if (!isRealDirectory(dir)) return; // nothing cached for this library, or not ours to touch
   const keep = new Set(keepUrls.map(urlSlug));
   let names: string[];
@@ -476,15 +523,35 @@ export function dropFollowedPageCache(
   } catch {
     return;
   }
+  const slugs = new Set<string>();
   for (const name of names) {
-    const slug = name.endsWith(".meta.json") ? name.slice(0, -".meta.json".length) : name.endsWith(".md") ? name.slice(0, -".md".length) : undefined;
-    if (slug === undefined || keep.has(slug)) continue;
-    const path = join(dir, name);
+    if (name.endsWith(".md")) slugs.add(name.slice(0, -".md".length));
+    else if (name.endsWith(".meta.json")) slugs.add(name.slice(0, -".meta.json".length));
+  }
+  let dropped = 0;
+  for (const slug of slugs) {
+    if (keep.has(slug)) continue;
+    const contentPath = join(dir, `${slug}.md`);
+    const metaPath = join(dir, `${slug}.meta.json`);
     try {
-      if (!lstatSync(path).isFile()) continue; // a symlink or a directory: not a page file, not touched
-      rmSync(path, { force: true });
+      // C2: a candidate must be a REAL file with a META that PARSES — never a lone half of
+      // the pair, and never one unlinked on name shape alone.
+      if (!lstatSync(contentPath).isFile() || !lstatSync(metaPath).isFile()) continue;
+    } catch {
+      continue; // one half vanished, or is a symlink/directory: not ours to touch here
+    }
+    if (readCacheMeta(metaPath) === undefined) continue; // C2: unproven — leave it for eviction/the temp sweep
+    try {
+      rmSync(contentPath, { force: true });
+      rmSync(metaPath, { force: true });
+      dropped += 1;
     } catch (e) {
-      warn(`vibectx: could not drop stale followed-page cache file ${path}: ${e instanceof Error ? e.message : String(e)}\n`);
+      warn(
+        `vibectx: could not drop stale followed-page cache file ${clipText(contentPath, MAX_DISPLAY_PATH_CHARS)}: ${clipText(e instanceof Error ? e.message : String(e), MAX_CONFIG_VALUE_CHARS)}`,
+      );
     }
   }
+  // C3: the delete is otherwise silent on success — say what happened, so a mis-aimed
+  // VIBECTX_CACHE_DIR or an unexpectedly empty offline cache has a trail to follow.
+  if (dropped > 0) warn(`vibectx: refresh dropped ${dropped} stale followed-page${dropped === 1 ? "" : "s"} for "${clipText(library, MAX_CONFIG_VALUE_CHARS)}"`);
 }
