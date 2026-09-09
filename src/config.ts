@@ -362,6 +362,12 @@ const EntrySchema = z
     allowInternalHosts: z.boolean({ invalid_type_error: "must be a boolean" }).optional(),
   })
   .superRefine((entry, ctx) => {
+    // Belt-and-braces: `urls`'s own shape check above aborts the object parse on anything but
+    // a non-empty array of non-empty strings (z.custom defaults to fatal:true), so this
+    // superRefine never runs against a malformed `urls` today — but that guarantee lives in
+    // zod's abort semantics, not in this file, so don't let a future change turn a rejection
+    // into an uncaught TypeError.
+    if (!Array.isArray(entry.urls)) return;
     entry.urls.forEach((raw, i) => {
       try {
         validateLibraryUrl(raw, { allowInternalHosts: entry.allowInternalHosts });

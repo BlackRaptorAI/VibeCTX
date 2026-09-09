@@ -83,11 +83,13 @@ export function normaliseAllowedHost(raw: unknown): string {
 /**
  * Validate one library `urls` entry (D-47, D-49): must be a non-empty string that parses
  * as `https:`, carries no userinfo, and whose host `isForbiddenHost` does not name — unless
- * the config author set `allowInternalHosts` on that entry, the explicit per-entry opt-in
- * for the air-gapped / internal-docs case the README markets. This is the sole gate between
- * a committed `vibectx.config.json` and the fetch `startAutowarm` makes at server startup
- * with no user action. Throws with a message that starts with `urls:` so config errors read
- * naturally; returns nothing on success.
+ * the config author set `allowInternalHosts` on that entry, the explicit per-entry opt-in for
+ * the air-gapped / internal-docs case (documented in README.md's config-field reference).
+ * This is the sole gate between a committed `vibectx.config.json` and the fetch
+ * `startAutowarm` makes at server startup with no user action. The opt-in reaches only THIS
+ * entry's own primary fetch: it is not threaded into `isAllowedLink`, so an internal entry's
+ * followed index links are still refused. Throws with a message that starts with `urls:` so
+ * config errors read naturally; returns nothing on success.
  */
 export function validateLibraryUrl(raw: unknown, opts?: { allowInternalHosts?: boolean }): void {
   const shown = typeof raw === "string" ? raw : JSON.stringify(raw);

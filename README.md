@@ -613,15 +613,17 @@ to the source document's own host **plus** the entry's `allowedHosts`. Redirects
 followed one hop at a time (at most 5): every `Location` is checked against the same rule
 *before* it is requested, so a page that redirects to a private address never produces a
 request. The same hop rule — `https`, public host — applies to every fetch vibectx makes,
-curated primaries included (those may still redirect across hosts). For a resolved
-entry that set is derived from its metadata — the homepage host, the docs-URL host and
-`docs.<registrable domain of the homepage>` — and is recomputed on every load, never read
-from `resolved.json`. In config, `allowedHosts` is an array of bare hostnames
-(`"api.acme.com"`), lowercase, or `"*.acme.com"` for subdomains (never the apex); no
-scheme, path, port or userinfo. IP literals, `localhost`, `.local`, `.internal` and
-single-label names are rejected on the way in and refused on the way out, whatever any
-list says. Redirects are re-checked against the same rule. The registrable-domain helper
-is deliberately small (last two labels, or three under a short list of two-part suffixes
+curated primaries included (those may still redirect across hosts), **with one narrow,
+explicit exception: a config entry's own `urls`, when that entry sets `allowInternalHosts:
+true` — see below.** For a resolved entry that set is derived from its metadata — the
+homepage host, the docs-URL host and `docs.<registrable domain of the homepage>` — and is
+recomputed on every load, never read from `resolved.json`. In config, `allowedHosts` is an
+array of bare hostnames (`"api.acme.com"`), lowercase, or `"*.acme.com"` for subdomains
+(never the apex); no scheme, path, port or userinfo. IP literals, `localhost`, `.local`,
+`.internal` and single-label names are rejected on the way in and refused on the way out,
+whatever any list says. Redirects are re-checked against the same rule. The
+registrable-domain helper is deliberately small (last two labels, or three under a short
+list of two-part suffixes
 such as `co.uk`, `com.au`, `github.io`) — no Public Suffix List — so an unlisted
 two-part suffix derives a `docs.` host that simply does not exist; harmless, but not
 useful.
@@ -815,6 +817,14 @@ MCP protocol — is never written to.
 [background revalidation on startup](#warm-your-projects-docs).
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
 [`allowedHosts` and followed links](#any-library-no-config).
+`allowInternalHosts` (optional boolean, default `false`) lets **that entry's own `urls`**
+name a loopback, link-local, `.local`/`.internal` or single-label host — the air-gapped or
+internal-docs case, an explicit choice the entry's author writes down, never a default.
+Without it, `urls` naming such a host is rejected the same way `allowedHosts` is: one line
+naming the file, the entry and the value, and that config layer is skipped rather than
+silently truncated. The opt-in reaches only the entry's own primary fetch — an internal
+document's own index links are still refused (`allowedHosts` above is unaffected by it),
+and `https`-only / no-userinfo still apply.
 `probeQueries` (optional, array of non-empty strings) are the topics `vibectx doctor`
 uses to prove the entry answers; without them a query is derived from the description.
 An empty array `[]` is accepted and behaves exactly as if `probeQueries` were absent.

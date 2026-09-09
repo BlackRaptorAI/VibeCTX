@@ -293,15 +293,23 @@ describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
  * A1 (PAR-714) enforcement liveness. VibeCTX-audit-2026-09-08.md §4.1: a `vibectx.config.json`
  * COMMITTED TO THE REPO and auto-discovered (no `--config` flag — exactly what `startAutowarm`
  * (server.ts:195) fetches at server startup with no user action) names an internal endpoint;
- * this proves the fix holds on THAT path, not only on a direct `readConfigFile` call. Follows
- * the "prove absence of request" pattern at test/fetcher.test.ts:425-562: a real `http.Server`
- * on 127.0.0.1 stands in for the internal target, and `listenerHits` must stay empty.
+ * this proves the fix holds on THAT path, not only on a direct `readConfigFile` call.
+ *
+ * Follows the "prove absence of request" pattern at test/fetcher.test.ts:425-562, with one
+ * correction a round of test-auditor review caught: the target here is `https://127.0.0.1`,
+ * but this stand-in listener is a plain `node:http` server (no TLS) — a real `fetch` to it
+ * sends a TLS ClientHello, which the server's HTTP parser cannot read as a request line, so
+ * the CONNECTION is made but the REQUEST handler never fires. `listenerHits` (request-level)
+ * would therefore stay `[]` whether or not the fix works — it is kept for diagnostic detail
+ * only. `connections` (TCP-accept-level, scheme-agnostic) is the assertion that actually
+ * proves absence, and a positive-control test below proves the instrument can fire at all.
  */
 describe("enforcement liveness (A1, PAR-714): a committed config's forbidden urls entry never reaches startAutowarm's fetch", () => {
   let repo: string;
   let home: string;
   let server: Server;
   let listenerHits: string[];
+  let connections: number;
   let port: number;
 
   beforeEach(async () => {
@@ -309,9 +317,13 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     home = mkdtempSync(join(tmpdir(), "vibectx-enforce-home-"));
     mkdirSync(join(repo, ".git")); // an ordinary clone — project-scope config discovery applies
     listenerHits = [];
+    connections = 0;
     server = createServer((req, res) => {
       listenerHits.push(`${req.method} ${req.url}`);
       res.end("SECRET");
+    });
+    server.on("connection", () => {
+      connections += 1;
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     port = (server.address() as AddressInfo).port;
@@ -325,6 +337,17 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     await new Promise<void>((r) => server.close(() => r()));
     rmSync(repo, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("the listener instrument is live: a direct plain-http request to it registers a connection and a hit", async () => {
+    // Positive control (test/fetcher.test.ts:500-507's pattern): proves `connections` and
+    // `listenerHits` actually increment on a real request, so their staying at zero in the
+    // next test is evidence of absence, not of a miswired counter. Talks plain http — this
+    // is the harness proving itself, not the app under test.
+    const res = await fetch(`http://127.0.0.1:${port}/probe`);
+    await res.text();
+    expect(connections).toBe(1);
+    expect(listenerHits).toEqual(["GET /probe"]);
   });
 
   it("the entry is rejected at discovery (never enters the registry) and startAutowarm makes zero requests", async () => {
@@ -347,6 +370,30 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     const summary = await startAutowarm(registry, { warn: () => {} });
 
     expect(summary.attempted).toBe(0);
+    // Scheme-agnostic proof: no TCP connection was ever opened to the listener, so the request
+    // never left the process — not merely that its HTTP request line was never parsed.
+    expect(connections).toBe(0);
+    expect(listenerHits).toEqual([]);
+  });
+
+  it("also holds for `localhost:<port>` (a real, resolvable address, unlike the other six named shapes)", async () => {
+    // 169.254.169.254, an IPv6 literal, a .local/.internal name and a single-label host are
+    // NOT real bindable/resolvable addresses without OS-level network or DNS changes — a
+    // "real listener" proof for them would need to fake that infrastructure, not exercise
+    // more of this code. `localhost` is the one other Gate 2 shape that resolves to a
+    // controllable loopback address, so it gets the same live-listener treatment as
+    // 127.0.0.1; the other five are covered by test/config.test.ts's D-22-grammar assertions
+    // (readConfigFile rejection) and test/link-policy.test.ts's unit-level `validateLibraryUrl`
+    // coverage instead.
+    const target = `https://localhost:${port}/x`;
+    writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target] }] }), "utf8");
+
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {} });
+    expect(registry.entries.has("internal-docs")).toBe(false);
+
+    const summary = await startAutowarm(registry, { warn: () => {} });
+    expect(summary.attempted).toBe(0);
+    expect(connections).toBe(0);
     expect(listenerHits).toEqual([]);
   });
 
@@ -372,6 +419,7 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     expect(summary.cached).toBe(1);
     expect(fetchDoc).toHaveBeenCalledTimes(1);
     expect(fetchDoc.mock.calls[0][0]).toMatchObject({ name: "internal-docs", urls: [target] });
-    expect(listenerHits).toEqual([]); // fetchDoc stubbed: the listener is untouched either way
+    // Deliberately no listenerHits/connections assertion here: fetchDoc is stubbed, so the
+    // listener is untouched regardless of this test's outcome — asserting it would prove nothing.
   });
 });

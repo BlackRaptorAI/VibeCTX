@@ -576,9 +576,16 @@ describe("A1 (PAR-714): a library `urls` entry must clear the host policy, not j
   });
 
   it("only the first bad url in a multi-url entry is named (D-17: one line per failure)", () => {
-    expect(
-      bad({ libraries: [{ name: "a", urls: ["https://docs.acme.com/llms.txt", "https://127.0.0.1/x", "https://10.0.0.1/x"] }] }),
-    ).toThrow(/libraries\[0\]\.urls \("a"\): "https:\/\/127\.0\.0\.1\/x" is a private, loopback or non-routable host/);
+    try {
+      bad({ libraries: [{ name: "a", urls: ["https://docs.acme.com/llms.txt", "https://127.0.0.1/x", "https://10.0.0.1/x"] }] })();
+      expect.unreachable();
+    } catch (e) {
+      const m = (e as Error).message;
+      // Pins exclusivity, not just presence: readConfigFile reports parsed.error.issues[0] only,
+      // so the second bad url (10.0.0.1) must never appear even though it independently fails too.
+      expect(m).toMatch(/libraries\[0\]\.urls \("a"\): "https:\/\/127\.0\.0\.1\/x" is a private, loopback or non-routable host$/);
+      expect(m).not.toContain("10.0.0.1");
+    }
   });
 });
 
