@@ -19,3 +19,14 @@ export const MAX_URLS_PER_ENTRY = MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES;
 export const MAX_FETCHES_PER_RESOLUTION = MAX_METADATA_FETCHES + MAX_METADATA_FETCHES * MAX_URLS_PER_ENTRY;
 /** Resolutions (name validated, metadata about to be fetched) one process may start per hour. */
 export const MAX_RESOLUTIONS_PER_HOUR = 100;
+
+/**
+ * Full (no-argument) `refresh` calls one process may start per hour (A3, PAR-716). A no-name
+ * `refresh` is model-callable and iterates the whole registry — up to thirty upstream fetches
+ * per call, against thirty different documentation sites — with no limit before this. ASSUMED,
+ * the same way MAX_RESOLUTIONS_PER_HOUR is: not derived from a cost measurement, a judgement
+ * about acceptable retry-loop egress. Set an order of magnitude below the resolver's cap
+ * because one call here already costs on the order of MAX_RESOLUTIONS_PER_HOUR/3 site-hits by
+ * itself, not one. Single-library `refresh` is uncapped — the concern is bulk egress from the
+ * no-argument form, not routine per-library use. */
+export const MAX_FULL_REFRESHES_PER_HOUR = 5;

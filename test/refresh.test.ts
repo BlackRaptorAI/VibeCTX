@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
-import { refreshToolText } from "../src/refresh.js";
+import { refreshToolText, resetFullRefreshWindow } from "../src/refresh.js";
 import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 import { runSearch } from "../src/search.js";
+import { MAX_FULL_REFRESHES_PER_HOUR } from "../src/limits.js";
 
 let dir: string;
 
@@ -14,6 +15,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "vibectx-refresh-"));
   process.env.VIBECTX_CACHE_DIR = dir;
   resetSearchIndexMemo();
+  resetFullRefreshWindow();
 });
 
 afterEach(() => {
@@ -183,5 +185,88 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     stubFetch({ [REACT_URL]: "# React new" });
     await expect(refreshToolText(registry, "reactjs")).resolves.toBe(`react: refreshed from ${REACT_URL} (11 chars)`);
     expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new"); // the corrupt meta was silently discarded, not fatal
+  });
+
+  describe("A3 (PAR-716) · the full-refresh rate cap", () => {
+    it("a second full refresh inside the cap window is refused, with a stated reason", async () => {
+      stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+      for (let i = 0; i < MAX_FULL_REFRESHES_PER_HOUR; i++) {
+        const out = await refreshToolText(registry);
+        expect(out).not.toMatch(/refresh limit reached/);
+      }
+      const spy = stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+      const out = await refreshToolText(registry);
+      expect(out).toBe(
+        `refresh limit reached (${MAX_FULL_REFRESHES_PER_HOUR} full refreshes per hour per process); try again later, or refresh one library at a time`,
+      );
+      expect(spy).not.toHaveBeenCalled(); // refused before any network attempt, not after
+    });
+
+    it("single-library refresh stays uncapped — only the no-argument (full) form is limited", async () => {
+      stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+      for (let i = 0; i < MAX_FULL_REFRESHES_PER_HOUR; i++) await refreshToolText(registry);
+      const spy = stubFetch({ [REACT_URL]: "# React newer" });
+      const out = await refreshToolText(registry, "reactjs");
+      expect(out).toBe(`react: refreshed from ${REACT_URL} (13 chars)`);
+      expect(spy).toHaveBeenCalled();
+    });
+  });
+
+  describe("A3 (PAR-716) · dropping the followed-page cache on a successful refresh", () => {
+    const FOLLOWED_URL = "https://react.dev/streaming.md";
+
+    it("a successful refresh drops every OTHER cached page for that library — fetched under the primary this refresh just replaced", async () => {
+      writeCache("react", REACT_URL, "# React old");
+      writeCache("react", FOLLOWED_URL, "# Streaming (followed under the old primary)");
+      writeCache("hono", HONO_URL, "# Hono unrelated"); // a different library's cache: untouched either way
+      expect(readCache("react", FOLLOWED_URL, 168)?.content).toBeDefined();
+
+      stubFetch({ [REACT_URL]: "# React new" });
+      await refreshToolText(registry, "reactjs");
+
+      expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined(); // dropped
+      expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new"); // the fresh primary survives
+      expect(readCache("hono", HONO_URL, 168)?.content).toBe("# Hono unrelated"); // another library, untouched
+    });
+
+    it("a refresh with NOTHING cached and no candidate reachable is FAILED outright — nothing to drop", async () => {
+      stubFetch({}); // react 404s everywhere, no prior cache to fall back on
+      const out = await refreshToolText(registry, "reactjs");
+      expect(out).toBe("react: FAILED — all candidate URLs unreachable");
+    });
+
+    it("a refresh that falls back to STALE cache (every candidate unreachable, but a prior cache exists) does NOT drop the followed-page cache — the primary itself did not change", async () => {
+      writeCache("react", REACT_URL, "# React old");
+      writeCache("react", FOLLOWED_URL, "# Streaming");
+      stubFetch({}); // every candidate URL 404s; getLibraryDoc falls back to serving the old cache, staleNote set
+
+      const out = await refreshToolText(registry, "reactjs");
+
+      expect(out).toBe(`react: refreshed from ${REACT_URL} (11 chars)`); // reports "refreshed" — the entry is rebuilt from the SAME stale content, not deleted
+      expect(readCache("react", REACT_URL, 168)?.content).toBe("# React old"); // unchanged
+      expect(readCache("react", FOLLOWED_URL, 168)?.content).toBe("# Streaming"); // untouched — nothing about the primary changed
+    });
+
+    it("a successful re-resolution of a RESOLVED entry also drops its old followed-page cache, keyed off the new chosen URL", async () => {
+      const resolvedHono = {
+        name: "hono",
+        urls: [HONO_URL],
+        resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+      };
+      const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+      writeCache("hono", HONO_URL, "# Hono old");
+      const oldFollowed = "https://hono.dev/old-followed.md";
+      writeCache("hono", oldFollowed, "# Old followed page");
+      stubFetch({
+        "https://registry.npmjs.org/hono/latest": JSON.stringify({ homepage: "https://hono.dev" }),
+        "https://hono.dev/llms-full.txt": "# Hono new",
+      });
+
+      const out = await refreshToolText(reg, "hono");
+
+      expect(out).toMatch(/^hono: re-resolved via npm/);
+      expect(readCache("hono", oldFollowed, 168)).toBeUndefined(); // dropped
+      expect(readCache("hono", "https://hono.dev/llms-full.txt", 168)?.content).toBe("# Hono new"); // the new primary survives
+    });
   });
 });

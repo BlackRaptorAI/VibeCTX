@@ -417,3 +417,52 @@ export function writeCache(
   // a write that already succeeded.
   noteCacheWrite(cacheRoot(), contentPath, Buffer.byteLength(content, "utf8"));
 }
+
+/**
+ * A3 (PAR-716) — a successful refresh of a library's primary document drops every OTHER
+ * cached page for that library: the pages `get_docs` followed from the OLD primary's link
+ * structure. Those pages are keyed by their own URL (`fetchLinkedPage` → `writeCache`) in the
+ * same per-library directory `writeCache` uses for the primary document, so a refresh that
+ * replaces the primary leaves them sitting there, attributed to link text and a heading path
+ * that may no longer exist. Nothing re-validates them until their own TTL expires, so the
+ * next `get_docs` on that library can silently blend fresh primary content with a followed
+ * page fetched under the document this refresh just replaced.
+ *
+ * Scope: only pages, keyed by URL, other than `keepUrl` — the primary document just written.
+ * Called only after a SUCCESSFUL refetch (both `refresh.ts` call sites), never on failure: a
+ * failed refresh changes nothing about the primary document, so the followed pages fetched
+ * under it are still exactly as valid as they were before the attempt.
+ *
+ * Best effort (D-13): an unreadable directory or an unremovable file costs a page that
+ * outlives its purpose, never a throw — refresh's own result is not this function's to fail.
+ * Symlinked or non-regular entries are left alone, never followed or removed (D-46's rule,
+ * the one `cache-evict.ts` learned the hard way): only a REAL file whose name is one of this
+ * library's own `<slug>.md` / `<slug>.meta.json` pairs is a candidate, and only when its slug
+ * is not `keepUrl`'s.
+ */
+export function dropFollowedPageCache(
+  library: string,
+  keepUrl: string,
+  warn: (message: string) => void = toStderr,
+): void {
+  const dir = libDir(library);
+  if (!isRealDirectory(dir)) return; // nothing cached for this library, or not ours to touch
+  const keepSlug = urlSlug(keepUrl);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const slug = name.endsWith(".meta.json") ? name.slice(0, -".meta.json".length) : name.endsWith(".md") ? name.slice(0, -".md".length) : undefined;
+    if (slug === undefined || slug === keepSlug) continue;
+    const path = join(dir, name);
+    try {
+      if (!lstatSync(path).isFile()) continue; // a symlink or a directory: not a page file, not touched
+      rmSync(path, { force: true });
+    } catch (e) {
+      warn(`vibectx: could not drop stale followed-page cache file ${path}: ${e instanceof Error ? e.message : String(e)}\n`);
+    }
+  }
+}

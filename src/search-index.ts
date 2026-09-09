@@ -509,6 +509,15 @@ export function resetSearchIndexMemo(): void {
 export interface IndexSession {
   /** Offer one primary cached document to the index. Cheap when it is already indexed. */
   add(library: string, url: string, text: string, fetchedAt?: string): void;
+  /**
+   * A3 (PAR-716) — mark a library's entry for removal, batched into this session's one
+   * flush instead of `invalidateIndex`'s own read+write. Same D-34 intent: a caller about to
+   * attempt work that might fail marks the OLD entry gone first, so a failure leaves nothing
+   * stale rather than something rebuilt from a document that was never replaced. An `add()`
+   * for the same library later in this session — the success case — supersedes the removal;
+   * flush() applies only whichever of the two a library saw LAST.
+   */
+  remove(library: string): void;
   /** Write what was collected. True when the file was rewritten. */
   flush(): boolean;
 }
@@ -518,17 +527,18 @@ export function openIndexSession(
   onShed?: (shed: string[]) => void,
 ): IndexSession {
   let snapshot: Map<string, IndexedDocument> | undefined;
-  const pending = new Map<string, { doc: IndexedDocument; hash: string }>();
+  const pending = new Map<string, { doc: IndexedDocument; hash: string } | "remove">();
   return {
     add(library, url, text, fetchedAt) {
       const key = library.trim().toLowerCase();
       if (!validLibraryKey(key)) return;
       try {
         const hash = documentHash(text);
-        if (memo.get(key) === hash) return;
+        const supersedesRemoval = pending.get(key) === "remove";
+        if (!supersedesRemoval && memo.get(key) === hash) return;
         snapshot ??= readIndex().libraries; // the ONE read
         const existing = snapshot.get(key);
-        if (existing && existing.hash === hash && existing.url === url) {
+        if (!supersedesRemoval && existing && existing.hash === hash && existing.url === url) {
           memo.set(key, hash);
           return;
         }
@@ -544,6 +554,15 @@ export function openIndexSession(
         warn(`vibectx: search index not updated for "${key}": ${e instanceof Error ? e.message : String(e)}\n`);
       }
     },
+    remove(library) {
+      const key = library.trim().toLowerCase();
+      // Same reason `invalidateIndex` clears both (D-42): a memo entry from BEFORE this
+      // removal must not let a later `add()` in this or a future session believe the hash it
+      // is offering is already on disk when this session is about to delete it.
+      memo.delete(key);
+      shedMemo.delete(key);
+      pending.set(key, "remove");
+    },
     flush() {
       if (pending.size === 0) return false;
       try {
@@ -551,7 +570,10 @@ export function openIndexSession(
         // process may have written entries this run knows nothing about, and the index is a
         // shared cache, not this run's private state.
         const { libraries } = readIndex();
-        for (const [key, { doc }] of pending) libraries.set(key, doc);
+        for (const [key, value] of pending) {
+          if (value === "remove") libraries.delete(key);
+          else libraries.set(key, value.doc);
+        }
         // D-42: `writeIndex` returns true when it SHED entries to stay inside the read limit,
         // so "the file was written" is not "this entry was written". The memo exists to let a
         // later session skip work that is already ON DISK; recording a shed entry made the next
@@ -564,7 +586,7 @@ export function openIndexSession(
           for (const name of names) shed.add(name);
           onShed?.(names);
         });
-        if (written) for (const [key, { hash }] of pending) if (!shed.has(key)) memo.set(key, hash);
+        if (written) for (const [key, value] of pending) if (value !== "remove" && !shed.has(key)) memo.set(key, value.hash);
         pending.clear();
         return written;
       } catch (e) {
