@@ -317,6 +317,14 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(out).toMatch(/^hono: re-resolved via npm/);
       expect(readCache("hono", oldFollowed, 168)).toBeUndefined(); // dropped
       expect(readCache("hono", "https://hono.dev/llms-full.txt", 168)?.content).toBe("# Hono new"); // the new primary survives
+      // Round 4 (test-auditor, F13 — the resolved-branch twin of F9): HONO_URL is a NON-CHOSEN
+      // candidate of the re-resolved entry's rebuilt chain (resolve.ts's synthesizeCandidates
+      // puts the bare origin's llms.txt on out.entry.urls alongside llms-full.txt), surviving
+      // today only because refresh.ts:83 passes `[out.chosen, ...out.entry.urls]`, not
+      // `[out.chosen]` alone. Precondition first, so a future change to the candidate synthesis
+      // that drops this URL doesn't leave the survival assertion passing for the wrong reason.
+      expect(reg.entries.get("hono")!.urls).toContain(HONO_URL);
+      expect(readCache("hono", HONO_URL, 168)?.content).toBe("# Hono old");
     });
 
     /**
