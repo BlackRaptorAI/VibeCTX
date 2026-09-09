@@ -9,6 +9,7 @@ import type { Registry } from "../src/registry.js";
 import { autowarmStatus, resetAutowarm } from "../src/autowarm.js";
 import { buildServer, startServer } from "../src/server.js";
 import { loadDiscoveredRegistry } from "../src/registry.js";
+import { MAX_TOKENS_BUDGET } from "../src/search.js";
 
 /**
  * Q2 (PAR-656): the real McpServer over an in-memory transport — the tool list, a tool
@@ -143,16 +144,38 @@ describe('get_docs mode over the transport (D-26)', () => {
     await client.close();
   });
 
-  it("get_docs advertises mode as an enum of exactly sections and snippets", async () => {
+  it("A2 (PAR-715): the maxTokens matrix — Infinity, over-budget, negative, zero and fractional are schema errors; the default and the ceiling are accepted", async () => {
+    // Pinned against a literal, not only against itself — see the identical note in cli.test.ts.
+    expect(MAX_TOKENS_BUDGET).toBe(200_000);
+    writeCache("stripe", STRIPE_URL, STRIPE_DOC);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, call } = await connect(stripeRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    for (const maxTokens of [Infinity, 1_000_000_000, -5, 0, 3.7, MAX_TOKENS_BUDGET + 1]) {
+      const out = await call("get_docs", { library: "stripe", topic: "checkout session create", maxTokens });
+      expect(out, `maxTokens: ${maxTokens}`).toContain("Input validation error");
+    }
+    for (const maxTokens of [4000, MAX_TOKENS_BUDGET]) {
+      const out = await call("get_docs", { library: "stripe", topic: "checkout session create", maxTokens });
+      expect(out, `maxTokens: ${maxTokens}`).toContain("Source:");
+      expect(out, `maxTokens: ${maxTokens}`).not.toContain("Input validation error");
+    }
+    await client.close();
+  });
+
+  it("get_docs advertises mode as an enum of exactly sections and snippets, and maxTokens as a bounded integer", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = buildServer(stripeRegistry());
     await server.connect(serverTransport);
     const client = new Client({ name: "probe", version: "0" });
     await client.connect(clientTransport);
     const getDocs = (await client.listTools()).tools.find((t) => t.name === "get_docs")!;
-    const props = getDocs.inputSchema.properties as Record<string, { enum?: string[] }>;
+    const props = getDocs.inputSchema.properties as Record<string, { enum?: string[]; type?: string; exclusiveMinimum?: number; maximum?: number }>;
     expect(Object.keys(props).sort()).toEqual(["library", "maxTokens", "mode", "topic"]);
     expect(props.mode.enum).toEqual(["sections", "snippets"]);
+    // A2 (PAR-715): this is what a conforming client actually reads — if the cap ever moved
+    // out of the schema (into a `.refine()` or a handler-side clamp), this is the assertion
+    // that would catch it; the rejection tests above would not, since both still reject.
+    expect(props.maxTokens).toMatchObject({ type: "integer", exclusiveMinimum: 0, maximum: MAX_TOKENS_BUDGET });
     await client.close();
   });
 });
@@ -313,6 +336,22 @@ describe("search over the transport (PAR-659)", () => {
     await client.close();
   });
 
+  it("A2 (PAR-715): the maxTokens matrix — Infinity, over-budget, negative, zero and fractional are schema errors; the default and the ceiling are accepted", async () => {
+    expect(MAX_TOKENS_BUDGET).toBe(200_000);
+    seed();
+    const { client, call } = await connect(searchRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    for (const maxTokens of [Infinity, 1_000_000_000, -5, 0, 3.7, MAX_TOKENS_BUDGET + 1]) {
+      const out = await call("search", { query: "streaming", maxTokens });
+      expect(out, `maxTokens: ${maxTokens}`).toContain("Input validation error");
+    }
+    for (const maxTokens of [4000, MAX_TOKENS_BUDGET]) {
+      const out = await call("search", { query: "streaming", maxTokens });
+      expect(out, `maxTokens: ${maxTokens}`).toContain("Source:");
+      expect(out, `maxTokens: ${maxTokens}`).not.toContain("Input validation error");
+    }
+    await client.close();
+  });
+
   it("its description tells an agent when to reach for it instead of get_docs", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = buildServer(searchRegistry());
@@ -320,9 +359,13 @@ describe("search over the transport (PAR-659)", () => {
     const client = new Client({ name: "probe", version: "0" });
     await client.connect(clientTransport);
     const tool = (await client.listTools()).tools.find((t) => t.name === "search")!;
-    expect(Object.keys(tool.inputSchema.properties ?? {}).sort()).toEqual(["libraries", "maxTokens", "query"]);
+    const props = tool.inputSchema.properties as Record<string, { type?: string; exclusiveMinimum?: number; maximum?: number }>;
+    expect(Object.keys(props).sort()).toEqual(["libraries", "maxTokens", "query"]);
     expect(tool.description).toContain("get_docs");
     expect(tool.description).toMatch(/cache-only|offline/i);
+    // A2 (PAR-715): same reasoning as the matching get_docs assertion above — the advertised
+    // shape is what a conforming client reads, and nothing else in this file pins it.
+    expect(props.maxTokens).toMatchObject({ type: "integer", exclusiveMinimum: 0, maximum: MAX_TOKENS_BUDGET });
     await client.close();
   });
 });

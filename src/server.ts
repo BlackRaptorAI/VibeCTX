@@ -3,7 +3,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { z } from "zod";
 import type { Registry } from "./registry.js";
 import { getDocsToolText } from "./get-docs.js";
-import { searchToolText, MAX_QUERY_CHARS } from "./search.js";
+import { searchToolText, MAX_QUERY_CHARS, MAX_TOKENS_BUDGET } from "./search.js";
 import { refreshToolText } from "./refresh.js";
 import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
@@ -25,6 +25,10 @@ import { VERSION } from "./version.js";
 function text(s: string) {
   return { content: [{ type: "text" as const, text: s }] };
 }
+
+// A2 (PAR-715): shared by both tools so the two schemas cannot drift apart — see
+// MAX_TOKENS_BUDGET's comment in search.ts for what this closes.
+const maxTokensSchema = z.number().int().positive().max(MAX_TOKENS_BUDGET).optional();
 
 export function buildServer(registry: Registry): McpServer {
   // The version a client sees is the manifest's, read at load time (src/version.ts) — it was
@@ -49,10 +53,7 @@ export function buildServer(registry: Registry): McpServer {
       inputSchema: {
         library: z.string().describe("Library name (or alias) from list_libraries, or any npm / PyPI package name"),
         topic: z.string().optional().describe("What you need docs about"),
-        maxTokens: z
-          .number()
-          .optional()
-          .describe("Approximate response budget (default 4000)"),
+        maxTokens: maxTokensSchema.describe(`Approximate response budget (default 4000, max ${MAX_TOKENS_BUDGET})`),
         // D-26: an enum, so an unknown mode is a schema error the client sees rather than
         // a silent fall back to sections.
         mode: z
@@ -80,12 +81,7 @@ export function buildServer(registry: Registry): McpServer {
           .min(1)
           .max(MAX_QUERY_CHARS)
           .describe("What you are looking for, in plain words — e.g. \"server-sent events streaming\""),
-        maxTokens: z
-          .number()
-          .int()
-          .positive()
-          .optional()
-          .describe("Approximate response budget (default 4000), shared across all libraries"),
+        maxTokens: maxTokensSchema.describe(`Approximate response budget (default 4000, max ${MAX_TOKENS_BUDGET}), shared across all libraries`),
         // Capped at 30: a filter is a shortlist, and an unbounded list is a way to make one
         // call do thirty libraries' work of name resolution.
         libraries: z

@@ -283,8 +283,10 @@ aliases both work, and an unknown one is *reported in the response* rather than 
 search. A filtered search reports both numbers — `Searched 1 of 2 requested libraries
 (30 configured)` — so narrowing the search can never make your cache look emptier than it
 is. `query` is capped at 1000 characters — a longer one is clipped rather than refused, and
-said so twice: on stderr for the terminal and in `notes` for `--json`. Exit codes: `0`
-something matched, `1` nothing matched, `2` usage or config error.
+said so twice: on stderr for the terminal and in `notes` for `--json`. `maxTokens` is capped
+at 200,000, on `search`, on `get_docs`, and at `--max-tokens` — unlike `query`, an over-budget
+value is *refused*, not clipped. Exit codes: `0` something matched, `1` nothing matched, `2`
+usage or config error.
 
 `--json` emits `{ schemaVersion: 1, generatedAt, query, maxTokens, groups, configured,
 requested, searched, searchedLibraries, matchedLibraries, unknown, uncached, fromIndex,

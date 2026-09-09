@@ -95,6 +95,29 @@ export const DEFAULT_SEARCH_BUDGET_TOKENS = 4000;
 export const MAX_QUERY_CHARS = 1000;
 
 /**
+ * A2 (PAR-715) — the largest `maxTokens` either tool or the CLI will accept.
+ * `get_docs`'s `maxTokens` was unbounded (`z.number().optional()`): `maxTokens: 1e9` makes
+ * `budget * 4 = 4e9`, so `doc.content.slice(0, 4e9)` returns the entire cached document into
+ * the model's context regardless of size. `search`'s was `.int().positive()` — bounded below
+ * zero but not above, so `1e9` was accepted there too. Same defect class D-39 closed in
+ * `search`'s rendering, still open in both tools' input validation.
+ *
+ * Enforced at the three input boundaries: the `get_docs` schema, the `search` schema, and the
+ * CLI's `--max-tokens` parse. Unlike MAX_QUERY_CHARS, there is no fourth rung inside the
+ * ranking path itself — `getDocsToolText` and `runSearch` still consume `maxTokens` unclamped,
+ * so a caller reaching either directly (as `test/get-docs.test.ts` does) bypasses this bound.
+ * That is judged acceptable because the only callers reachable from outside the process are
+ * the schemas and the CLI, all three covered.
+ *
+ * 200,000 is ASSUMED, not measured against a specific failure the way MAX_QUERY_CHARS is:
+ * `200_000 * 4 = 800,000` characters is still a large fraction of most cached documents
+ * (`PRIMARY_DOC_MAX_BYTES` in fetcher.ts is 25 MiB) but stops short of the multi-gigabyte
+ * `slice` the unbounded schema allowed. It is a ceiling against unbounded allocation, not a
+ * usage policy — a caller wanting more than 4000 tokens has to ask for it explicitly either way.
+ */
+export const MAX_TOKENS_BUDGET = 200_000;
+
+/**
  * Libraries whose sections may appear in one response. The point of `search` is to say WHICH
  * library owns a concept, and a reader cannot act on twenty candidates; capping also bounds
  * the render path, which re-reads and re-splits one cached document per rendered library.

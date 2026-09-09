@@ -7,7 +7,7 @@ import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
 import { resetSearchIndexMemo } from "../src/search-index.js";
-import { MAX_QUERY_CHARS, SEARCH_SCHEMA_VERSION } from "../src/search.js";
+import { MAX_QUERY_CHARS, MAX_TOKENS_BUDGET, SEARCH_SCHEMA_VERSION } from "../src/search.js";
 
 let dir: string;
 /** A working directory with no `.git` and no config file (Q1). */
@@ -547,6 +547,25 @@ describe("parseSearchArgs (PAR-659)", () => {
     expect(() => parseSearchArgs(["x", "--max-tokens", "zero"])).toThrow(/positive whole number/);
     expect(() => parseSearchArgs(["x", "--max-tokens", "0"])).toThrow(/positive whole number/);
     expect(() => parseSearchArgs(["x", "--max-tokens", "1.5"])).toThrow(/positive whole number/);
+  });
+
+  it("A2 (PAR-715): the maxTokens matrix — Infinity, over-budget, negative, zero and fractional are all rejected; the default and the ceiling are accepted", () => {
+    // Pinned against a literal, not only against itself: every assertion below is
+    // parameterised by MAX_TOKENS_BUDGET, so this is what stops a future change to the
+    // constant from silently widening what Gate 2's matrix is meant to hold at 200,000.
+    expect(MAX_TOKENS_BUDGET).toBe(200_000);
+    // Infinity, however it arrives at the shell — the literal word, or "1e400", a magnitude
+    // Number() overflows to Infinity rather than NaN (JSON.parse('1e400') does the same,
+    // which is how a real MCP client sends it).
+    expect(() => parseSearchArgs(["x", "--max-tokens", "Infinity"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "1e400"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "1000000000"])).toThrow(new RegExp(`no greater than ${MAX_TOKENS_BUDGET}`));
+    expect(() => parseSearchArgs(["x", "--max-tokens", "-5"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "0"])).toThrow(/positive whole number/);
+    expect(() => parseSearchArgs(["x", "--max-tokens", "3.7"])).toThrow(/positive whole number/);
+    expect(parseSearchArgs(["x", "--max-tokens", "4000"]).maxTokens).toBe(4000);
+    expect(parseSearchArgs(["x", "--max-tokens", String(MAX_TOKENS_BUDGET)]).maxTokens).toBe(MAX_TOKENS_BUDGET);
+    expect(() => parseSearchArgs(["x", "--max-tokens", String(MAX_TOKENS_BUDGET + 1)])).toThrow(new RegExp(`no greater than ${MAX_TOKENS_BUDGET}`));
   });
 
   it("a bare word is query text, never a library — only --library names one", () => {

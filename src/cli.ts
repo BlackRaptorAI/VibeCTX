@@ -3,7 +3,7 @@ import { ConfigError } from "./config.js";
 import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
-import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS } from "./search.js";
+import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS, MAX_TOKENS_BUDGET } from "./search.js";
 
 /**
  * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm` and `search`;
@@ -176,7 +176,12 @@ export function parseSearchArgs(args: string[]): SearchCliArgs {
         else if (arg === "--config") parsed.config = value;
         else {
           const n = Number(value);
-          if (!Number.isInteger(n) || n <= 0) throw new Error(`--max-tokens requires a positive whole number, not "${value}"`);
+          // A2 (PAR-715): the accepted RANGE is exactly the MCP schemas' — the integers in
+          // (0, MAX_TOKENS_BUDGET] — so this path cannot admit a value get_docs/search would
+          // reject. (Number() itself is looser than zod's — it reads "0x30" or "  4000  " —
+          // but nothing outside that range gets through either way.)
+          if (!Number.isInteger(n) || n <= 0 || n > MAX_TOKENS_BUDGET)
+            throw new Error(`--max-tokens requires a positive whole number no greater than ${MAX_TOKENS_BUDGET}, not "${value}"`);
           parsed.maxTokens = n;
         }
         i += 1;
