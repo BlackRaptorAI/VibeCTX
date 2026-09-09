@@ -233,3 +233,17 @@ describe("listLibrariesText: the config header (D-18, PAR-657)", () => {
     expect(listLibrariesText(registry).startsWith(`Cache dir: ${dir}\n\n`)).toBe(true);
   });
 });
+
+describe("A4 (PAR-717) — a corrupt .meta.json no longer crashes list_libraries", () => {
+  it("reports the entry not cached instead of throwing (audit finding 4.5: list-libraries.ts:37 was unguarded and untested)", () => {
+    const url = "https://fastify.dev/llms.txt";
+    writeCache("fastify", url, "# Fastify\n- [A](/docs/A.md)");
+    const metaPath = join(dir, "fastify", `${url.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    writeFileSync(metaPath, "{ not json", "utf8");
+    let text = "";
+    expect(() => {
+      text = listLibrariesText(registry);
+    }).not.toThrow();
+    expect(text).toMatch(/- \*\*fastify\*\* — Fastify web framework reference \[not cached\] \[unknown\]/);
+  });
+});

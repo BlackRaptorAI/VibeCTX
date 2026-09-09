@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
@@ -600,6 +600,16 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(out).toContain("Return a function from useEffect");
     // Case-folded input takes the same path.
     expect(await getDocsToolText(registry, { library: "React" })).toContain(`Source: ${REACT_URL}`);
+  });
+
+  it("A4: a corrupt .meta.json on the requested entry no longer crashes get_docs — it falls through to a fresh fetch instead", async () => {
+    writeCache("react", REACT_URL, "# React old\n\n## useEffect cleanup\n\nStale text.");
+    const metaPath = join(dir, "react", `${REACT_URL.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    writeFileSync(metaPath, "{ not json", "utf8");
+    stubFetch({ [REACT_URL]: "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup." });
+    const out = await getDocsToolText(registry, { library: "reactjs", topic: "useEffect cleanup" });
+    expect(out).toContain(`Source: ${REACT_URL}`);
+    expect(out).toContain("Return a function from useEffect");
   });
 
   it("an unknown library is resolved implicitly (PAR-655): metadata → document → docs, and the entry joins the live registry", async () => {

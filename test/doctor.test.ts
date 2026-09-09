@@ -503,8 +503,12 @@ describe("report shape, table and exit code", () => {
 });
 
 describe("runDoctor per-library failure isolation", () => {
-  it("a library whose cache read throws is reported unreachable with the error; the rest still render", async () => {
-    // Corrupt meta.json → JSON.parse throws inside readCache → getLibraryDoc → getDocsDetailed.
+  it("A4: a corrupt meta.json no longer throws inside readCache — the entry just reads as uncached, same as a genuine miss, and the rest still render", async () => {
+    // Before A4, this reached checkLibrary's generic outer catch (`reasons: ["error: ..."]`,
+    // a JSON SyntaxError message) — a real safety net, but one that reported the entry
+    // through a different, exception-shaped path than an ordinary "nothing cached, nothing
+    // fetched" miss. toCacheMeta now makes readCache report it uncached directly, so it
+    // takes the SAME path any other unreachable library takes.
     writeCache("broken", "https://broken.example.com/llms.txt", "# Broken");
     const metaPath = join(dir, "broken", `${urlSlug("https://broken.example.com/llms.txt")}.meta.json`);
     writeFileSync(metaPath, "{ not json", "utf8");
@@ -520,9 +524,7 @@ describe("runDoctor per-library failure isolation", () => {
     expect(broken.kind).toBe("unreachable");
     expect(broken.healthy).toBe(false);
     expect(broken.probes).toEqual([]);
-    expect(broken.reasons).toHaveLength(1);
-    expect(broken.reasons[0]).toMatch(/^error: /);
-    expect(broken.reasons[0]).toMatch(/JSON/i);
+    expect(broken.reasons).toEqual(["unreachable: nothing fetched and nothing cached"]);
     expect(react.healthy).toBe(true);
     expect(report.healthy).toBe(1);
     expect(report.total).toBe(2);

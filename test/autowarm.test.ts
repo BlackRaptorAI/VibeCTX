@@ -98,6 +98,18 @@ describe("configuredEntriesNeedingWarm", () => {
     const names = configuredEntriesNeedingWarm(registry()).map((e) => e.name);
     expect(names).toEqual(["hono", "zod"]);
   });
+
+  it("A4: a corrupt meta.json reads as uncached (never throws), so that entry needs warm like any other uncached one", () => {
+    mkdirSync(join(dir, "react"), { recursive: true });
+    const slug = REACT_URL.replace(/[^a-z0-9]/gi, "_");
+    writeFileSync(join(dir, "react", `${slug}.md`), "# React", "utf8");
+    writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ corrupt", "utf8");
+    let names: string[] = [];
+    expect(() => {
+      names = configuredEntriesNeedingWarm(registry()).map((e) => e.name);
+    }).not.toThrow();
+    expect(names).toContain("react");
+  });
 });
 
 describe("startAutowarm", () => {
@@ -176,18 +188,26 @@ describe("startAutowarm", () => {
     expect(notes.join("")).toMatch(/^vibectx: autowarm cached 0\/1 configured libraries; not fetched: zod \(zod: E(NOTDIR|EXIST)/);
   });
 
-  it("Q5: a corrupt meta.json makes the pre-scan itself throw — the outer catch reports it and the promise still resolves", async () => {
+  it("Q5, superseded by A4: one corrupt meta no longer aborts the whole warm batch", async () => {
+    // Before A4: a corrupt meta.json made the pre-scan itself throw, aborting the WHOLE
+    // batch — every other entry went silently unwarmed too, not just the corrupt one. After
+    // A4: that one entry just reads as uncached, and the run completes normally for all of
+    // them (react, hono and zod all attempted below; react because its meta reads as
+    // uncached, not because anything threw).
     mkdirSync(join(dir, "react"), { recursive: true });
     const slug = REACT_URL.replace(/[^a-z0-9]/gi, "_");
     writeFileSync(join(dir, "react", `${slug}.md`), "# React", "utf8");
     writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ corrupt", "utf8");
-    const spy = vi.fn();
-    vi.stubGlobal("fetch", spy);
     const notes: string[] = [];
-    const summary = await startAutowarm(registry(), { warn: (m) => notes.push(m) });
-    expect(summary).toEqual({ attempted: 0, cached: 0, failed: [], aborted: 0 });
-    expect(spy).not.toHaveBeenCalled();
-    expect(notes.join("")).toMatch(/^vibectx: autowarm cached 0\/0 configured libraries \(.*JSON/);
+    const summary = await startAutowarm(registry(), {
+      warn: (m) => notes.push(m),
+      fetchDoc: async () => undefined, // network unavailable for every entry in this test
+    });
+    // react, hono and zod all needed warm (react because its meta reads as uncached, not
+    // because it threw); elysia is resolved and stays excluded. All three were genuinely
+    // attempted — this is the fix: one corrupt file no longer silently skips the batch.
+    expect(summary).toEqual({ attempted: 3, cached: 0, failed: ["react", "hono", "zod"], aborted: 0 });
+    expect(notes.join("")).toBe("vibectx: autowarm cached 0/3 configured libraries; not fetched: react, hono, zod\n");
   });
 
   it("swallows a throwing fetchDoc and a network failure alike: the promise resolves and the failures are reported once", async () => {

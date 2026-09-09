@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
@@ -174,5 +174,14 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     expect(out).toBe('React: not replaced — "react" is a curated entry (default, config or alias); a resolved record cannot override it');
     expect(reg.entries.get("react")).toBe(curated);
     expect(readCache("react", REACT_URL, 168)).toBeUndefined();
+  });
+
+  it("A4: a corrupt .meta.json on the entry being refreshed no longer crashes refresh (audit finding 4.5: refresh.ts:51 was unguarded and untested)", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    const metaPath = join(dir, "react", `${REACT_URL.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    writeFileSync(metaPath, "{ not json", "utf8");
+    stubFetch({ [REACT_URL]: "# React new" });
+    await expect(refreshToolText(registry, "reactjs")).resolves.toBe(`react: refreshed from ${REACT_URL} (11 chars)`);
+    expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new"); // the corrupt meta was silently discarded, not fatal
   });
 });
