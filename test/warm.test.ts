@@ -367,7 +367,7 @@ describe("formatWarmTable / warmToolText", () => {
     writePackageJson({ react: "19" });
     const reg = loadDiscoveredRegistry({ cwd: project, env: {}, home: join(cache, "home") });
     const report = await runWarm(reg, { dir: project, offline: true });
-    const note = 'config: ./vibectx.config.json (project) not loaded: libraries[0].urls ("a"): must be a non-empty array of https URLs';
+    const note = 'config: ./vibectx.config.json (project) not loaded: libraries[0].urls ("a"): "http://x/y" must use https:';
     expect(JSON.parse(JSON.stringify(report)).notes).toContain(note); // the --json report
     expect(formatWarmTable(report)).toContain(`note: ${note}`);
     expect(report.schemaVersion).toBe(WARM_SCHEMA_VERSION); // additive: no schema bump

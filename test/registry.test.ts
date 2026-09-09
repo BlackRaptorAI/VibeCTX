@@ -598,10 +598,10 @@ describe("loadDiscoveredRegistry: the path index.ts and the CLI use (D-14, PAR-6
     expect(url(reg)).toBe("https://user.example.com/x.txt"); // the user layer still applied
     expect(reg.entries.size).toBe(31); // defaults + the user entry
     expect(warnings).toEqual([
-      'vibectx: ./vibectx.config.json: libraries[0].urls ("a"): must be a non-empty array of https URLs — file skipped, continuing without it',
+      'vibectx: ./vibectx.config.json: libraries[0].urls ("a"): "http://x/y" must use https: — file skipped, continuing without it',
     ]);
     const skipped = reg.config?.files.find((f) => f.scope === "project");
-    expect(skipped?.error).toBe('libraries[0].urls ("a"): must be a non-empty array of https URLs');
+    expect(skipped?.error).toBe('libraries[0].urls ("a"): "http://x/y" must use https:');
     expect(reg.config?.files.find((f) => f.scope === "user")?.error).toBeUndefined();
   });
 
@@ -633,10 +633,10 @@ describe("loadDiscoveredRegistry: the path index.ts and the CLI use (D-14, PAR-6
     const broken = join(dir, "broken.json");
     writeFileSync(broken, '{ "libraries": [{ "name": "a", "urls": ["http://x/y"] }] }', "utf8");
     expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home, flag: broken })).toThrow(
-      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
+      /libraries\[0\]\.urls \("a"\): "http:\/\/x\/y" must use https:$/,
     );
     expect(() => loadDiscoveredRegistry({ cwd: repo, env: { VIBECTX_CONFIG: broken }, home })).toThrow(
-      /libraries\[0\]\.urls \("a"\): must be a non-empty array of https URLs$/,
+      /libraries\[0\]\.urls \("a"\): "http:\/\/x\/y" must use https:$/,
     );
     expect(() => loadDiscoveredRegistry({ cwd: repo, env: {}, home, flag: join(dir, "nope.json") })).toThrow(/nope\.json: not found$/);
   });
