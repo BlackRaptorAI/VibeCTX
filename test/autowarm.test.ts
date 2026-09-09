@@ -393,7 +393,8 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     // by test/config.test.ts's D-22-grammar rejection assertions and test/link-policy.test.ts's
     // unit-level `validateLibraryUrl` coverage. `localhost` and the IPv6 loopback (below) ARE
     // real, controllable addresses, so they get the same live-listener treatment as 127.0.0.1 —
-    // and the positive control above already proved this exact server answers `localhost`.
+    // and the positive control above proved `localhost`'s address resolution reaches a server
+    // bound identically (127.0.0.1) moments earlier in this same run.
     const target = `https://localhost:${port}/x`;
     writeFileSync(join(repo, "vibectx.config.json"), JSON.stringify({ libraries: [{ name: "internal-docs", urls: [target] }] }), "utf8");
 
@@ -407,7 +408,7 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
   });
 
   it("also holds for an IPv6 loopback literal, `[::1]` — a second real, bindable listener", async () => {
-    let v6Hits: string[] = [];
+    const v6Hits: string[] = [];
     let v6Connections = 0;
     const v6Server = createServer((req, res) => {
       v6Hits.push(`${req.method} ${req.url}`);
