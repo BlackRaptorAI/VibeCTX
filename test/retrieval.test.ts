@@ -96,6 +96,12 @@ describe("assemble", () => {
    * and `assemble`'s own per-chunk-to-full-budget clipping renders both in full, overshooting
    * by exactly `SECTION_ASSEMBLE_JOIN.length`; with the join priced correctly, the 2nd chunk no
    * longer fits and `selectSections` stops at one.
+   *
+   * Round 4 (code-reviewer, S1) — `chosen.length` was asserted `toBeGreaterThanOrEqual(1)`,
+   * which every non-empty input satisfies and does not test THIS function at all: mutating
+   * `selectSections`' own join pricing back to zero (leaving `assemble` correct) survived the
+   * whole suite. Tightened to `toBe(1)`, the number `selectSections` alone must return once its
+   * join is priced; verified this kills that exact mutant (`expected 2 to be 1`).
    */
   it("(A6, PAR-719) keeps multi-section accumulation INSIDE the budget — the join separator no longer escapes it", () => {
     const ranked = rankSections(DOC, "configuration cache plugins streaming");
@@ -106,7 +112,7 @@ describe("assemble", () => {
     const budget = chunk1 + chunk2;
     const chosen = selectSections(ranked, budget / 4);
     const out = assemble(ranked, budget / 4);
-    expect(chosen.length).toBeGreaterThanOrEqual(1);
+    expect(chosen.length).toBe(1); // join pricing (in selectSections itself) excludes the 2nd chunk the old code kept
     expect(out.length).toBeLessThanOrEqual(budget);
   });
 

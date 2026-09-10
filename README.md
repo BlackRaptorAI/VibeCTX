@@ -154,8 +154,9 @@ snippet. The table of contents on the no-topic path gets the same discipline: it
 a share of the budget too, so a document with many headings cannot make the table of contents
 itself crowd out the document head. The one exception is the short "no sections/snippets
 matched" diagnostic: it is deliberately NOT bounded by `maxTokens`, so its advice ("try
-broader terms") survives even a very small budget in full — only the `topic` it echoes back is
-length-clipped.
+broader terms") survives even a very small budget in full. The `topic` it echoes back is
+length-clipped, and so is the note block folded into that same message — the diagnostic's own
+fixed wording is the only genuinely unbounded part of it.
 
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe

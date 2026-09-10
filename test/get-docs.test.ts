@@ -274,10 +274,14 @@ describe("getDocs index following", () => {
    * HEADER (ahead of the document head, unconditionally) but capped only at a fixed 60 lines,
    * never as a SHARE of the budget — so a document with many headings could let the TOC alone
    * consume the entire response, leaving no document head at all. MEASURED on this exact
-   * fixture (round 3, test-auditor F6 — round 2's "591" was not re-derived against this
-   * fixture and was wrong for it): with the share cap removed entirely (old code), no document
-   * body survives below `maxTokens: 252`. This is the same failure class D-43 exists to
-   * prevent for the note block, just unaddressed for the TOC.
+   * fixture (round 4, code-reviewer N1 — round 3's own "252" named the wrong criterion; round
+   * 2's "591" was a different error again, never re-derived against this fixture): with the
+   * share cap removed entirely (old code), the first budget with ANY non-empty head is
+   * `maxTokens: 252`, but the test below asserts the STRONGER "Some prose" is literally
+   * present, which the old code does not satisfy until `maxTokens: 261` (252-260 have a
+   * non-empty head that is still truncated mid-heading-list, before any prose). 261 is the
+   * number that matches what this test actually checks. This is the same failure class D-43
+   * exists to prevent for the note block, just unaddressed for the TOC.
    *
    * NAMED CLAIM NARROWED (round 3, test-auditor, F6) — this does not prove the head is never
    * starved on ANY document, only on a document whose individual heading LINES are short (see
@@ -457,11 +461,16 @@ describe("getDocs index following", () => {
       // characterization here, which called it "a test-construction hazard" — it is that too,
       // for THIS test, but the underlying defect lives in product code, not test scaffolding),
       // low practical reachability (real documentation URLs rarely share a 120-character
-      // prefix), out of A6's scope (A6's own product files never call `urlSlug` — verified),
-      // and already known from security-architect's independent A3 review as a follow-up item
-      // needing a tracked PAR number. Worked around here by putting the distinguishing letter
-      // early, so this test's own three later "fetches" don't silently short-circuit on a
-      // cache hit from the first one instead of exercising distinct code paths.
+      // prefix), out of A6's scope (A6's own product files never call `urlSlug` DIRECTLY —
+      // `get-docs.ts` still reaches it transitively through `getLibraryDoc` -> `readCache` /
+      // `writeCache`, round 4, code-reviewer N4), and already flagged once before: independently
+      // by security-architect during A3's review. It has NOT been assigned a PAR number or
+      // filed anywhere durable (round 4, code-reviewer N5 — a grep of `.vibectx-plan/` finds no
+      // record of it) — this comment and the A3 handoff report to Tom are, as of A6, the only
+      // record. Not filing one here either: per the go-card, PAR numbers are oversight's to
+      // assign, not a producer's to invent. Worked around here by putting the distinguishing
+      // letter early, so this test's own three later "fetches" don't silently short-circuit on
+      // a cache hit from the first one instead of exercising distinct code paths.
       const longPath = "a".repeat(600);
       const urlA = `/docs/A-${longPath}.md`;
       const urlB = `https://mirror.example.net/B-${longPath}.md`;

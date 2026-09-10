@@ -300,9 +300,12 @@ export function renderSection(s: SplitSection): string {
   return `## ${renderedPath(s)}\n\n${s.body}`;
 }
 
-/** The separator `assemble` joins rendered sections with — exported so a caller pricing its
- *  own header against the same budget (A6, PAR-719) prices this too, and so `selectSections`
- *  and `assemble` cannot drift apart on what "fits" means. */
+/** The separator `assemble` joins rendered sections with — exported (A6, PAR-719) so
+ *  `selectSections` and `assemble` cannot silently drift apart on what "fits" means, and so
+ *  the tests that pin the join-pricing boundary derive it from this constant instead of
+ *  hardcoding it (round 4, code-reviewer S2: this is NOT priced by any caller outside this
+ *  module today — `get-docs.ts` prices its own header via the separate `reservedChars`
+ *  parameter, not this constant). */
 export const SECTION_ASSEMBLE_JOIN = "\n\n---\n\n";
 
 /** The leading run of `sections` that fits a rough token budget (~4 chars per token), minus
