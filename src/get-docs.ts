@@ -345,7 +345,15 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // and maxTokens through") correctly expects it to survive even a very small `maxTokens` in
   // full — clipping it to the full budget would make a tiny-budget call silently lose the
   // ADVICE that tells the caller what to try next, which is the one thing worth keeping. The
-  // one genuinely unbounded field, `topic`, is clipped on its own instead.
+  // genuinely unbounded PER-CALL field, `topic`, is clipped on its own instead (round 4,
+  // code-reviewer S4 — earlier wording here claimed `topic` was the only unclipped field,
+  // which line 350 below directly contradicts). It is not the only unclipped field in this
+  // template: `entry.name` and `doc.url` are both interpolated raw. `doc.url` is unbounded
+  // (see the same note on the no-topic path above); `entry.name` is bounded to 214 chars only
+  // on the resolve path (`npmNameError`/`pypiNameError`), not for a config-defined entry.
+  // Clipping those two the way `search.ts` already clips its own name/URL fields
+  // (`MAX_LIBRARY_CHARS`/`MAX_URL_CHARS`) is a known deferred follow-up, not something A6
+  // closes.
   const noMatch = (what: string, advice: string): GetDocsOutcome => ({
     text: `${prefix}No ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${entry.name} docs (source: ${doc.url}).${
       noteBlock ? `${noteBlock}\n` : " "
