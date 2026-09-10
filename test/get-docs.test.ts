@@ -278,9 +278,11 @@ describe("getDocs index following", () => {
    * 2's "591" was a different error again, never re-derived against this fixture): with the
    * share cap removed entirely (old code), the first budget with ANY non-empty head is
    * `maxTokens: 252`, but the test below asserts the STRONGER "Some prose" is literally
-   * present, which the old code does not satisfy until `maxTokens: 261` (252-260 have a
-   * non-empty head that is still truncated mid-heading-list, before any prose). 261 is the
-   * number that matches what this test actually checks. This is the same failure class D-43
+   * present, which the old code does not satisfy until `maxTokens: 261` (round 5, code-reviewer
+   * N8 — 252-260 are already one heading INTO the document head at that point, e.g. `maxTokens:
+   * 260` renders `"...Some pro"`; the head is truncated mid-word, not "mid-heading-list" as an
+   * earlier version of this comment said). 261 is the number that matches what this test
+   * actually checks. This is the same failure class D-43
    * exists to prevent for the note block, just unaddressed for the TOC.
    *
    * NAMED CLAIM NARROWED (round 3, test-auditor, F6) — this does not prove the head is never
