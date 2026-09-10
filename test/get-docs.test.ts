@@ -273,11 +273,18 @@ describe("getDocs index following", () => {
    * Round 2 (code-reviewer, Nit 4) — before this fix, the table of contents was priced as
    * HEADER (ahead of the document head, unconditionally) but capped only at a fixed 60 lines,
    * never as a SHARE of the budget — so a document with many headings could let the TOC alone
-   * consume the entire response, leaving no document head at all. MEASURED by the reviewer: a
-   * 70-heading fixture returned no document body below `maxTokens: 591`. This is the same
-   * failure class D-43 exists to prevent for the note block, just unaddressed for the TOC.
+   * consume the entire response, leaving no document head at all. MEASURED on this exact
+   * fixture (round 3, test-auditor F6 — round 2's "591" was not re-derived against this
+   * fixture and was wrong for it): with the share cap removed entirely (old code), no document
+   * body survives below `maxTokens: 252`. This is the same failure class D-43 exists to
+   * prevent for the note block, just unaddressed for the TOC.
+   *
+   * NAMED CLAIM NARROWED (round 3, test-auditor, F6) — this does not prove the head is never
+   * starved on ANY document, only on a document whose individual heading LINES are short (see
+   * the companion test below for the long-single-heading case, which this many-short-headings
+   * fixture cannot exercise).
    */
-  it("(A6, PAR-719) the table of contents is capped as a SHARE of the budget too — the document head is never starved to nothing", async () => {
+  it("(A6, PAR-719) the table of contents is capped as a SHARE of the budget too — many short headings no longer starve the document head", async () => {
     const lines = ["# Fastify"];
     for (let i = 0; i < 70; i++) lines.push(`## Ecosystem ${i}`, `Some prose about ecosystem ${i}.`);
     seedIndex(lines.join("\n"));
@@ -287,6 +294,39 @@ describe("getDocs index following", () => {
       expect(out).toContain("Some prose"); // the document head survives, not just the TOC
       expect(out.length).toBeLessThanOrEqual(maxTokens * 4); // the D-39 invariant, still
     }
+  });
+
+  /**
+   * (A6, PAR-719), round 3 (test-auditor, F6) — the negative case round 2's fix and its test
+   * did not cover: a single heading line LONGER than `tocBudget` itself. Before this round's
+   * fix, the loop took its first heading line unconditionally no matter its length (an
+   * imitation of `selectSections`' "always at least one" rule, but wrongly — that rule caps
+   * the ONE item it always takes; this one didn't), so one 400-character heading alone reached
+   * 402 chars of TOC against a `tocBudget` of 100 (`maxTokens: 50`) — MEASURED: the response
+   * was clipped before it ever reached the `---` separator between the TOC and the document
+   * head, i.e. the head was not merely small but entirely absent, the same D-43 failure this
+   * whole fix exists to prevent, reached by a different route. Fixed the same way D-29 already
+   * requires elsewhere: the oversized first line is CLIPPED to `tocBudget`, not exempted from
+   * it. This does NOT make the document's real content (the `Some prose.` line, well past the
+   * 400-character heading in the raw text) reachable at this budget — `head` is still a slice
+   * from byte 0 of the document, so it re-renders the same long heading before anything past
+   * it can appear, and 200 total chars is not enough room for both a clipped TOC entry and 400+
+   * characters of head. What the fix buys, and what this test actually pins: the separator
+   * between TOC and head is reached, and a real (if small) slice of head content follows it —
+   * the header no longer eats the ENTIRE response the way it did before this fix.
+   */
+  it("(A6, PAR-719) a single heading line longer than the TOC's own budget share is clipped, not taken whole", async () => {
+    const longHeading = "# " + "x".repeat(400);
+    seedIndex([longHeading, "Some prose."].join("\n"));
+    stubFetch({});
+    const out = await getDocs(entry, { maxTokens: 50 }); // budgetChars 200, tocBudget 100
+    expect(out.length).toBeLessThanOrEqual(200); // the D-39 invariant
+    // The response reaches the TOC/head separator (it did not, before this fix — the clipped
+    // response cut off mid-TOC, before "---\n\n" ever appeared) and a non-empty slice of head
+    // content follows it, even though that slice is not (at this budget) real prose.
+    const sepIndex = out.indexOf("\n\n---\n\n");
+    expect(sepIndex).toBeGreaterThan(-1);
+    expect(out.length).toBeGreaterThan(sepIndex + "\n\n---\n\n".length);
   });
 
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
@@ -500,7 +540,7 @@ describe("getDocs index following", () => {
      * A6 (PAR-719), round 2 (test-auditor, F5 — CORRECTED, not self-caught: round 1's own
      * version of this test and its rationale were both wrong, and round 2 found it) — this
      * does NOT pin "no answer content" at 33/34. Traced precisely: at `maxTokens: 33`, the
-     * room left for the body is 132 (budgetChars) minus a 104-character header (37-char
+     * room left for the body is 132 (budgetChars) minus a 104-character header (36-char
      * `Source:` line + 66-char capped note block + 2 for the blank line) = 28 characters —
      * POSITIVE, not zero — and `assemble` genuinely renders a 28-character slice of the top
      * heading line, truncated one character short of completing the word "hostname". What 34
@@ -555,8 +595,8 @@ describe("getDocs index following", () => {
      * genuine zero-content crossover, where `assemble`'s room for the body is exactly zero and
      * NOTHING of the top section — not even a partial heading marker — survives. MEASURED for
      * this fixture: `budgetChars - header.length` is negative-or-zero at `maxTokens: 19` (76
-     * chars) and the first positive character at `maxTokens: 20` (80 chars, room = 1 —
-     * literally the "#" that opens "## Request...").
+     * chars) and the first positive room at `maxTokens: 20` (80 chars, room = 2 — the "##"
+     * that opens "## Request...").
      */
     it("(A6, PAR-719) the genuine zero-content crossover: nothing of the top section survives below maxTokens 20, a sliver does at 20", async () => {
       const fixture = () =>

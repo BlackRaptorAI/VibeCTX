@@ -870,12 +870,15 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
     }
     const ranked = rankSnippets(lines.join("\n"), "client connect close");
     // Round 2 (code-reviewer): DERIVED, not a hardcoded literal, so this stays discriminating
-    // if the separator string or this fixture's rendered snippet size ever change. Every
-    // snippet here renders to the SAME length (identical bodies), so `chunkLen * N` is exactly
-    // the old, unpriced-join code's threshold for fitting N snippets — with the join priced
-    // correctly, fewer than N fit, which is the "multiple snippets, multiple joins" case that
-    // actually exercises cumulative join pricing (a single pair, like the sections test above,
-    // would only prove the FIRST join is priced, not that pricing accumulates correctly).
+    // if the separator string or this fixture's rendered snippet size ever change. NOT every
+    // snippet in this 20-entry fixture is the same length — two-digit call numbers (i >= 10)
+    // render 1-2 characters longer than single-digit ones (round 3, test-auditor F6 nit; the
+    // original comment overstated this) — but the N=5 snippets ranking actually selects here
+    // are its first five, all single-digit, so `chunkLen * N` (derived from just one of them)
+    // is exactly the old, unpriced-join code's threshold for fitting those N. With the join
+    // priced correctly, fewer than N fit, which is the "multiple snippets, multiple joins" case
+    // that actually exercises cumulative join pricing (a single pair, like the sections test
+    // above, would only prove the FIRST join is priced, not that pricing accumulates correctly).
     const chunkLen = assembleSnippets([ranked[0]], 1_000_000, 0).length;
     expect(SNIPPET_ASSEMBLE_JOIN.length).toBeGreaterThan(0); // the whole point: a non-empty join must be priced
     const N = 5;

@@ -179,16 +179,31 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     // header (unconditionally ahead of the document head) but never capped as a SHARE of the
     // budget, only at a fixed 60-line ceiling — so on a document with many/long headings, the
     // TOC alone could consume the entire response and leave no document head at all, the same
-    // failure D-43 was written to prevent for the note block. Built up one heading line at a
-    // time, stopping once another line would exceed half the budget — always at least one
-    // heading, matching `selectSections`' own "always at least one" rule — so the document
-    // head is GUARANTEED at least half of `budgetChars`, not merely whatever the TOC happens
-    // to leave over.
+    // failure D-43 was written to prevent for the note block.
+    //
+    // NARROWED CLAIM (round 3, test-auditor, F6) — round 2's own comment here overstated this
+    // as a GUARANTEE of half of `budgetChars` for the document head. It was not one: the loop
+    // took its first heading line unconditionally regardless of length, so a single heading
+    // longer than `tocBudget` (unbounded — nothing upstream of this slice bounds a heading
+    // line's length) reproduced the exact starvation this fix exists to prevent, by a
+    // different route. Fixed here per D-29 ("the cap always wins, no field escapes it",
+    // already the rule for `selectSections`/`assembleSnippets`): the first line is now CLIPPED
+    // to `tocBudget` rather than taken whole when it alone exceeds it — this is not a "take at
+    // least one heading" exception, it is the same cap the rest of the loop already obeys.
+    // What this buys: the TOC (not counting the fixed `Source:`/label/separator overhead
+    // around it, itself a few dozen chars, backstopped by the final `clipToBudget` like every
+    // other path) never exceeds half of `budgetChars`, so the document head gets a
+    // non-zero share on any budget large enough to hold the fixed overhead plus one clipped
+    // heading character — not a literal "at least half", which the fixed overhead alone rules
+    // out as an exact guarantee.
     const tocBudget = Math.floor(budgetChars / 2);
     let toc = "";
     for (const line of headings) {
       const next = toc.length === 0 ? line : `${toc}\n${line}`;
-      if (next.length > tocBudget && toc.length > 0) break;
+      if (next.length > tocBudget) {
+        if (toc.length === 0) toc = line.slice(0, tocBudget);
+        break;
+      }
       toc = next;
     }
     const header = `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
