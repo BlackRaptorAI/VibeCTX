@@ -198,8 +198,8 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     // (`Source:` line, label, separator — NOT charged against `tocBudget`) can still exceed
     // what's left once the TOC saturates its own half-share. When it saturates (a heading at
     // or past `tocBudget`), head is non-empty only once `budgetChars` clears roughly TWICE
-    // that fixed overhead, not merely "the overhead plus one character" — MEASURED for this
-    // file's own `INDEX_URL` fixture (64-char fixed overhead): `head` stays empty through
+    // that fixed overhead, not merely "the overhead plus one character" — MEASURED for
+    // `test/get-docs.test.ts`'s `INDEX_URL` fixture (64-char fixed overhead): `head` stays empty through
     // `maxTokens: 32` (`budgetChars` 128, `header` 128) and only turns non-empty at
     // `maxTokens: 33` (`budgetChars` 132, `header` 130, `head` 2 chars) — not at
     // `budgetChars >= 65`, which is what "overhead plus one character" would predict. Below

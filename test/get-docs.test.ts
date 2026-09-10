@@ -279,10 +279,12 @@ describe("getDocs index following", () => {
    * share cap removed entirely (old code), the first budget with ANY non-empty head is
    * `maxTokens: 252`, but the test below asserts the STRONGER "Some prose" is literally
    * present, which the old code does not satisfy until `maxTokens: 261` (round 5, code-reviewer
-   * N8 — 252-260 are already one heading INTO the document head at that point, e.g. `maxTokens:
-   * 260` renders `"...Some pro"`; the head is truncated mid-word, not "mid-heading-list" as an
-   * earlier version of this comment said). 261 is the number that matches what this test
-   * actually checks. This is the same failure class D-43
+   * N8, tightened round 6 test-auditor N3 — MEASURED across the range, not just at its top: 252
+   * itself renders a 1-character head, just `"#"`; by 260 it is 33 characters, `"...Some pro"`,
+   * truncated mid-word — the head is genuinely INTO the document by then, but "into" is a
+   * gradient across 252-260, not a step function, and 252 alone is not yet "one heading in").
+   * 261 is the number that matches what this test actually checks. This is the same failure
+   * class D-43
    * exists to prevent for the note block, just unaddressed for the TOC.
    *
    * NAMED CLAIM NARROWED (round 3, test-auditor, F6) — this does not prove the head is never
@@ -360,7 +362,9 @@ describe("getDocs index following", () => {
     const at = await getDocs(entry, { maxTokens: 33 }); // budgetChars 132 — 4 chars clear the overhead
     const sepAt = at.indexOf("\n\n---\n\n");
     expect(sepAt).toBeGreaterThan(-1);
-    expect(at.length).toBeGreaterThan(sepAt + "\n\n---\n\n".length); // a 2-char head slice survives
+    // round 6 (test-auditor N1): pin the exact figure the comment above claims, not just
+    // "something survives" — a 2-char head slice, no more and no less.
+    expect(at.length).toBe(sepAt + "\n\n---\n\n".length + 2);
   });
 
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
