@@ -159,6 +159,19 @@ describe("getDocs index following", () => {
     expect(out).not.toContain("Skipped");
   });
 
+  /** A6 (PAR-719), round 1 (test-auditor, F4) — `topic` is echoed verbatim into the no-match
+   *  message and has no length bound at the MCP schema; this proves the echo is bounded even
+   *  though the message itself is deliberately NOT clipped to the response budget (the
+   *  existing "passes topic and maxTokens through" test below relies on that). */
+  it("(A6, PAR-719) clips an oversized topic echoed into the no-match message, rather than reflecting it unbounded", async () => {
+    seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
+    stubFetch({});
+    const hugeTopic = "zzz-unmatched-".repeat(50); // 700 chars
+    const out = await getDocs(entry, { topic: hugeTopic });
+    expect(out).not.toContain(hugeTopic); // the raw, full-length topic never appears
+    expect(out.length).toBeLessThan(hugeTopic.length); // the response is genuinely smaller than the input, not merely different
+  });
+
   it("reports followed links whose fetch failed", async () => {
     seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
     stubFetch({}); // every fetch 404s
@@ -356,28 +369,60 @@ describe("getDocs index following", () => {
       expect(out.text.length).toBeLessThanOrEqual(maxTokens * 4);
     });
 
-    it("the note block itself is capped, not exempt, for a document whose link text is far longer than the fixture above", async () => {
-      const longTitle = "Request page with an extremely long link title ".repeat(30); // ~1450 chars
-      seedIndex(
-        [
-          "# Fastify",
-          `- [${longTitle}A](/docs/A.md)`,
-          `- [${longTitle}B](https://mirror.example.net/B.md)`,
-          `- [${longTitle}C](/docs/C.md)`,
-          `- [${longTitle}D](/docs/D.md)`,
-        ].join("\n"),
-      );
+    /**
+     * A6 (PAR-719), round 1 (test-auditor, F3) — REPLACES the original version of this test,
+     * which used long link TITLES and never engaged the cap at all: `notes` is built from
+     * URLs only (`Followed index links: `, `Skipped … : `, `Could not fetch …: ` each join
+     * `.url`, never `.title`), so a document with long titles and short URLs produces a SHORT
+     * note block regardless — the original assertion (`<= 4000` at `maxTokens: 1000`) passed
+     * vacuously; `MAX_NOTE_BLOCK_CHARS` could be raised to any value and it would still pass.
+     * This version makes the URLs themselves long (~2045 raw chars across the four note
+     * lines), and picks `maxTokens: 10000` so `budgetChars/2` (20000) is FAR larger than the
+     * raw note text — the fixed `MAX_NOTE_BLOCK_CHARS` ceiling (1000), not the budget-relative
+     * half, is the ONLY constraint that can be binding here. MEASURED: raising
+     * `MAX_NOTE_BLOCK_CHARS` to 1e9 (leaving `budgetChars/2` as the only cap) makes the
+     * assertion below false — the full URL survives — confirming this isolates the fixed
+     * ceiling specifically, not just "some cap or other" (the smaller `maxTokens: 600` this
+     * test originally used did not isolate it: `budgetChars/2` there is 1200, close enough to
+     * 1000 that either constant produces a truncated, D-url-missing result).
+     */
+    it("the note block itself is capped, not exempt, for a document whose LINK URLS are far longer than the fixture above", async () => {
+      // The distinguishing letter sits at the START of the path, not the end: `urlSlug`
+      // truncates at 120 characters, and four URLs sharing a 600-character COMMON PREFIX
+      // before a distinguishing suffix would all truncate to the SAME slug — a real
+      // collision hazard (the same class security-architect found independently in A3's
+      // urlSlug review), which would make three of these four requests silently short-circuit
+      // on a cache hit from the first one and never attempt a real fetch at all.
+      const longPath = "a".repeat(600);
+      const urlA = `/docs/A-${longPath}.md`;
+      const urlB = `https://mirror.example.net/B-${longPath}.md`;
+      const urlC = `/docs/C-${longPath}.md`;
+      const urlD = `/docs/D-${longPath}.md`;
+      seedIndex(["# Fastify", `- [Request A](${urlA})`, `- [Request B](${urlB})`, `- [Request C](${urlC})`, `- [Request D](${urlD})`].join("\n"));
       vi.stubGlobal(
         "fetch",
         vi.fn(async (url: unknown) => {
           const u = String(url);
-          if (u.endsWith("/A.md")) return new Response("# A\n\n## request.hostname\n\nrequest text.", { status: 200, headers: { "content-type": "text/plain" } });
-          if (u.endsWith("/C.md")) return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          if (u.includes("/A-") && u.startsWith("https://fastify.dev")) {
+            return new Response("# A\n\n## request.hostname\n\nrequest text.", { status: 200, headers: { "content-type": "text/plain" } });
+          }
+          if (u.includes("/C-")) {
+            return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          }
           return new Response("nope", { status: 404 });
         }),
       );
-      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 1000 });
-      expect(out.text.length).toBeLessThanOrEqual(4000);
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 10000 });
+      expect(out.text.length).toBeLessThanOrEqual(40000); // the D-39 invariant, still
+      // The FIXED ceiling actually engaged — isolated from budgetChars/2 (20000, far larger
+      // than the ~2045-char raw note text), so this can only be MAX_NOTE_BLOCK_CHARS at work:
+      // the LAST note line ("Could not fetch … urlD") is far enough into the
+      // (clipped-from-the-end) note block that its URL cannot survive in full.
+      expect(out.text).not.toContain(`https://fastify.dev${urlD}`);
+      // And the dropped/followed counts are still reported correctly in the STRUCTURED
+      // outcome even though the rendered text was clipped — the accounting is capped in the
+      // TEXT, not lost from what get_docs actually knows happened.
+      expect(out.dropped).toEqual({ outsideOrigin: 1, tooLarge: 1, unavailable: 1 });
     });
   });
 
@@ -421,6 +466,99 @@ describe("getDocs index following", () => {
       expect(out.text).toContain("request.hostname"); // the answer survives
       expect(out.text.length).toBeLessThanOrEqual(240);
     });
+
+    /**
+     * A6 (PAR-719), round 1 (test-auditor, F5) — D-43's "at ANY budget" is NOT literally true,
+     * and this pins where it stops rather than leaving the claim unqualified. Below the
+     * crossover, the header itself (the `Source:` line plus the capped note block) is already
+     * larger than the whole budget, so `assemble`'s own room for a body is zero — the same
+     * "cap always wins, no size-of-answer exception" rule D-29 already established for
+     * snippets, applied consistently rather than carved around. MEASURED for this exact
+     * fixture: `maxTokens: 34` (136 chars) is the crossover — 33 and below have no answer, 34
+     * and above do.
+     */
+    it("(A6, PAR-719) pins the D-43 crossover for this fixture: no answer content below maxTokens 34, some at 34 and above", async () => {
+      const fixture = () =>
+        seedIndex(
+          [
+            "# Fastify",
+            "- [Request](/docs/Request.md)",
+            "- [Request mirror](https://mirror.example.net/Request.md)",
+            "- [Request big](/docs/Big.md)",
+            "- [Request gone](/docs/Gone.md)",
+          ].join("\n"),
+        );
+      const stub = () =>
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (url: unknown) => {
+            const u = String(url);
+            if (u.endsWith("/Request.md")) {
+              return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+                status: 200,
+                headers: { "content-type": "text/plain" },
+              });
+            }
+            if (u.endsWith("/Big.md")) {
+              return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+            }
+            return new Response("nope", { status: 404 });
+          }),
+        );
+
+      fixture();
+      stub();
+      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 33 });
+      expect(below.text).not.toContain("request.hostname"); // below the crossover: the header alone dominates
+
+      fixture();
+      stub();
+      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 34 });
+      expect(at.text).toContain("request.hostname"); // at the crossover: the answer just fits
+    });
+  });
+
+  /**
+   * A6 (PAR-719), round 1 (test-auditor, F2) — regression test for a bug the builder found
+   * and fixed during development (see `get-docs.ts`'s note-block comment): capping the note
+   * block with `clipText` strips control characters INCLUDING `\n` (`cleanText`,
+   * `project-deps.ts:119-120`), collapsing four separate note lines into one unreadable
+   * run-on string. Every OTHER note assertion in this file is a `toContain` on a substring
+   * that lies wholly inside one line, so that regression would ship green everywhere else —
+   * this is the one structural assertion that actually checks the lines stayed separate.
+   */
+  it("(A6, PAR-719) the note block stays MULTI-LINE — a regression to stripping its newlines would ship silently otherwise", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Request](/docs/Request.md)",
+        "- [Request mirror](https://mirror.example.net/Request.md)",
+        "- [Request big](/docs/Big.md)",
+        "- [Request gone](/docs/Gone.md)",
+      ].join("\n"),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.endsWith("/Request.md")) {
+          return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          });
+        }
+        if (u.endsWith("/Big.md")) {
+          return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+        }
+        return new Response("nope", { status: 404 });
+      }),
+    );
+    const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 1000 }); // generous: nothing should be clipped here
+    // Each note line, on its OWN line — not run together with the next one.
+    expect(out.text).toContain("\nFollowed index links: https://fastify.dev/docs/Request.md\n");
+    expect(out.text).toContain("\nSkipped 1 index links outside allowed hosts (fastify.dev)\n");
+    expect(out.text).toContain("\nSkipped 1 index links larger than 2 MiB: https://fastify.dev/docs/Big.md\n");
+    expect(out.text).toContain("\nCould not fetch 1 index links: https://fastify.dev/docs/Gone.md");
   });
 
   it("does not count the synthetic link-title heading as an answer from a followed page", async () => {

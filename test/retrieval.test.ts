@@ -78,6 +78,40 @@ describe("assemble", () => {
     for (const s of chosen) expect(rendered).toContain(`## ${headingPath(s)}`);
     for (const s of ranked.slice(chosen.length)) expect(rendered).not.toContain(`## ${headingPath(s)}`);
   });
+
+  /**
+   * A6 (PAR-719), round 1 (test-auditor, F1) — the sections-mode analogue of
+   * `test/retrieval.test.ts`'s amended snippets test. Without this, `SECTION_ASSEMBLE_JOIN`
+   * pricing had NO test anywhere that would catch its removal: `assemble`/`selectSections` are
+   * called only from `get-docs.ts`, where the final `clipToBudget` backstop absorbs any
+   * overshoot this function itself produces, and the pre-existing tests above assert no length
+   * bound at all. `budget = 220` is the exact MEASURED boundary where the pre-fix code (join
+   * unpriced) selected a 2nd section it could not afford and overshot to 224 — verified by
+   * reverting the fix and confirming this exact test fails there, then restored.
+   */
+  it("(A6, PAR-719) keeps multi-section accumulation INSIDE the budget — the join separator no longer escapes it", () => {
+    const ranked = rankSections(DOC, "configuration cache plugins streaming");
+    const budget = 220; // chars: 55 tokens
+    const chosen = selectSections(ranked, budget / 4);
+    const out = assemble(ranked, budget / 4);
+    expect(chosen.length).toBeGreaterThanOrEqual(1);
+    expect(out.length).toBeLessThanOrEqual(budget);
+  });
+
+  /**
+   * A6 (PAR-719), round 1 (test-auditor, F1b) — a DIRECT assertion on `reservedChars`, not
+   * masked by `get-docs.ts`'s `clipToBudget` backstop. Deleting the `reservedChars` argument at
+   * every `get-docs.ts` call site left the full suite green before this test existed, because
+   * the backstop absorbs the difference; this proves the reservation is actually load-bearing
+   * inside `retrieval.ts` itself, independent of any caller's own final clip.
+   */
+  it("(A6, PAR-719) reservedChars is priced, not decorative — a caller's header actually shrinks the room sections/snippets get", () => {
+    const ranked = rankSections(DOC, "configuration cache plugins streaming");
+    const unreserved = assemble(ranked, 100, 0).length;
+    const reserved = assemble(ranked, 100, 250).length;
+    expect(reserved).toBeLessThan(unreserved); // reserving 250 of the 400-char budget actually shrinks the body
+    expect(reserved).toBeLessThanOrEqual(400 - 250);
+  });
 });
 
 describe("splitSections — heading path and levels (D-25)", () => {
@@ -833,6 +867,20 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
     const chosen = selectSnippets(ranked, budget / 4);
     expect(chosen.length).toBeGreaterThan(1); // the case that matters: MULTIPLE snippets, multiple joins
     expect(out.length).toBeLessThanOrEqual(budget);
+  });
+
+  /** A6 (PAR-719), round 1 (test-auditor, F1b) — the snippets-mode twin of the direct
+   *  `reservedChars` test above; same reasoning, same requirement. */
+  it("(A6, PAR-719) reservedChars is priced for snippets too, not decorative", () => {
+    const lines = ["# Calls"];
+    for (let i = 0; i < 20; i++) {
+      lines.push(`Call number ${i}:`, "```ts", `client.connect(${i});`, `client.close(${i});`, "```");
+    }
+    const ranked = rankSnippets(lines.join("\n"), "client connect close");
+    const unreserved = assembleSnippets(ranked, 100, 0).length;
+    const reserved = assembleSnippets(ranked, 100, 250).length;
+    expect(reserved).toBeLessThan(unreserved);
+    expect(reserved).toBeLessThanOrEqual(400 - 250);
   });
 
   /** ESC, a C1 control (CSI), a right-to-left override and a zero-width space. */

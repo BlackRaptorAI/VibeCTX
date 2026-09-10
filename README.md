@@ -147,7 +147,10 @@ line, any note about followed or skipped index links, and the sections or snippe
 themselves, separators included — stays inside `maxTokens × 4` characters across all three
 response shapes (a topic's sections, `mode: "snippets"`, and the table-of-contents-plus-head
 response when no topic is given). The note block about followed and skipped links is capped,
-not exempt, so it can never crowd out the answer it is reporting on.
+not exempt, so it cannot by itself crowd out the answer it is reporting on — though at a
+`maxTokens` too small to hold even the `Source:` line and a minimal note, the answer is what
+gives way, the same "the cap always wins" rule that already applies to a single oversized
+snippet.
 
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe

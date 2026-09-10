@@ -22,6 +22,7 @@ import {
   type SplitSection,
 } from "./retrieval.js";
 import { indexCachedDocument } from "./search-index.js";
+import { clipText } from "./config.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
  *  the runnable code blocks inside them. */
@@ -71,6 +72,13 @@ const sectionKey = (s: { heading: string; body: string }) => `${s.heading}\n${s.
  *  five followed URLs plus three skip-category lines at realistic URL lengths, bounded so it
  *  can never itself starve the answer on an ordinary call. ASSUMED, not measured. */
 const MAX_NOTE_BLOCK_CHARS = 1000;
+
+/** A6 (PAR-719), round 1 (test-auditor, F4) — `topic` has no length bound at the MCP schema
+ *  (unlike `search`'s `query`, capped at 1000 chars there) and is echoed verbatim into the
+ *  no-match message. Bounded on echo, matching this codebase's own convention for other
+ *  attacker-influenced strings rendered into a response (`MAX_LIBRARY_CHARS`/`MAX_URL_CHARS`
+ *  in `search.ts`). ASSUMED, not measured. */
+const MAX_ECHOED_TOPIC_CHARS = 200;
 
 /** A6 (PAR-719) — the final backstop every render path in this file applies: whatever the
  *  header (stale-note prefix, `Source:` line, table of contents or note block) and body come
@@ -258,7 +266,18 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // link plus all three skip lines) can by itself run past a small `maxTokens`, leaving
   // `assemble`/`assembleSnippets` nothing to work with and the "answer" absent from a response
   // that is mostly accounting — exactly what D-43 forbids. Capping the note block, not
-  // exempting it, is the rollback trigger's own instruction. A plain length clip, NOT
+  // exempting it, is the rollback trigger's own instruction.
+  //
+  // NARROWED CLAIM (round 1, test-auditor, F5): "at ANY budget" overstates what this buys.
+  // The header (prefix, `Source:` line, capped notes) still has its own fixed floor — the
+  // `Source:` line alone is never zero — so at a budget too small even for THAT, the header
+  // consumes the whole response and the answer is absent, same as D-29 already accepts for
+  // snippets ("the cap always wins" has no size-of-answer exception). MEASURED for the
+  // maximal-note-block fixture `test/get-docs.test.ts`'s D-43 test uses: the crossover is
+  // `maxTokens: 34` (136 chars) — at 33 and below, no section/snippet content survives; at 34
+  // and above, it does. This is a per-fixture number (the URL lengths, library name and note
+  // categories all vary the header's own size), not a universal constant — pinned by test,
+  // not asserted here as a formula. A plain length clip, NOT
   // `clipText`: `clipText` (via `cleanText`) strips C0 control characters to neutralise hostile
   // derived fields, but `\n` (U+000A) IS a C0 control character — running the WHOLE multi-line
   // block through it would silently delete the newlines between note lines, collapsing four
@@ -271,8 +290,18 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
 
   // Everything above this line is identical for both modes (D-26): the same document,
   // the same followed links, the same notes. Only the ranking and the rendering differ.
+  // A6 (PAR-719), round 1 (test-auditor, F4): the no-match response is a fourth render path
+  // D-39 was silent about, and `topic` is echoed back RAW with no length bound anywhere above
+  // the MCP schema (unlike `search`'s `query`, capped at 1000 chars at the schema itself) — an
+  // attacker-length topic could otherwise make this response arbitrarily large. NOT wrapped in
+  // `clipToBudget` like the other three paths: this message is a short, fixed-shape diagnostic
+  // ("no match, try X"), not content, and an existing test (`getDocsToolText`, "passes topic
+  // and maxTokens through") correctly expects it to survive even a very small `maxTokens` in
+  // full — clipping it to the full budget would make a tiny-budget call silently lose the
+  // ADVICE that tells the caller what to try next, which is the one thing worth keeping. The
+  // one genuinely unbounded field, `topic`, is clipped on its own instead.
   const noMatch = (what: string, advice: string): GetDocsOutcome => ({
-    text: `${prefix}No ${what} matched "${topic}" in ${entry.name} docs (source: ${doc.url}).${
+    text: `${prefix}No ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${entry.name} docs (source: ${doc.url}).${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     source,
