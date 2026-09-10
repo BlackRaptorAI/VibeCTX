@@ -333,6 +333,34 @@ describe("getDocs index following", () => {
     expect(out.length).toBeGreaterThan(sepIndex + "\n\n---\n\n".length);
   });
 
+  /**
+   * (A6, PAR-719), round 4 (test-auditor, F7) — round 3's own replacement comment for the F6
+   * fix ALSO overstated its guarantee, this time by roughly a factor of 2: it claimed the
+   * document head is non-empty on "any budget large enough to hold the fixed overhead plus one
+   * clipped heading character", i.e. once `budgetChars` clears the fixed `Source:`/label/
+   * separator overhead by a single char. MEASURED instead (and pinned here, not just asserted
+   * in a comment): for this fixture's `INDEX_URL` (64-char fixed overhead once a long heading
+   * saturates its `tocBudget` share), `head` is empty through `maxTokens: 32` and only turns
+   * non-empty at `maxTokens: 33` — the fixed overhead has to be cleared roughly TWICE over, not
+   * once, because the TOC's own half-share (which the long heading fills exactly) is itself
+   * counted against the SAME budget the overhead comes out of.
+   */
+  it("(A6, PAR-719) the document head stays empty through maxTokens 32 and only turns non-empty at 33, for a heading that saturates its TOC share", async () => {
+    const longHeading = "# " + "x".repeat(1000); // long enough to saturate tocBudget at both budgets below
+    seedIndex([longHeading, "Some prose."].join("\n"));
+    stubFetch({});
+
+    const below = await getDocs(entry, { maxTokens: 32 }); // budgetChars 128, header saturates it exactly
+    const sepBelow = below.indexOf("\n\n---\n\n");
+    expect(sepBelow).toBeGreaterThan(-1); // the TOC itself still fits (D-29's clip), same as maxTokens 50
+    expect(below.length).toBe(sepBelow + "\n\n---\n\n".length); // ...but nothing follows it: head IS empty here
+
+    const at = await getDocs(entry, { maxTokens: 33 }); // budgetChars 132 — 4 chars clear the overhead
+    const sepAt = at.indexOf("\n\n---\n\n");
+    expect(sepAt).toBeGreaterThan(-1);
+    expect(at.length).toBeGreaterThan(sepAt + "\n\n---\n\n".length); // a 2-char head slice survives
+  });
+
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
     seedIndex(
       [

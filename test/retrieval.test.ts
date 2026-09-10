@@ -877,11 +877,13 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
     const ranked = rankSnippets(lines.join("\n"), "client connect close");
     // Round 2 (code-reviewer): DERIVED, not a hardcoded literal, so this stays discriminating
     // if the separator string or this fixture's rendered snippet size ever change. NOT every
-    // snippet in this 20-entry fixture is the same length — two-digit call numbers (i >= 10)
-    // render 1-2 characters longer than single-digit ones (round 3, test-auditor F6 nit; the
-    // original comment overstated this) — but the N=5 snippets ranking actually selects here
-    // are its first five, all single-digit, so `chunkLen * N` (derived from just one of them)
-    // is exactly the old, unpriced-join code's threshold for fitting those N. With the join
+    // snippet in this 20-entry fixture is the same length — the index `i` appears THREE times
+    // per rendered snippet (once in the `context` line, `Call number ${i}:`, and twice in
+    // `code`, `client.connect`/`client.close`), so a two-digit call number (i >= 10) renders 3
+    // characters longer than a single-digit one, not "1-2" as round 3's own correction of this
+    // comment claimed (round 4, test-auditor F7 nit) — but the N=5 snippets ranking actually
+    // selects here are its first five, all single-digit, so `chunkLen * N` (derived from just
+    // one of them) is exactly the old, unpriced-join code's threshold for fitting those N. With the join
     // priced correctly, fewer than N fit, which is the "multiple snippets, multiple joins" case
     // that actually exercises cumulative join pricing (a single pair, like the sections test
     // above, would only prove the FIRST join is priced, not that pricing accumulates correctly).
