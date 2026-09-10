@@ -3,9 +3,15 @@ dist/
 *.log
 .DS_Store
 
-# Release planning, strategy and local governance — never shipped, never committed.
-# Change Records, the build plan and the strategy documents live here.
-.vibectx-plan/
+# Release planning, governance and the engineering record. TRACKED as of 2026-09-10 (D-64):
+# a developer who clones this repo gets the decisions, Change Records, audit and scope
+# statement the work is held to. Only these five stay local — internal business strategy
+# that was deliberately removed from history on 2026-09-08, and local scratch.
+.vibectx-plan/PRODUCT-STRATEGY.md
+.vibectx-plan/LAUNCH-STRATEGY.md
+.vibectx-plan/scrub-paths.txt
+.vibectx-plan/gitignore-new
+.vibectx-plan/plugin-list-2026-09-08.txt
 
 # Project context for the agent packs — written by context-onboarding at the repo root.
 # Local-only: it describes how WE work, not how VibeCTX works, and it never ships.
