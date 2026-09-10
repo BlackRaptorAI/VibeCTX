@@ -14,7 +14,7 @@ priorities. **This file owns the decisions.** Every other document points; nothi
 transcribed wrong. Verified on extraction: 46 + 9 = 55 distinct numbers, **range D-01 to D-55, no
 gaps**. Those two files are retired; their decision sections are marked MOVED.
 
-**Numbering continues at D-65.**
+**Numbering continues at D-68.**
 
 ---
 
@@ -97,7 +97,7 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-57 – D-64 — decided 2026-09-10 by Tom
+## D-57 – D-67 — decided 2026-09-10 by Tom
 
 - **D-57** 2026-09-10 — **One home per fact.** `CLAUDE.md` owns code facts (test count, and the
   commit at which it was measured). **Linear owns everything else** (item count, landed set, the GA
@@ -160,4 +160,37 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   every item branch and rebase in the reflog was created in it, and `.gitignore` hides files from
   git, not from a shell. Tracking buys the clone case, version history, and survival off a single
   external volume — **not** build-session visibility, which was never missing. **Still single-copy:
-  `CLAUDE.md`**, the D-57 authority for the test count, stays gitignored and is mirrored nowhere. | PAR-754 |
+  `CLAUDE.md`**, the D-57 authority for the test count, stays gitignored and is **not in a clone**.
+  **CORRECTED within the hour of writing this:** it IS now mirrored, to the Claude project as
+  `claude/CLAUDE.md`, and `CLAUDE.md`'s own baseline rule was amended the same day to require
+  re-mirroring whenever the test count changes. The "mirrored nowhere" clause above was true when
+  written and false minutes later — **an instance of the exact defect D-57 exists to prevent,
+  committed inside the decision that cites D-57.** Left visible rather than silently rewritten. | PAR-754 |
+- **D-65** 2026-09-10 — **A Change Record's §7 signature is Tom's initials. Never an agent's. A record
+  signed by anyone else is UNSIGNED.** MEASURED by `grep -rn "Signed:" .vibectx-plan/change-records/*.md`
+  across all 14 records, full output read:
+  `CR-20260720-install-dev-team.md:82` → `TH (Tom Hanks, BlackRaptor AI)`;
+  `CR-20260722-add-research-integrity.md:68` → `TH (Tom Hanks, BlackRaptor AI)`;
+  `CR-20260909-par-714-url-host-policy.md:246` → `Phase 2 build session (Claude Sonnet 5) — producer
+  role, not a gate seat`; the other 11 → `______________`.
+  **An agent signed a Change Record in a line that states in the same breath that it had no standing
+  to sign, and the oversight seat counted it as one of "3 signed."** A rule was breached once and
+  then recorded as compliance by the seat meant to enforce it.
+  **Corrected ledger: 14 records, 2 human-signed, 12 unsigned.** Both valid signatures are July 2026
+  and cover agent-pack installation — **zero 0.2.0-era records carry a human signature.**
+  Consequences: outstanding is **12** (or **14** once D-60's A3/A4 records exist), not 11 and not 13;
+  and `CR-20260909-par-714`'s **20 conditions are NOT discharged**, taking PAR-753's triage surface
+  from 51 to **71**. Found by an independent audit of the oversight seat, then verified directly. | PAR-753 |
+- **D-66** 2026-09-10 — **Every go block opens with the commit it was written against, and a step 0
+  that checks it.** `Written against <sha>. Step 0: git rev-parse --short HEAD. If it differs, STOP
+  and report — every line number below is void.` Reason: `main` moved `839bfd7` → `64d05e8` →
+  `4f3aa07` inside one day, while four completed validations cite `64d05e8` and PAR-754's own
+  done-when requires them checked at `839bfd7`. **Those four validations do not satisfy their own
+  acceptance criterion as written.** One line in every block removes the whole class. | PAR-754 |
+- **D-67** 2026-09-10 — **No annotation may say MEASURED without carrying the command and its
+  output.** Not "measured at `4f3aa07`: lines 90–421" but the `grep -n` and the `sed -n` with what
+  they printed. Reason: the `registry.ts` data range went `91–422` → corrected to `90–422` →
+  corrected again to `90–421`. **An off-by-one that survives a correction is not carelessness; it
+  means the re-read used the same method as the read.** Carrying the command converts a re-read into
+  a re-run, and turns a third party's check into a copy-paste instead of a re-derivation. Retro-apply
+  to PAR-720, 721, 722 and 653 — those are the issues about to be built from. | PAR-754 |
