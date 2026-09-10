@@ -141,6 +141,14 @@ heading path, a snippet's language and its context line are stripped of control,
 zero-width characters before they are rendered; section bodies are not, because the body
 is the document.
 
+**The budget is priced on what you actually get back**, the same discipline `search` uses
+([details below](#dont-know-which-library-search)): the rendered response — the `Source:`
+line, any note about followed or skipped index links, and the sections or snippets
+themselves, separators included — stays inside `maxTokens × 4` characters across all three
+response shapes (a topic's sections, `mode: "snippets"`, and the table-of-contents-plus-head
+response when no topic is given). The note block about followed and skipped links is capped,
+not exempt, so it can never crowd out the answer it is reporting on.
+
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe
 questions answered with the right section in the top result (+0/−0; "no sections

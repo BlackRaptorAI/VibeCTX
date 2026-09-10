@@ -213,24 +213,47 @@ describe("getDocs index following", () => {
     expect(out).toContain("https://ghost.example.com/llms-full.txt\nhttps://ghost.example.com/llms.txt");
   });
 
-  it("returns the table of contents and document head when no topic is given", async () => {
-    seedIndex(
-      [
-        "# Fastify",
-        "Intro text.",
-        "## Reference",
-        "### Request",
-        "#### Too deep for the TOC",
-        "- [Request](/docs/Request.md)",
-      ].join("\n"),
-    );
+  const TOC_DOC = [
+    "# Fastify",
+    "Intro text.",
+    "## Reference",
+    "### Request",
+    "#### Too deep for the TOC",
+    "- [Request](/docs/Request.md)",
+  ].join("\n");
+
+  it("returns the table of contents and document head when no topic is given, at a budget that holds both", async () => {
+    seedIndex(TOC_DOC);
     const spy = stubFetch({});
-    const out = await getDocs(entry, { maxTokens: 5 }); // head = 20 chars
+    const out = await getDocs(entry, { maxTokens: 30 }); // 120 chars: the header (98) plus room for a slice of head
     expect(spy).not.toHaveBeenCalled();
     expect(out).toContain("Source: https://fastify.dev/llms.txt");
     expect(out).toContain("Table of contents:\n# Fastify\n## Reference\n### Request\n\n---\n\n");
     expect(out).not.toContain("#### Too deep");
-    expect(out.endsWith("\n\n---\n\n# Fastify\nIntro text")).toBe(true); // 20-char head, period cut
+    expect(out.endsWith("\n\n---\n\n# Fastify\nIntro text.\n")).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(120);
+  });
+
+  /**
+   * AMENDED, not deleted (A6, PAR-719 done-when #3, same instruction as
+   * test/retrieval.test.ts:825's own amendment) — this used to assert the OVERSIGHT FINDING's
+   * exact defect: `head` alone got the full `maxTokens*4` allowance
+   * (`doc.content.slice(0, budget*4)`), and the stale prefix, `Source:` line and table of
+   * contents were then prepended ON TOP of that — so this test's own `maxTokens: 5` case
+   * asserted the FULL 38-character `Source:` line plus a full three-heading table of contents
+   * ALL survived an allowance of only 20 characters. That is the "worst offender of the three
+   * render paths" the go-card's OVERSIGHT FINDING named before this item was built. It is now
+   * the assertion that the overshoot is gone: the combined response — header included — never
+   * exceeds `maxTokens*4`, even when the header alone (98 characters here) is larger than the
+   * whole budget.
+   */
+  it("(A6, PAR-719) never overshoots the budget even when the header alone (Source: line + table of contents) is larger than it", async () => {
+    seedIndex(TOC_DOC);
+    const spy = stubFetch({});
+    const out = await getDocs(entry, { maxTokens: 5 }); // 20 chars — far under the 98-char header alone
+    expect(spy).not.toHaveBeenCalled();
+    expect(out.length).toBeLessThanOrEqual(20);
+    expect(out).toBe("Source: https://fast"); // the D-29 backstop clip — the cap always wins, no field escapes it
   });
 
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
@@ -271,6 +294,133 @@ describe("getDocs index following", () => {
     // The best section came from the followed page, not from the index's own link list.
     expect(out.returnedFromFollowed).toBeGreaterThan(0);
     expect(out.text).toBe(await getDocs(entry, { topic: "request hostname" }));
+  });
+
+  /**
+   * A6 (PAR-719) — the D-39 invariant (rendered response no larger than `maxTokens*4`) proven
+   * across all three render paths, including a maximum-size note block: all four possible note
+   * lines at once (a followed link, and all three skip categories — outsideOrigin, tooLarge,
+   * unavailable), reusing the exact fixture the PAR-707 test above already proves produces all
+   * four simultaneously. `MAX_NOTE_BLOCK_CHARS` additionally bounds the note block itself
+   * (the rollback trigger's own instruction) so this holds even with a document whose link
+   * text is much longer than this fixture's.
+   */
+  describe("A6 (PAR-719) · D-39 — the budget invariant holds across all three render paths", () => {
+    function maximalNoteFixture() {
+      seedIndex(
+        [
+          "# Fastify",
+          "- [Request](/docs/Request.md)",
+          "- [Request mirror](https://mirror.example.net/Request.md)",
+          "- [Request big](/docs/Big.md)",
+          "- [Request gone](/docs/Gone.md)",
+        ].join("\n"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          const u = String(url);
+          if (u.endsWith("/Request.md")) {
+            return new Response(
+              "# Request\n\n## request.hostname\n\nThe hostname of the incoming request.\n\n```js\nrequest.hostname;\n```",
+              { status: 200, headers: { "content-type": "text/plain" } },
+            );
+          }
+          if (u.endsWith("/Big.md")) {
+            return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          }
+          return new Response("nope", { status: 404 });
+        }),
+      );
+    }
+
+    it.each([1, 5, 20, 50, 200, 1000])("sections mode: response never exceeds maxTokens*4 (maxTokens=%i)", async (maxTokens) => {
+      maximalNoteFixture();
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens });
+      expect(out.text.length).toBeLessThanOrEqual(maxTokens * 4);
+      // dropped/followed are still reported correctly even at a tiny budget — the accounting
+      // is capped in the RENDERED text, not silently dropped from the structured outcome.
+      expect(out.dropped).toEqual({ outsideOrigin: 1, tooLarge: 1, unavailable: 1 });
+    });
+
+    it.each([1, 5, 20, 50, 200, 1000])("snippets mode: response never exceeds maxTokens*4 (maxTokens=%i)", async (maxTokens) => {
+      maximalNoteFixture();
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens, mode: "snippets" });
+      expect(out.text.length).toBeLessThanOrEqual(maxTokens * 4);
+    });
+
+    it.each([1, 5, 20, 50, 200, 1000])("no-topic mode: response never exceeds maxTokens*4 (maxTokens=%i)", async (maxTokens) => {
+      seedIndex(TOC_DOC);
+      stubFetch({});
+      const out = await getDocsDetailed(entry, { maxTokens });
+      expect(out.text.length).toBeLessThanOrEqual(maxTokens * 4);
+    });
+
+    it("the note block itself is capped, not exempt, for a document whose link text is far longer than the fixture above", async () => {
+      const longTitle = "Request page with an extremely long link title ".repeat(30); // ~1450 chars
+      seedIndex(
+        [
+          "# Fastify",
+          `- [${longTitle}A](/docs/A.md)`,
+          `- [${longTitle}B](https://mirror.example.net/B.md)`,
+          `- [${longTitle}C](/docs/C.md)`,
+          `- [${longTitle}D](/docs/D.md)`,
+        ].join("\n"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          const u = String(url);
+          if (u.endsWith("/A.md")) return new Response("# A\n\n## request.hostname\n\nrequest text.", { status: 200, headers: { "content-type": "text/plain" } });
+          if (u.endsWith("/C.md")) return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          return new Response("nope", { status: 404 });
+        }),
+      );
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 1000 });
+      expect(out.text.length).toBeLessThanOrEqual(4000);
+    });
+  });
+
+  /**
+   * A6 (PAR-719), done-when #2 — D-43: at any budget, the answer outranks the accounting. The
+   * note block is priced but never allowed to consume the ENTIRE budget while an answer exists
+   * to show instead — capping the note block (rather than exempting it) is what keeps this
+   * true, per the rollback trigger.
+   */
+  describe("A6 (PAR-719) · D-43 — the answer outranks the accounting", () => {
+    it("sections mode: actual section content still appears at a tight budget, not just the note block", async () => {
+      seedIndex(
+        [
+          "# Fastify",
+          "- [Request](/docs/Request.md)",
+          "- [Request mirror](https://mirror.example.net/Request.md)",
+          "- [Request big](/docs/Big.md)",
+          "- [Request gone](/docs/Gone.md)",
+        ].join("\n"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          const u = String(url);
+          if (u.endsWith("/Request.md")) {
+            return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+              status: 200,
+              headers: { "content-type": "text/plain" },
+            });
+          }
+          if (u.endsWith("/Big.md")) {
+            return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          }
+          return new Response("nope", { status: 404 });
+        }),
+      );
+      // A budget tight enough that the note block (4 lines) is a real fraction of it, but
+      // large enough to hold the header plus some body — proving the body is not starved to
+      // make room for the accounting.
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 60 });
+      expect(out.text).toContain("request.hostname"); // the answer survives
+      expect(out.text.length).toBeLessThanOrEqual(240);
+    });
   });
 
   it("does not count the synthetic link-title heading as an answer from a followed page", async () => {

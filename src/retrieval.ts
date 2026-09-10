@@ -300,31 +300,53 @@ export function renderSection(s: SplitSection): string {
   return `## ${renderedPath(s)}\n\n${s.body}`;
 }
 
-/** The leading run of `sections` that fits a rough token budget (~4 chars per
- *  token); always at least one section. This is exactly what `assemble` renders,
- *  exposed so callers can reason about which sections were returned. */
-export function selectSections(sections: Section[], maxTokens: number): Section[] {
-  const budget = maxTokens * 4;
+/** The separator `assemble` joins rendered sections with — exported so a caller pricing its
+ *  own header against the same budget (A6, PAR-719) prices this too, and so `selectSections`
+ *  and `assemble` cannot drift apart on what "fits" means. */
+export const SECTION_ASSEMBLE_JOIN = "\n\n---\n\n";
+
+/** The leading run of `sections` that fits a rough token budget (~4 chars per token), minus
+ *  `reservedChars` a caller has already spent on its own header (A6, PAR-719 — a budget that
+ *  ignores its own separators, or its own caller's header, is not a budget). Always at least
+ *  one section, whatever it costs — `assemble` clips it to fit, exactly as D-29 already does
+ *  for a single snippet whose own overhead exceeds budget: the cap always wins, no field or
+ *  caller-side reservation escapes it. This is exactly what `assemble` renders, exposed so
+ *  callers can reason about which sections were returned. */
+export function selectSections(sections: Section[], maxTokens: number, reservedChars = 0): Section[] {
+  const budget = Math.max(0, maxTokens * 4 - reservedChars);
   const chosen: Section[] = [];
   let used = 0;
   for (const s of sections) {
     const chunk = renderSection(s);
-    if (used + chunk.length > budget && chosen.length > 0) break;
+    const joinCost = chosen.length > 0 ? SECTION_ASSEMBLE_JOIN.length : 0;
+    if (used + joinCost + chunk.length > budget && chosen.length > 0) break;
     chosen.push(s);
-    used += chunk.length;
+    used += joinCost + chunk.length;
   }
   return chosen;
 }
 
-/** Assemble top sections under a rough token budget (~4 chars per token). */
-export function assemble(sections: Section[], maxTokens: number): string {
-  const budget = maxTokens * 4;
-  return selectSections(sections, maxTokens)
-    .map((s) => {
-      const chunk = renderSection(s);
-      return chunk.length > budget ? chunk.slice(0, budget) : chunk;
-    })
-    .join("\n\n---\n\n");
+/** Assemble top sections under a rough token budget (~4 chars per token), minus
+ *  `reservedChars` already spent by the caller's own header (prefix, `Source:` line, notes —
+ *  A6, PAR-719). The join separator between sections is priced exactly, not estimated: this is
+ *  what `formatSearchResults`' `D-39` comment calls pricing what is ACTUALLY returned. Same
+ *  hard rule D-29 already applies to a single snippet: THE CAP ALWAYS WINS — a `reservedChars`
+ *  large enough to leave no room clips the guaranteed first section down to nothing sooner than
+ *  let the combined result exceed `maxTokens*4`. Callers that need the answer to survive a
+ *  large header keep the header itself bounded (see `get-docs.ts`'s note-block cap) rather than
+ *  exempting it here — an exempt header is how this defect started (A6 rollback trigger). */
+export function assemble(sections: Section[], maxTokens: number, reservedChars = 0): string {
+  const budget = Math.max(0, maxTokens * 4 - reservedChars);
+  const chosen = selectSections(sections, maxTokens, reservedChars);
+  let text = "";
+  for (const s of chosen) {
+    const sep = text.length > 0 ? SECTION_ASSEMBLE_JOIN : "";
+    const chunk = renderSection(s);
+    const roomHere = Math.max(0, budget - text.length - sep.length);
+    if (text.length > 0 && roomHere === 0) break; // nothing left after the guaranteed first section
+    text += sep + (chunk.length > roomHere ? chunk.slice(0, roomHere) : chunk);
+  }
+  return text;
 }
 
 /* ------------------------------------------------------------------ *
@@ -513,17 +535,24 @@ function renderSnippet(s: Snippet): string {
   return `### ${renderedPath(s)}\n${context}\n\n${fence}${lang}\n${s.code}\n${fence}`;
 }
 
-/** The leading run of `snippets` that fits the token budget; always at least one,
- *  truncated body and all, so a matching snippet is never silently swallowed. */
-export function selectSnippets(snippets: Snippet[], maxTokens: number): Snippet[] {
-  const budget = maxTokens * 4;
+/** The separator `assembleSnippets` joins rendered snippets with — exported for the same
+ *  reason `SECTION_ASSEMBLE_JOIN` is (A6, PAR-719). */
+export const SNIPPET_ASSEMBLE_JOIN = "\n\n";
+
+/** The leading run of `snippets` that fits the token budget, minus `reservedChars` a caller
+ *  has already spent on its own header (A6, PAR-719 — the join between snippets and the
+ *  caller's header are both priced now, not estimated at zero). Always at least one, truncated
+ *  body and all, so a matching snippet is never silently swallowed. */
+export function selectSnippets(snippets: Snippet[], maxTokens: number, reservedChars = 0): Snippet[] {
+  const budget = Math.max(0, maxTokens * 4 - reservedChars);
   const chosen: Snippet[] = [];
   let used = 0;
   for (const s of snippets) {
     const chunk = renderSnippet(s);
-    if (used + chunk.length > budget && chosen.length > 0) break;
+    const joinCost = chosen.length > 0 ? SNIPPET_ASSEMBLE_JOIN.length : 0;
+    if (used + joinCost + chunk.length > budget && chosen.length > 0) break;
     chosen.push(s);
-    used += chunk.length;
+    used += joinCost + chunk.length;
   }
   return chosen;
 }
@@ -558,14 +587,26 @@ function clipSnippet(s: Snippet, budget: number): string {
   return chunk.length > budget ? chunk.slice(0, budget) : chunk;
 }
 
-/** Assemble top snippets under a rough token budget (~4 chars per token). An
- *  over-budget block is cut inside the fence and the fence closed, and the result is
- *  clipped to the budget whatever the derived fields hold (D-28, D-29). */
-export function assembleSnippets(snippets: Snippet[], maxTokens: number): string {
-  const budget = maxTokens * 4;
-  return selectSnippets(snippets, maxTokens)
-    .map((s) => clipSnippet(s, budget))
-    .join("\n\n");
+/** Assemble top snippets under a rough token budget (~4 chars per token), minus
+ *  `reservedChars` already spent by the caller's own header (A6, PAR-719). Each snippet is
+ *  clipped to the room ACTUALLY LEFT after everything rendered before it — the join
+ *  separators included — not to the full budget independently, which is what let multiple
+ *  snippets together overshoot by up to `SNIPPET_ASSEMBLE_JOIN.length` per join. An over-budget
+ *  block is cut inside the fence and the fence closed (D-28, D-29) — same hard rule as ever:
+ *  THE CAP ALWAYS WINS, `reservedChars` included, exactly as a single snippet's own oversized
+ *  overhead already clips to nothing before this item. Callers keep their own header bounded
+ *  (see `get-docs.ts`'s note-block cap) rather than this function exempting it. */
+export function assembleSnippets(snippets: Snippet[], maxTokens: number, reservedChars = 0): string {
+  const budget = Math.max(0, maxTokens * 4 - reservedChars);
+  const chosen = selectSnippets(snippets, maxTokens, reservedChars);
+  let text = "";
+  for (const s of chosen) {
+    const sep = text.length > 0 ? SNIPPET_ASSEMBLE_JOIN : "";
+    const roomHere = Math.max(0, budget - text.length - sep.length);
+    if (text.length > 0 && roomHere === 0) break;
+    text += sep + clipSnippet(s, roomHere);
+  }
+  return text;
 }
 
 /** Non-image markdown link `[title](href)`; href may be absolute or relative.

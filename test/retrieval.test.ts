@@ -811,18 +811,28 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
     expect(out.length).toBeLessThanOrEqual(400);
   });
 
-  it("(D-29) keeps multi-snippet accumulation inside the budget", () => {
+  it("(D-29, amended A6/PAR-719) keeps multi-snippet accumulation INSIDE the budget — the join separators no longer escape it", () => {
+    // AMENDED, not deleted (A6 done-when #3): this assertion used to ALLOW the join
+    // separators between snippets ("\n\n", SNIPPET_ASSEMBLE_JOIN) to push the result past
+    // `budget`, up to `2 * (chosen.length - 1)` extra characters — a shipped test pinning the
+    // overshoot as expected rather than catching it. `selectSnippets`/`assembleSnippets` now
+    // price the join exactly (retrieval.ts), so this is the assertion that the overshoot is
+    // gone: no slack term, the plain budget.
     const lines = ["# Calls"];
     for (let i = 0; i < 20; i++) {
       lines.push(`Call number ${i}:`, "```ts", `client.connect(${i});`, `client.close(${i});`, "```");
     }
     const ranked = rankSnippets(lines.join("\n"), "client connect close");
-    const budget = 300; // chars: 75 tokens
+    // MEASURED: 360 is not an arbitrary round number — it is the exact boundary where the old,
+    // unpriced-join code selected a 5th snippet it could not actually afford and overshot to
+    // 363 (out.length > budget); every other multiple of 20 nearby does not discriminate
+    // (the pre-fix and post-fix code happen to agree there). This value is deliberately chosen
+    // so a regression in the join pricing is caught, not merely asserted past.
+    const budget = 360; // chars: 90 tokens
     const out = assembleSnippets(ranked, budget / 4);
     const chosen = selectSnippets(ranked, budget / 4);
-    expect(chosen.length).toBeGreaterThanOrEqual(1);
-    // Same contract as `assemble`: the chunks fit the budget, plus the "\n\n" joiners.
-    expect(out.length).toBeLessThanOrEqual(budget + 2 * (chosen.length - 1));
+    expect(chosen.length).toBeGreaterThan(1); // the case that matters: MULTIPLE snippets, multiple joins
+    expect(out.length).toBeLessThanOrEqual(budget);
   });
 
   /** ESC, a C1 control (CSI), a right-to-left override and a zero-width space. */

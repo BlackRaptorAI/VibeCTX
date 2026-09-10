@@ -65,6 +65,22 @@ const DEFAULT_BUDGET_TOKENS = 4000;
 
 const sectionKey = (s: { heading: string; body: string }) => `${s.heading}\n${s.body}`;
 
+/** A6 (PAR-719) — the note block (followed links, skipped-link categories) is priced into the
+ *  budget like everything else, but its own natural size is unbounded (real URLs, real link
+ *  text) — capped here rather than exempted, per the rollback trigger: generous headroom over
+ *  five followed URLs plus three skip-category lines at realistic URL lengths, bounded so it
+ *  can never itself starve the answer on an ordinary call. ASSUMED, not measured. */
+const MAX_NOTE_BLOCK_CHARS = 1000;
+
+/** A6 (PAR-719) — the final backstop every render path in this file applies: whatever the
+ *  header (stale-note prefix, `Source:` line, table of contents or note block) and body come
+ *  to, the combined response never exceeds the budget. D-29's rule, unchanged: the cap always
+ *  wins, no field or header escapes it — this is what makes that literally true here even in
+ *  the case an oversized header alone would otherwise exceed budget. */
+function clipToBudget(text: string, budgetChars: number): string {
+  return text.length > budgetChars ? text.slice(0, budgetChars) : text;
+}
+
 /**
  * The get_docs tool body, kept out of index.ts so it can be exercised without a
  * transport. Returns the text the tool responds with.
@@ -145,6 +161,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   indexCachedDocument(entry.name, doc.url, doc.content);
   const isIndex = looksLikeIndex(doc.content);
   const budget = args.maxTokens ?? DEFAULT_BUDGET_TOKENS;
+  const budgetChars = budget * 4;
   const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
 
   if (!topic) {
@@ -153,9 +170,18 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
       .filter((l) => /^#{1,3}\s/.test(l))
       .slice(0, 60)
       .join("\n");
-    const head = doc.content.slice(0, budget * 4);
+    const header = `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
+    // A6 (PAR-719) — the OVERSIGHT FINDING this item exists to close: `head` used to be
+    // computed as `doc.content.slice(0, budget * 4)` — the ENTIRE allowance — and the stale
+    // prefix, `Source:` line and table of contents were then prepended ON TOP of that, so the
+    // rendered response could run to kilobytes over budget on an ordinary call. The header is
+    // priced FIRST now; `head` gets only what is left. `Math.max(0, ...)`, not a floor that lets
+    // the header itself grow unbounded — D-29's rule applies here too: the cap always wins, so
+    // the final clip below is the backstop for the case where even the header alone is over
+    // budget (a very long table of contents), which `head` alone being empty cannot fix.
+    const head = doc.content.slice(0, Math.max(0, budgetChars - header.length));
     return {
-      text: `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}${head}`,
+      text: clipToBudget(`${header}${head}`, budgetChars),
       source,
       isIndex,
       matched: 0,
@@ -226,7 +252,22 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     );
   }
   if (failed.length) notes.push(`Could not fetch ${failed.length} index links: ${failed.join(", ")}`);
-  const noteBlock = notes.length ? `\n${notes.join("\n")}` : "";
+  // A6 (PAR-719), done-when #2 (D-43 — the answer outranks the accounting): the note block is
+  // capped at the SMALLER of a fixed ceiling and half the call's own budget, never just the
+  // fixed ceiling alone. Without the budget-relative half, a maximal note block (a followed
+  // link plus all three skip lines) can by itself run past a small `maxTokens`, leaving
+  // `assemble`/`assembleSnippets` nothing to work with and the "answer" absent from a response
+  // that is mostly accounting — exactly what D-43 forbids. Capping the note block, not
+  // exempting it, is the rollback trigger's own instruction. A plain length clip, NOT
+  // `clipText`: `clipText` (via `cleanText`) strips C0 control characters to neutralise hostile
+  // derived fields, but `\n` (U+000A) IS a C0 control character — running the WHOLE multi-line
+  // block through it would silently delete the newlines between note lines, collapsing four
+  // lines into one unreadable run-on string. Each note line is already built from this file's
+  // own literal text plus URLs; cleaning those URLs individually (if a hostile document's link
+  // text needs it) is unchanged from before this item and out of A6's scope — this only bounds
+  // LENGTH.
+  const noteBudget = Math.min(MAX_NOTE_BLOCK_CHARS, Math.floor(budgetChars / 2));
+  const noteBlock = notes.length ? `\n${notes.join("\n")}`.slice(0, noteBudget) : "";
 
   // Everything above this line is identical for both modes (D-26): the same document,
   // the same followed links, the same notes. Only the ranking and the rendering differ.
@@ -254,18 +295,25 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
 
   const corpusSections = [...primarySections, ...followedSections];
 
+  // A6 (PAR-719) — the header both topic-given render paths share, priced exactly: the stale
+  // prefix, the `Source:` line and the (now capped) note block. `assemble`/`assembleSnippets`
+  // price their own join separators AND this reserved amount, so the combined text — header
+  // plus body — fits `budget*4` by construction; `clipToBudget` below is the same D-29 backstop
+  // the no-topic path uses, for the case a maximal header alone is over budget.
+  const header = `${prefix}Source: ${doc.url}${noteBlock}\n\n`;
+
   if ((args.mode ?? "sections") === "snippets") {
     const snippets = rankSplitSnippets(corpusSections, topic);
     if (snippets.length === 0) {
       return noMatch("code snippets", 'Try mode "sections" or broader terms.');
     }
     return {
-      text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${assembleSnippets(snippets, budget)}`,
+      text: clipToBudget(`${header}${assembleSnippets(snippets, budget, header.length)}`, budgetChars),
       source,
       isIndex,
       matched: snippets.length,
       returnedFromFollowed: fromFollowed(
-        selectSnippets(snippets, budget).map((s) => corpusSections[s.sectionIndex]),
+        selectSnippets(snippets, budget, header.length).map((s) => corpusSections[s.sectionIndex]),
       ),
       followed,
       dropped,
@@ -277,11 +325,11 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
     return noMatch("sections", "Try broader terms or call get_docs without a topic for the table of contents.");
   }
   return {
-    text: `${prefix}Source: ${doc.url}${noteBlock}\n\n${assemble(ranked, budget)}`,
+    text: clipToBudget(`${header}${assemble(ranked, budget, header.length)}`, budgetChars),
     source,
     isIndex,
     matched: ranked.length,
-    returnedFromFollowed: fromFollowed(selectSections(ranked, budget)),
+    returnedFromFollowed: fromFollowed(selectSections(ranked, budget, header.length)),
     followed,
     dropped,
   };
