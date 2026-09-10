@@ -173,11 +173,24 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
 
   if (!topic) {
-    const toc = doc.content
-      .split("\n")
-      .filter((l) => /^#{1,3}\s/.test(l))
-      .slice(0, 60)
-      .join("\n");
+    const headings = doc.content.split("\n").filter((l) => /^#{1,3}\s/.test(l)).slice(0, 60);
+    // Round 2 (code-reviewer, Nit 4) — the SAME D-43 half-share discipline the note block
+    // already gets, applied to the table of contents: before this, the TOC was priced as
+    // header (unconditionally ahead of the document head) but never capped as a SHARE of the
+    // budget, only at a fixed 60-line ceiling — so on a document with many/long headings, the
+    // TOC alone could consume the entire response and leave no document head at all, the same
+    // failure D-43 was written to prevent for the note block. Built up one heading line at a
+    // time, stopping once another line would exceed half the budget — always at least one
+    // heading, matching `selectSections`' own "always at least one" rule — so the document
+    // head is GUARANTEED at least half of `budgetChars`, not merely whatever the TOC happens
+    // to leave over.
+    const tocBudget = Math.floor(budgetChars / 2);
+    let toc = "";
+    for (const line of headings) {
+      const next = toc.length === 0 ? line : `${toc}\n${line}`;
+      if (next.length > tocBudget && toc.length > 0) break;
+      toc = next;
+    }
     const header = `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
     // A6 (PAR-719) — the OVERSIGHT FINDING this item exists to close: `head` used to be
     // computed as `doc.content.slice(0, budget * 4)` — the ENTIRE allowance — and the stale
@@ -268,16 +281,22 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // that is mostly accounting — exactly what D-43 forbids. Capping the note block, not
   // exempting it, is the rollback trigger's own instruction.
   //
-  // NARROWED CLAIM (round 1, test-auditor, F5): "at ANY budget" overstates what this buys.
-  // The header (prefix, `Source:` line, capped notes) still has its own fixed floor — the
-  // `Source:` line alone is never zero — so at a budget too small even for THAT, the header
-  // consumes the whole response and the answer is absent, same as D-29 already accepts for
-  // snippets ("the cap always wins" has no size-of-answer exception). MEASURED for the
-  // maximal-note-block fixture `test/get-docs.test.ts`'s D-43 test uses: the crossover is
-  // `maxTokens: 34` (136 chars) — at 33 and below, no section/snippet content survives; at 34
-  // and above, it does. This is a per-fixture number (the URL lengths, library name and note
-  // categories all vary the header's own size), not a universal constant — pinned by test,
-  // not asserted here as a formula. A plain length clip, NOT
+  // NARROWED CLAIM (round 1, test-auditor, F5; corrected round 2, test-auditor, same F5 —
+  // round 1's own correction still overstated the boundary): "at ANY budget" overstates what
+  // this buys. The header (prefix, `Source:` line, capped notes) still has its own fixed floor
+  // — the `Source:` line alone is never zero — so at a budget too small even for THAT, the
+  // header consumes the whole response and the answer is absent, same as D-29 already accepts
+  // for snippets ("the cap always wins" has no size-of-answer exception). MEASURED for the
+  // maximal-note-block fixture `test/get-docs.test.ts`'s D-43 tests use: the room left for the
+  // body is `budgetChars - header.length`, which is POSITIVE — and a real, if truncated, slice
+  // of the top section is rendered — from `maxTokens: 20` upward; genuinely ZERO room (no
+  // section content of any kind, not even a partial heading) only below `maxTokens: 20`. Round
+  // 1's own "33 and below, no content" claim was WRONG: at 33 there IS a 28-character slice of
+  // the heading line, truncated one character short of completing the word "hostname" — caught
+  // on re-review, not self-caught, and corrected here rather than left standing. Both numbers
+  // are per-fixture (the URL lengths, library name and note categories all vary the header's
+  // own size), not universal constants — pinned by test, not asserted here as a formula. A
+  // plain length clip, NOT
   // `clipText`: `clipText` (via `cleanText`) strips C0 control characters to neutralise hostile
   // derived fields, but `\n` (U+000A) IS a C0 control character — running the WHOLE multi-line
   // block through it would silently delete the newlines between note lines, collapsing four

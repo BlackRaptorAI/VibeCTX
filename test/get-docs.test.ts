@@ -269,6 +269,26 @@ describe("getDocs index following", () => {
     expect(out).toBe("Source: https://fast"); // the D-29 backstop clip — the cap always wins, no field escapes it
   });
 
+  /**
+   * Round 2 (code-reviewer, Nit 4) — before this fix, the table of contents was priced as
+   * HEADER (ahead of the document head, unconditionally) but capped only at a fixed 60 lines,
+   * never as a SHARE of the budget — so a document with many headings could let the TOC alone
+   * consume the entire response, leaving no document head at all. MEASURED by the reviewer: a
+   * 70-heading fixture returned no document body below `maxTokens: 591`. This is the same
+   * failure class D-43 exists to prevent for the note block, just unaddressed for the TOC.
+   */
+  it("(A6, PAR-719) the table of contents is capped as a SHARE of the budget too — the document head is never starved to nothing", async () => {
+    const lines = ["# Fastify"];
+    for (let i = 0; i < 70; i++) lines.push(`## Ecosystem ${i}`, `Some prose about ecosystem ${i}.`);
+    seedIndex(lines.join("\n"));
+    stubFetch({});
+    for (const maxTokens of [50, 100, 200]) {
+      const out = await getDocs(entry, { maxTokens });
+      expect(out).toContain("Some prose"); // the document head survives, not just the TOC
+      expect(out.length).toBeLessThanOrEqual(maxTokens * 4); // the D-39 invariant, still
+    }
+  });
+
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
     seedIndex(
       [
@@ -388,11 +408,20 @@ describe("getDocs index following", () => {
      */
     it("the note block itself is capped, not exempt, for a document whose LINK URLS are far longer than the fixture above", async () => {
       // The distinguishing letter sits at the START of the path, not the end: `urlSlug`
-      // truncates at 120 characters, and four URLs sharing a 600-character COMMON PREFIX
-      // before a distinguishing suffix would all truncate to the SAME slug — a real
-      // collision hazard (the same class security-architect found independently in A3's
-      // urlSlug review), which would make three of these four requests silently short-circuit
-      // on a cache hit from the first one and never attempt a real fetch at all.
+      // (src/cache.ts, `url.replace(/[^a-z0-9]/gi,"_").slice(0,120)`, no hash) truncates at
+      // 120 characters with no collision check, and `readCache` never compares the requested
+      // URL against the `url` field the meta file itself carries — so four URLs sharing a
+      // 600-character COMMON PREFIX before a distinguishing suffix would all truncate to the
+      // SAME slug and alias to the SAME cache file. This is a genuine, pre-existing PRODUCT
+      // defect in src/cache.ts (round 2, code-reviewer: correcting round 1's own
+      // characterization here, which called it "a test-construction hazard" — it is that too,
+      // for THIS test, but the underlying defect lives in product code, not test scaffolding),
+      // low practical reachability (real documentation URLs rarely share a 120-character
+      // prefix), out of A6's scope (A6's own product files never call `urlSlug` — verified),
+      // and already known from security-architect's independent A3 review as a follow-up item
+      // needing a tracked PAR number. Worked around here by putting the distinguishing letter
+      // early, so this test's own three later "fetches" don't silently short-circuit on a
+      // cache hit from the first one instead of exercising distinct code paths.
       const longPath = "a".repeat(600);
       const urlA = `/docs/A-${longPath}.md`;
       const urlB = `https://mirror.example.net/B-${longPath}.md`;
@@ -468,16 +497,18 @@ describe("getDocs index following", () => {
     });
 
     /**
-     * A6 (PAR-719), round 1 (test-auditor, F5) — D-43's "at ANY budget" is NOT literally true,
-     * and this pins where it stops rather than leaving the claim unqualified. Below the
-     * crossover, the header itself (the `Source:` line plus the capped note block) is already
-     * larger than the whole budget, so `assemble`'s own room for a body is zero — the same
-     * "cap always wins, no size-of-answer exception" rule D-29 already established for
-     * snippets, applied consistently rather than carved around. MEASURED for this exact
-     * fixture: `maxTokens: 34` (136 chars) is the crossover — 33 and below have no answer, 34
-     * and above do.
+     * A6 (PAR-719), round 2 (test-auditor, F5 — CORRECTED, not self-caught: round 1's own
+     * version of this test and its rationale were both wrong, and round 2 found it) — this
+     * does NOT pin "no answer content" at 33/34. Traced precisely: at `maxTokens: 33`, the
+     * room left for the body is 132 (budgetChars) minus a 104-character header (37-char
+     * `Source:` line + 66-char capped note block + 2 for the blank line) = 28 characters —
+     * POSITIVE, not zero — and `assemble` genuinely renders a 28-character slice of the top
+     * heading line, truncated one character short of completing the word "hostname". What 34
+     * actually marks is the first budget at which that ONE SPECIFIC SUBSTRING completes, not
+     * the first budget at which ANY content appears. Renamed and re-described to match what it
+     * actually asserts; the true zero-content boundary is the test below this one.
      */
-    it("(A6, PAR-719) pins the D-43 crossover for this fixture: no answer content below maxTokens 34, some at 34 and above", async () => {
+    it("(A6, PAR-719) marks the first budget at which the top heading's text is a COMPLETE match for the topic, not the first budget with any content at all", async () => {
       const fixture = () =>
         seedIndex(
           [
@@ -509,12 +540,62 @@ describe("getDocs index following", () => {
       fixture();
       stub();
       const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 33 });
-      expect(below.text).not.toContain("request.hostname"); // below the crossover: the header alone dominates
+      // NOT "no content" — a real 28-character slice of the heading survives, one character
+      // short of completing this specific word. See the it() name and the comment above.
+      expect(below.text).not.toContain("request.hostname");
 
       fixture();
       stub();
       const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 34 });
-      expect(at.text).toContain("request.hostname"); // at the crossover: the answer just fits
+      expect(at.text).toContain("request.hostname"); // the word completes at exactly this budget
+    });
+
+    /**
+     * A6 (PAR-719), round 2 (test-auditor, F5) — the boundary the test above is NOT: the
+     * genuine zero-content crossover, where `assemble`'s room for the body is exactly zero and
+     * NOTHING of the top section — not even a partial heading marker — survives. MEASURED for
+     * this fixture: `budgetChars - header.length` is negative-or-zero at `maxTokens: 19` (76
+     * chars) and the first positive character at `maxTokens: 20` (80 chars, room = 1 —
+     * literally the "#" that opens "## Request...").
+     */
+    it("(A6, PAR-719) the genuine zero-content crossover: nothing of the top section survives below maxTokens 20, a sliver does at 20", async () => {
+      const fixture = () =>
+        seedIndex(
+          [
+            "# Fastify",
+            "- [Request](/docs/Request.md)",
+            "- [Request mirror](https://mirror.example.net/Request.md)",
+            "- [Request big](/docs/Big.md)",
+            "- [Request gone](/docs/Gone.md)",
+          ].join("\n"),
+        );
+      const stub = () =>
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async (url: unknown) => {
+            const u = String(url);
+            if (u.endsWith("/Request.md")) {
+              return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+                status: 200,
+                headers: { "content-type": "text/plain" },
+              });
+            }
+            if (u.endsWith("/Big.md")) {
+              return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+            }
+            return new Response("nope", { status: 404 });
+          }),
+        );
+
+      fixture();
+      stub();
+      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 19 });
+      expect(below.text).not.toMatch(/#/); // not even a bare heading marker — the response is pure header
+
+      fixture();
+      stub();
+      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 20 });
+      expect(at.text).toMatch(/#/); // the first character of the top section's heading appears
     });
   });
 

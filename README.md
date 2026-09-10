@@ -150,7 +150,12 @@ response when no topic is given). The note block about followed and skipped link
 not exempt, so it cannot by itself crowd out the answer it is reporting on — though at a
 `maxTokens` too small to hold even the `Source:` line and a minimal note, the answer is what
 gives way, the same "the cap always wins" rule that already applies to a single oversized
-snippet.
+snippet. The table of contents on the no-topic path gets the same discipline: it is capped as
+a share of the budget too, so a document with many headings cannot make the table of contents
+itself crowd out the document head. The one exception is the short "no sections/snippets
+matched" diagnostic: it is deliberately NOT bounded by `maxTokens`, so its advice ("try
+broader terms") survives even a very small budget in full — only the `topic` it echoes back is
+length-clipped.
 
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe

@@ -14,6 +14,8 @@ import {
   rankLinks,
   extractLinks,
   followLimit,
+  SECTION_ASSEMBLE_JOIN,
+  SNIPPET_ASSEMBLE_JOIN,
 } from "../src/retrieval.js";
 
 const DOC = `Intro paragraph before any heading.
@@ -85,13 +87,23 @@ describe("assemble", () => {
    * pricing had NO test anywhere that would catch its removal: `assemble`/`selectSections` are
    * called only from `get-docs.ts`, where the final `clipToBudget` backstop absorbs any
    * overshoot this function itself produces, and the pre-existing tests above assert no length
-   * bound at all. `budget = 220` is the exact MEASURED boundary where the pre-fix code (join
-   * unpriced) selected a 2nd section it could not afford and overshot to 224 — verified by
-   * reverting the fix and confirming this exact test fails there, then restored.
+   * bound at all.
+   *
+   * Round 2 (code-reviewer): the boundary is DERIVED from the two chunks' actual rendered
+   * lengths and the real `SECTION_ASSEMBLE_JOIN`, not a hardcoded literal — so this stays
+   * discriminating if the separator string or the fixture's rendered sizes ever change. Set to
+   * exactly `chunk1 + chunk2`: with the join priced at zero (the pre-fix bug), both chunks fit
+   * and `assemble`'s own per-chunk-to-full-budget clipping renders both in full, overshooting
+   * by exactly `SECTION_ASSEMBLE_JOIN.length`; with the join priced correctly, the 2nd chunk no
+   * longer fits and `selectSections` stops at one.
    */
   it("(A6, PAR-719) keeps multi-section accumulation INSIDE the budget — the join separator no longer escapes it", () => {
     const ranked = rankSections(DOC, "configuration cache plugins streaming");
-    const budget = 220; // chars: 55 tokens
+    expect(ranked.length).toBeGreaterThanOrEqual(2);
+    const chunk1 = renderSection(ranked[0]).length;
+    const chunk2 = renderSection(ranked[1]).length;
+    expect(SECTION_ASSEMBLE_JOIN.length).toBeGreaterThan(0); // the whole point: a non-empty join must be priced
+    const budget = chunk1 + chunk2;
     const chosen = selectSections(ranked, budget / 4);
     const out = assemble(ranked, budget / 4);
     expect(chosen.length).toBeGreaterThanOrEqual(1);
@@ -857,15 +869,21 @@ describe("snippet rendering is inescapable and bounded (D-28, D-29, D-30)", () =
       lines.push(`Call number ${i}:`, "```ts", `client.connect(${i});`, `client.close(${i});`, "```");
     }
     const ranked = rankSnippets(lines.join("\n"), "client connect close");
-    // MEASURED: 360 is not an arbitrary round number — it is the exact boundary where the old,
-    // unpriced-join code selected a 5th snippet it could not actually afford and overshot to
-    // 363 (out.length > budget); every other multiple of 20 nearby does not discriminate
-    // (the pre-fix and post-fix code happen to agree there). This value is deliberately chosen
-    // so a regression in the join pricing is caught, not merely asserted past.
-    const budget = 360; // chars: 90 tokens
+    // Round 2 (code-reviewer): DERIVED, not a hardcoded literal, so this stays discriminating
+    // if the separator string or this fixture's rendered snippet size ever change. Every
+    // snippet here renders to the SAME length (identical bodies), so `chunkLen * N` is exactly
+    // the old, unpriced-join code's threshold for fitting N snippets — with the join priced
+    // correctly, fewer than N fit, which is the "multiple snippets, multiple joins" case that
+    // actually exercises cumulative join pricing (a single pair, like the sections test above,
+    // would only prove the FIRST join is priced, not that pricing accumulates correctly).
+    const chunkLen = assembleSnippets([ranked[0]], 1_000_000, 0).length;
+    expect(SNIPPET_ASSEMBLE_JOIN.length).toBeGreaterThan(0); // the whole point: a non-empty join must be priced
+    const N = 5;
+    const budget = chunkLen * N;
     const out = assembleSnippets(ranked, budget / 4);
     const chosen = selectSnippets(ranked, budget / 4);
     expect(chosen.length).toBeGreaterThan(1); // the case that matters: MULTIPLE snippets, multiple joins
+    expect(chosen.length).toBeLessThan(N); // the join pricing actually excludes at least one snippet the old code would have kept
     expect(out.length).toBeLessThanOrEqual(budget);
   });
 
