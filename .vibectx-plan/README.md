@@ -1,7 +1,15 @@
 # `.vibectx-plan/` — planning scaffolding for the 0.2.0 release
 
-**This folder is not product.** It is not shipped, not imported by anything in `src/`, and is
-gitignored as of `a0852f2`. It describes the work; `src/` and `test/` are the work.
+**This folder is the project record. It is TRACKED in git as of 2026-09-10 (D-64)** so a developer
+who clones VibeCTX receives the decisions, Change Records, audit and scope statement the work is
+held to. It was gitignored from `a0852f2` until then.
+
+**It is still not product.** Nothing in `src/` imports it and `package.json` ships only `dist/`. It
+describes the work; `src/` and `test/` are the work.
+
+**Five files are NOT in the repository** — they stay local-only and are named in `.gitignore`:
+`PRODUCT-STRATEGY.md`, `LAUNCH-STRATEGY.md`, `scrub-paths.txt`, `gitignore-new`,
+`plugin-list-2026-09-08.txt`. If you cloned this repo, you will not see them; that is deliberate.
 
 Written 2026-09-08 against `main` @ `a0852f2`. Mirrors the Claude project docs of the same names —
 this folder exists because a Claude Code CLI session cannot reach a claude.ai project.
@@ -16,12 +24,19 @@ this folder exists because a Claude Code CLI session cannot reach a claude.ai pr
 > files all carry retirement banners.
 >
 > **Start with Linear instead: epic PAR-515 and the 0.2.0 milestone are the authority for open work.**
-> This folder is history plus two live references — `CLAUDE.md` for the SHA and test count, and
-> `change-records/` for the records themselves.
+> This folder is history plus three live references — **`DECISIONS.md`** (every D-nn, D-58),
+> `change-records/` (the records themselves), and `CLAUDE.md` for the versioned test baseline
+> (local-only, not in a clone).
 
 ~~**`vibectx-build-session-go.md`** — the kickoff. Read it first.~~ **RETIRED — see above.**
 
-## The eight planning files
+## The live file
+
+| File | What it is |
+|---|---|
+| **`DECISIONS.md`** | **LIVE. The authority for every decision D-01 to D-64 (D-58).** D-01–D-56 were moved here verbatim by script from the two retired loop files. Numbering continues at **D-65**. Read this before acting on any rule. |
+
+## The eight planning files — all retired as live plans
 
 | File | What it is |
 |---|---|
@@ -49,26 +64,29 @@ CI reads them.
   `gate-enforcement-map.md`, `branch-protection-checklist.md` — **read these as history, not as
   instructions.** They describe a CI gate, a `GATED` path array and a verdict validator that no
   longer exist, and the retired template will fail the Stop-hook validator (D-53).
-- `PRODUCT-STRATEGY.md`, `LAUNCH-STRATEGY.md` — internal strategy, never published.
-- `scrub-paths.txt` — the exact path list `git filter-repo` removed.
+- `PRODUCT-STRATEGY.md`, `LAUNCH-STRATEGY.md` — internal strategy, never published. **NOT tracked
+  (D-64)** — they were removed from the repository and its history on 2026-09-08 and re-adding them
+  would reverse that. Local-only.
+- `scrub-paths.txt` — the exact path list `git filter-repo` removed. **NOT tracked (D-64).**
 
 ## The four facts most worth not getting wrong
 
-1. **`main` is at `839bfd7`** — RECONCILED 2026-09-10 (PAR-754 list 1), every figure re-derived
-   from the repository. **207 commits, 80 tracked files, clean, pushed, 1202 tests passing across
-   36 files**, CI green on Node 22. Nothing is stacked and there are no open pull requests.
+1. **Volatile repository facts are deliberately NOT restated here — measure them.**
+   The current `main` SHA, commit count, tracked-file count and test count change with almost every
+   item, and every hand-copied restatement of them in this project has eventually gone stale. The
+   authority is the repository itself: `git rev-parse --short HEAD`, `git rev-list --count HEAD`,
+   `git ls-files | wc -l`, `npm test`. On Tom's machine `CLAUDE.md` additionally carries the test
+   baseline versioned to the commit it was measured at (D-57) — **that file is local-only by design
+   and is not in a clone**, which is precisely why anyone else measures rather than reads.
+   ~~`main` is at `c9cc77e`, 174 commits, 75 tracked files, 1059 tests across 32 files.~~
+   **That figure was accurate when written and went stale the same day**, and `c9cc77e`'s own
+   message reads *"chore: phase 0 handoff-path dry run (throwaway, safe to discard)"* — **a
+   throwaway dry-run commit had been recorded as the project's baseline, in a section titled "the
+   four facts most worth not getting wrong."** A later restatement (`839bfd7`, 207 commits, 80
+   tracked files) went stale within a day as well. That is why this entry now names a command
+   instead of a number.
    `273a8ca` differs from the scrub commit `a0852f2` in `.gitignore` alone, so every source
    citation written against `a0852f2` still resolves.
-   ~~`main` is at `c9cc77e`, 174 commits, 75 tracked files, 1059 tests across 32 files.~~
-   **That figure was accurate when written and went stale the same day.** `c9cc77e` is a real
-   ancestor of `main`, but its own message reads *"chore: phase 0 handoff-path dry run (throwaway,
-   safe to discard)"* — **a throwaway dry-run commit was recorded as the project's baseline.**
-   **This section is titled "the four facts most worth not getting wrong," and fact 1 was wrong.**
-   Fact 2 below was re-verified 2026-09-10 and is correct: `79c270c` is on no branch and no ref
-   contains it (`git merge-base --is-ancestor` → false; `git for-each-ref --contains` → empty). It
-   still resolves in a local clone only as an unreachable object that has not been garbage-collected.
-   **Authority for these numbers is `CLAUDE.md`'s test-baseline line, not this file.** Per PAR-754,
-   a document that restates a fact is a document that will eventually contradict it.
 2. **`79c270c` no longer exists.** History was rewritten on 2026-09-08 and force-pushed. Any
    document, Linear issue or note citing it is stale. A pre-scrub backup of everything is at
    `~/vibectx-pre-scrub-backup.bundle`.

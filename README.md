@@ -1116,7 +1116,29 @@ your setup. Real-world reports directly shape what gets built.
 npm ci
 npm test        # vitest (needs Node ≥ 20.19)
 npm run build   # tsc → dist/
+npm run lint    # tsc --noEmit
 ```
+
+**[CONTRIBUTING.md](CONTRIBUTING.md)** covers the rest: scope boundary, testing conventions, when a
+Change Record is expected, and the claim discipline that binds README text as well as marketing.
+
+### The project record
+
+The reasoning behind this codebase ships with it, in **[`.vibectx-plan/`](.vibectx-plan/)**. It is
+not product — nothing in `src/` imports it, and the published package contains only `dist/` — but
+it is where design questions are already answered:
+
+- **[`.vibectx-plan/DECISIONS.md`](.vibectx-plan/DECISIONS.md)** — the decision register. Every
+  `D-nn` cited in a code comment or issue resolves here.
+- **[`.vibectx-plan/change-records/`](.vibectx-plan/change-records/)** — Change Records with their
+  gate verdicts.
+- **[`.vibectx-plan/VibeCTX-audit-2026-09-08.md`](.vibectx-plan/VibeCTX-audit-2026-09-08.md)** —
+  the audit the current release remediates, with file:line evidence.
+- **[`.vibectx-plan/README.md`](.vibectx-plan/README.md)** — the index, including which documents
+  are retired and what replaced them.
+
+Some documents there carry retirement banners. They are kept so past reasoning stays readable;
+each names its live replacement.
 
 ## License
 
