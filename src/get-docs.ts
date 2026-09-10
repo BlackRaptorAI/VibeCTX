@@ -347,7 +347,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // ADVICE that tells the caller what to try next, which is the one thing worth keeping. The
   // genuinely unbounded PER-CALL field, `topic`, is clipped on its own instead (round 4,
   // code-reviewer S4 — earlier wording here claimed `topic` was the only unclipped field,
-  // which line 350 below directly contradicts). It is not the only unclipped field in this
+  // which the `noMatch` template below directly contradicts). It is not the only unclipped field in this
   // template: `entry.name` and `doc.url` are both interpolated raw. `doc.url` is unbounded
   // (see the same note on the no-topic path above); `entry.name` is bounded to 214 chars only
   // on the resolve path (`npmNameError`/`pypiNameError`), not for a config-defined entry.
