@@ -30,6 +30,14 @@ this folder exists because a Claude Code CLI session cannot reach a claude.ai pr
 
 ~~**`vibectx-build-session-go.md`** — the kickoff. Read it first.~~ **RETIRED — see above.**
 
+## Live: `go/` — per-item dispatch documents
+
+**`go/` is LIVE and is NOT the retired phase go cards.** One document per work item, written by the
+oversight seat and read by a build session — see `go/README.md`. Created 2026-09-11 (D-69) so a
+dispatch is a versioned artefact in the repository rather than a wall of text in a chat window.
+The retired cards (`vibectx-build-session-go.md`, `vibectx-phase2-go.md`, `-phase3-`, `-phase4-`,
+both oversight handoffs) sit in **this** directory and carry retirement banners. Do not confuse them.
+
 ## The live file
 
 | File | What it is |
