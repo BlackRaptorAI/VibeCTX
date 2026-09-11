@@ -55,8 +55,10 @@ describe("mapLimit", () => {
       return i * 2;
     });
     expect(out).toEqual([2, 4, 6]);
-    // Exact: `Math.min(limit, items.length)` should cap concurrency at items.length (3), not
-    // merely "at or under" it.
+    // Exact: with only 3 items, observed concurrency is capped at 3 regardless of the worker
+    // count Math.min(limit, items.length) spawns -- the `i >= items.length` guard inside each
+    // worker's loop is what actually stops any extra worker from ever calling fn. Asserting
+    // `toBe(3)` rather than "at or under" pins the real invariant either mechanism must produce.
     expect(maxObserved).toBe(3);
   });
 
