@@ -1,6 +1,5 @@
-import { clipText } from "./config.js";
+import { clipText, cleanText } from "./text.js";
 import { readCache, type CacheHit } from "./cache.js";
-import { cleanText } from "./project-deps.js";
 import { resolveLibrary, type LibraryEntry, type Registry } from "./registry.js";
 import {
   bm25,

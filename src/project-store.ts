@@ -4,7 +4,8 @@ import { join, resolve } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
-import { cleanText, type DependencyEcosystem } from "./project-deps.js";
+import type { DependencyEcosystem } from "./project-deps.js";
+import { cleanText } from "./text.js";
 
 /**
  * Project records for `vibectx warm` (PAR-656): `<cacheRoot>/projects/<hash>.json`, one

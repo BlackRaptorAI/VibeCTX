@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { z } from "zod";
-import { cleanText } from "./project-deps.js";
+import { cleanText, clipText } from "./text.js";
 import { validateLibraryUrl } from "./link-policy.js";
 import type { LibraryEntry } from "./registry.js";
 
@@ -281,12 +281,6 @@ export function describeConfig(resolution: ConfigResolution, opts: { cwd: string
 export const MAX_CONFIG_ERROR_CHARS = 300;
 /** Longest quoted value inside one (a hostname, a library name). ASSUMED. */
 export const MAX_CONFIG_VALUE_CHARS = 80;
-
-/** `s` with control / bidi characters removed and clipped to `max`, ellipsis included. */
-export function clipText(s: string, max: number): string {
-  const clean = cleanText(s);
-  return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
-}
 
 /**
  * One config failure, as one printable line. `detail` is the part after the display path,

@@ -1,4 +1,4 @@
-import { clipText } from "./config.js";
+import { clipText } from "./text.js";
 import { tokenize } from "./tokenize.js";
 
 /** A heading and the text under it, with where it sits in the heading tree (D-25). */

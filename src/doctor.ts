@@ -4,6 +4,7 @@ import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
 import { lastEvictionSummary, formatBytes } from "./cache-evict.js";
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
+import { mapLimit } from "./concurrency.js";
 
 /**
  * `vibectx doctor` — proves retrieval works per library by running each entry's
@@ -203,22 +204,6 @@ async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Pro
     healthy: reasons.length === 0,
     reasons,
   };
-}
-
-/** Map with at most `limit` calls in flight; results in input order. Shared with `warm`
- *  and the startup autowarm (PAR-656), which need the same bounded fan-out. */
-export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array(items.length);
-  let next = 0;
-  const worker = async () => {
-    for (;;) {
-      const i = next++;
-      if (i >= items.length) return;
-      results[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
 }
 
 /** Run the doctor over the registry (or one library). Up to DOCTOR_CONCURRENCY

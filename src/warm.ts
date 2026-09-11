@@ -6,8 +6,9 @@ import { getLibraryDoc } from "./fetcher.js";
 import { readCache, cacheRoot, type CacheHit } from "./cache.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
 import { openIndexSession, type IndexSession } from "./search-index.js";
-import { mapLimit } from "./doctor.js";
-import { cleanText, discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
+import { mapLimit } from "./concurrency.js";
+import { discoverProjectDependencies, isDeniedDependency, MANIFEST_FILES, type DependencyEcosystem, type ProjectDependency } from "./project-deps.js";
+import { cleanText } from "./text.js";
 import { CACHED_STATUSES, makeWarmRow, normaliseProjectDir, PROJECT_RECORD_SCHEMA_VERSION, readProjectRecord, writeProjectRecord, type WarmRow, type WarmStatus } from "./project-store.js";
 
 export type { WarmRow, WarmStatus } from "./project-store.js";

@@ -2,7 +2,8 @@ import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
-import { clipText, MAX_CONFIG_VALUE_CHARS, MAX_DISPLAY_PATH_CHARS } from "./config.js";
+import { MAX_CONFIG_VALUE_CHARS, MAX_DISPLAY_PATH_CHARS } from "./config.js";
+import { clipText } from "./text.js";
 // Carried forward, not fixed here (F5, security-architect A4 round 2) — outside A4's
 // authorised scope (`src/cache.ts` + tests): `cache-evict.ts`'s `resolveRecency` reads the
 // same `.meta.json` files with a laxer check than `toCacheMeta` below (`typeof === "string"`

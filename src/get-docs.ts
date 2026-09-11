@@ -22,7 +22,7 @@ import {
   type SplitSection,
 } from "./retrieval.js";
 import { indexCachedDocument } from "./search-index.js";
-import { clipText } from "./config.js";
+import { clipText } from "./text.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
  *  the runnable code blocks inside them. */

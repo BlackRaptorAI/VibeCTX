@@ -1,9 +1,10 @@
 import { homedir } from "node:os";
 import type { Registry } from "./registry.js";
-import { clipText, describeConfig } from "./config.js";
+import { describeConfig } from "./config.js";
+import { clipText } from "./text.js";
 import { readCache, cacheRoot } from "./cache.js";
-import { classifySourceKind } from "./doctor.js";
-import { autowarmStatus } from "./autowarm.js";
+import { classifySourceKind } from "./source-kind.js";
+import { autowarmStatus } from "./autowarm-status.js";
 import { readProjectRecord, summariseProjectRecord } from "./project-store.js";
 
 /** Longest config- or registry-supplied field (name, one alias, description) in one row.

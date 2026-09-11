@@ -1,7 +1,6 @@
 import { homedir } from "node:os";
 import {
   ConfigError,
-  clipText,
   configLocator,
   discoverConfig,
   displayPath,
@@ -10,6 +9,7 @@ import {
   type ConfigFile,
   type ConfigResolution,
 } from "./config.js";
+import { clipText } from "./text.js";
 import { normaliseAllowedHost } from "./link-policy.js";
 import { readResolvedEntries } from "./resolved-store.js";
 import { normalisePyPiName } from "./package-names.js";

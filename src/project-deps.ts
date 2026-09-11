@@ -1,6 +1,11 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { normalisePyPiName, npmNameError, pypiNameError } from "./package-names.js";
+import { cleanText } from "./text.js";
+
+// Re-exported so existing importers (test/project-deps.test.ts among them) keep pinning the
+// live implementation, now defined in text.ts (A8 / PAR-721, Move 3).
+export { cleanText };
 
 /**
  * Dependency discovery for `vibectx warm` (PAR-656): read a project directory's
@@ -112,12 +117,6 @@ export const DEPENDENCY_DENYLIST: Readonly<Record<DependencyEcosystem, readonly 
 export function isDeniedDependency(name: string, ecosystem: DependencyEcosystem): boolean {
   const key = ecosystem === "pypi" ? normalisePyPiName(name) : name.trim().toLowerCase();
   return DEPENDENCY_DENYLIST[ecosystem].some((rule) => (rule.endsWith("*") ? key.startsWith(rule.slice(0, -1)) : key === rule));
-}
-
-/** Strip C0 / C1 control characters and bidi / zero-width code points from text that is about
- *  to be rendered (notes, table cells). One character class with /g: linear. */
-export function cleanText(s: string): string {
-  return s.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "");
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

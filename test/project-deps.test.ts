@@ -473,13 +473,16 @@ describe("S1 — no super-linear parsing: 1 MiB pathological lines finish inside
     expect(took(() => parsePackageJsonDeps(JSON.stringify({ dependencies: { x: "npm:" + "a".repeat(MiB), y: "npm:@" + "a".repeat(MiB) } })))).toBeLessThan(BUDGET_MS);
   });
   it("tripwire: the module's remaining regex literals are exactly the allow-listed linear ones", () => {
+    // A8 / PAR-721 (Move 3): cleanText, and its control/bidi character class, moved to
+    // src/text.ts — it is no longer in this file's regex inventory. The equivalent tripwire
+    // over text.ts (the same expected literal) lives in test/text.test.ts; this row is
+    // removed here, not weakened, because the pattern it guarded is no longer here to guard.
     const src = readFileSync(new URL("../src/project-deps.ts", import.meta.url), "utf8")
       .replace(/\/\*[\s\S]*?\*\//g, "") // block comments
       .replace(/\/\/.*$/gm, ""); // line comments
     const literals = [...src.matchAll(/(?:^|[=(,:\s])\/((?:\\.|\[(?:\\.|[^\]\n])*\]|[^/\n\\[])+)\/[gimsuy]*/g)].map((m) => m[1]);
     expect(new Set(literals)).toEqual(
       new Set([
-        "[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", // one class, /g
         "\\r\\n?", // fixed width
         "\\\\\\n\\s*", // anchored on a literal backslash-newline
       ]),

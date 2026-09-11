@@ -1,8 +1,14 @@
 import type { LibraryEntry, Registry } from "./registry.js";
 import { getLibraryDoc, type DocResult } from "./fetcher.js";
 import { readCache } from "./cache.js";
-import { mapLimit } from "./doctor.js";
+import { mapLimit } from "./concurrency.js";
 import { openIndexSession } from "./search-index.js";
+import { markAutowarmStarted, addInFlight, deleteInFlight, clearInFlight } from "./autowarm-status.js";
+
+// Re-exported so existing importers (test/autowarm.test.ts, test/server.test.ts,
+// list-libraries.ts's own re-export path) keep pinning the live implementation, now defined
+// in autowarm-status.ts (A8 / PAR-721, Move 5).
+export { autowarmStatus, resetAutowarm } from "./autowarm-status.js";
 
 /**
  * Startup revalidation for the long-lived MCP server (PAR-656, from the PAR-653 comment:
@@ -39,20 +45,6 @@ export interface AutowarmSummary {
   failed: string[];
   /** Entries never scheduled because the transport closed first (R4). */
   aborted: number;
-}
-
-const inFlight = new Set<string>();
-let started = false;
-
-/** Live state for list_libraries (`warming…`) and tests. */
-export function autowarmStatus(): { started: boolean; inFlight: ReadonlySet<string> } {
-  return { started, inFlight };
-}
-
-/** Test hook. */
-export function resetAutowarm(): void {
-  inFlight.clear();
-  started = false;
 }
 
 /** Off when `VIBECTX_NO_AUTOWARM` is set to anything but "", "0" or "false". The server has
@@ -94,7 +86,7 @@ export async function startAutowarm(
     fetchDoc?: (entry: LibraryEntry) => Promise<DocResult | undefined>;
   } = {},
 ): Promise<AutowarmSummary> {
-  started = true;
+  markAutowarmStarted();
   const warn = opts.warn ?? ((m: string) => process.stderr.write(m));
   const fetchDoc = opts.fetchDoc ?? ((entry: LibraryEntry) => getLibraryDoc(entry));
   const summary: AutowarmSummary = { attempted: 0, cached: 0, failed: [], aborted: 0 };
@@ -109,7 +101,7 @@ export async function startAutowarm(
         summary.aborted += 1;
         return;
       }
-      inFlight.add(entry.name);
+      addInFlight(entry.name);
       try {
         const doc = await fetchDoc(entry);
         // D-34 (PAR-659): the startup autowarm leaves a usable cross-library search index
@@ -123,14 +115,14 @@ export async function startAutowarm(
         summary.failed.push(entry.name);
         errors.push(`${entry.name}: ${e instanceof Error ? e.message : String(e)}`);
       } finally {
-        inFlight.delete(entry.name);
+        deleteInFlight(entry.name);
       }
     });
   } catch (e) {
     errors.push(e instanceof Error ? e.message : String(e));
   } finally {
     index.flush();
-    inFlight.clear();
+    clearInFlight();
   }
   if (summary.attempted > 0 || errors.length > 0) {
     const failed = summary.failed.length > 0 ? `; not fetched: ${summary.failed.join(", ")}` : "";
