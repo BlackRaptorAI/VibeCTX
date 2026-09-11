@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest";
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { listLibrariesText } from "../src/list-libraries.js";
@@ -128,7 +129,11 @@ function isTypeOnlyClause(clause: string): boolean {
       .split(",")
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
-    if (items.length === 0) return true;
+    // `import {} from "./x.js"` is a real ESM statement with an empty named-binding list --
+    // still a runtime side-effect import, exactly like a bare `import "./x.js"`. An empty
+    // clause is therefore a VALUE edge, not type-only (no import in this codebase uses this
+    // form today, but a parser that got this wrong would silently drop a real future edge).
+    if (items.length === 0) return false;
     return items.every((it) => /^type\s+/.test(it));
   }
   // a bare default identifier, or "Default, {...}" / "Default, * as ns": default forces a value edge
@@ -256,16 +261,19 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
   return false;
 }
 
-// MEASURED 2026-09-11 against this branch's post-refactor src/ tree: 33 files, 33 nodes,
-// 110 unique runtime edges, zero unresolved specifiers (node /tmp/measure-graph.mjs, a
-// throwaway script implementing this same tokenize/mask/extract logic, run directly with
-// `node`, output captured verbatim in the build report -- D-67). The floor below is set
-// well under that measured count so the assertion has real margin, not so tight that an
-// unrelated future file addition trips it, while still being far above zero -- 0 edges
-// with 33 nodes is exactly the vacuous "resolver silently drops everything" failure mode
-// this whole non-vacuity block exists to catch.
+// MEASURED 2026-09-10 against this branch's post-refactor src/ tree: 33 files, 33 nodes, 110
+// unique runtime edges, zero unresolved specifiers -- command and full output captured
+// verbatim in the A8 / PAR-721 build report (D-67), run directly with `node` against this
+// same tokenize/mask/extract logic before it was folded into this test file. Independently
+// cross-checked by a second route in the same report: counting relative `from "./…"`
+// specifier sites by hand across src/, minus type-only imports, minus named duplicate edges,
+// lands on the same 110. The floor below is set under that measured count so the assertion
+// has real margin against an unrelated future file addition, while staying close enough that
+// it still catches a real regression -- 0 edges with 33 nodes is the vacuous "resolver
+// silently drops everything" failure mode this whole non-vacuity block exists to catch, and a
+// floor of merely "greater than zero" would not.
 const MEASURED_EDGE_COUNT = 110;
-const EDGE_COUNT_FLOOR = 80;
+const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {
   const graph = buildGraph();
@@ -347,6 +355,38 @@ describe("import graph: THE DONE-WHEN", () => {
   });
 });
 
+/**
+ * The two done-when tests above prove the CURRENT graph passes; on their own they do not
+ * prove the assertion would actually go red if a future change reintroduced the edge --
+ * `list-libraries` has six out-edges (autowarm-status, cache, config, project-store,
+ * source-kind, text) and only three are pinned as direct edges elsewhere in this file, so a
+ * regression landing in `config` or `project-store`'s own subtree would be invisible until it
+ * happened to be caught here. These two tests inject a hypothetical edge deep in each
+ * closure, on a FRESH graph instance (buildGraph() is called again so the injection never
+ * leaks into the done-when tests above), and confirm reaches() actually flips to true --
+ * proving the assertion is sensitive to the regression it exists to catch, not merely
+ * currently true by accident.
+ */
+describe("import graph: falsifiability of the done-when itself (mutation controls)", () => {
+  it("(a) is falsifiable: an edge injected deep in list-libraries' closure flips it to true", () => {
+    const g = buildGraph();
+    const projectStoreEdges = g.edges.get("project-store");
+    expect(projectStoreEdges).toBeDefined(); // the node must exist before mutating its edge set
+    expect(reaches(g, "list-libraries", "fetcher")).toBe(false); // true before the injection
+    projectStoreEdges!.add("fetcher"); // hypothetical future regression, three hops deep
+    expect(reaches(g, "list-libraries", "fetcher")).toBe(true);
+  });
+
+  it("(b) is falsifiable: an edge injected deep in retrieval's closure flips it to true", () => {
+    const g = buildGraph();
+    const tokenizeEdges = g.edges.get("tokenize");
+    expect(tokenizeEdges).toBeDefined();
+    expect(reaches(g, "retrieval", "config")).toBe(false); // true before the injection
+    tokenizeEdges!.add("config"); // hypothetical future regression
+    expect(reaches(g, "retrieval", "config")).toBe(true);
+  });
+});
+
 describe("parser unit tests over fixture strings -- never over src/, the type-only exclusion is load-bearing", () => {
   it("import type { T } from \"./d.js\" -- no runtime edge", () => {
     const es = extractEdges('import type { T } from "./d.js";');
@@ -399,6 +439,11 @@ describe("parser unit tests over fixture strings -- never over src/, the type-on
   it("bare side-effect import \"./g.js\" -- an edge", () => {
     const es = extractEdges('import "./g.js";');
     expect(es.some((e) => e.specifier === "./g.js" && !e.isType)).toBe(true);
+  });
+
+  it('import {} from "./d.js" -- an EMPTY named clause is still a runtime side-effect import, not type-only', () => {
+    const es = extractEdges('import {} from "./d.js";');
+    expect(es.some((e) => e.specifier === "./d.js" && !e.isType)).toBe(true);
   });
 
   it("await import(\"./h.js\") -- an edge (dynamic import)", () => {
@@ -478,6 +523,19 @@ describe("behavioural control: the graph claim is a proxy -- prove it once at ru
   // is its CALL graph, which this IMPORT-graph suite only proxies for. This one behavioural
   // test is the actual call-graph check: with global fetch stubbed to throw, listLibrariesText
   // must still return normally, because it was never going to call fetch at all.
+  let cacheDir: string;
+  beforeEach(() => {
+    // A declared, disposable cache directory -- not the developer's real ~/.vibectx -- matching
+    // this repo's own convention (test/list-libraries.test.ts) for anything that calls into
+    // cache.ts, so the test's inputs are all visible in the test itself.
+    cacheDir = mkdtempSync(join(tmpdir(), "vibectx-import-graph-"));
+    process.env.VIBECTX_CACHE_DIR = cacheDir;
+  });
+  afterEach(() => {
+    delete process.env.VIBECTX_CACHE_DIR;
+    rmSync(cacheDir, { recursive: true, force: true });
+  });
+
   it("listLibrariesText returns normally even with global fetch stubbed to throw", () => {
     const throwingFetch = vi.fn(() => {
       throw new Error("fetch should never be reached from listLibrariesText");
@@ -489,7 +547,9 @@ describe("behavioural control: the graph claim is a proxy -- prove it once at ru
       };
       const text = listLibrariesText(registry);
       expect(typeof text).toBe("string");
-      expect(text.length).toBeGreaterThan(0);
+      // Proves the row-rendering path actually ran, not just that SOME non-empty header came
+      // back (an empty registry also renders a non-empty header).
+      expect(text).toContain("react");
       expect(throwingFetch).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();

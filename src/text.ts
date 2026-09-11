@@ -4,9 +4,14 @@
  * cannot itself create an import cycle, and every other module reaches it directly rather
  * than through doctor/warm/autowarm or config/project-deps (A8 / PAR-721).
  *
- * The control/bidi character class below is the one place it is defined (D-48's contract:
- * one exported class for every render path); a future addition to it is an amendment here,
- * never a second copy inlined elsewhere.
+ * The control/bidi character class below is the one place it is defined; a future addition to
+ * it is an amendment here, never a second copy inlined elsewhere. D-48 records the contract as
+ * "one EXPORTED class" — this module keeps the class module-private (only `cleanText` and
+ * `clipText` apply it) and exports no binding onto it yet, because a shared compiled `/g`
+ * RegExp carries mutable `lastIndex` state a second, uncoordinated `test()`/`exec()` caller
+ * could corrupt. Whether that satisfies D-48 or needs a formal amendment is Tom's call, not
+ * this item's to make (A8 does not implement A7, and .vibectx-plan/ is read-only here); flagged
+ * rather than silently resolved either way.
  */
 
 /** C0 / C1 control characters and bidi / zero-width code points, applied with /g: linear. */

@@ -34,7 +34,11 @@ describe("autowarm-status.ts: one instance, seen through both import paths", () 
     expect(resetAutowarmViaAutowarm).toBe(resetAutowarm);
   });
 
-  it("the inFlight set returned through either import path is the SAME live object, not a copy", () => {
+  it("autowarmStatus() does not defensively copy inFlight on each call -- the same live Set comes back every time", () => {
+    // Weaker than the file's title suggests on its own (the two functions being identical, above,
+    // already implies this): it isolates one further property -- that the accessor hands out the
+    // live Set itself, not a fresh snapshot -- which matters because a copy would silently break
+    // "a mutation is visible immediately" below.
     const viaDirect = autowarmStatus().inFlight;
     const viaAutowarm = autowarmStatusViaAutowarm().inFlight;
     expect(viaDirect).toBe(viaAutowarm);
@@ -50,7 +54,7 @@ describe("autowarm-status.ts: one instance, seen through both import paths", () 
     expect(autowarmStatusViaAutowarm().inFlight.has("react")).toBe(false);
   });
 
-  it("index.ts:48's exact condition (inFlight.size > 0) reads true while an entry is in flight, through either path", () => {
+  it("the state SUPPORTS index.ts:48's condition (inFlight.size > 0), through either import path -- not a test of index.ts itself, which is not exercised here", () => {
     addInFlight("vue");
     expect(autowarmStatus().inFlight.size > 0).toBe(true);
     expect(autowarmStatusViaAutowarm().inFlight.size > 0).toBe(true);

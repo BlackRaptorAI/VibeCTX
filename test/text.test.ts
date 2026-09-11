@@ -64,8 +64,13 @@ describe("clipText -- first direct tests (A8 / PAR-721): zero existed before thi
     expect(clipText("hello!", 5)).toHaveLength(5);
   });
   it("cleans control/bidi characters BEFORE measuring length against max", () => {
-    const dirty = "a" + String.fromCharCode(0x00, 0x00, 0x00) + "b"; // clean length 2, well under max
-    expect(clipText(dirty, 5)).toBe("ab");
+    // dirty.length is 5, clean.length is 2. max=3 is chosen to DISCRIMINATE the two orderings:
+    // clean-then-measure (correct) sees length 2 <= 3 and returns "ab" unclipped; a
+    // measure-then-clean bug would see the DIRTY length 5 > 3, clip the dirty string to
+    // "a\x00\x00" (2 chars) then clean it, giving "a" + the ellipsis -- a different, wrong,
+    // and shorter result. A max of 5 (both lengths equal) cannot tell the two apart.
+    const dirty = "a" + String.fromCharCode(0x00, 0x00, 0x00) + "b";
+    expect(clipText(dirty, 3)).toBe("ab");
   });
   it("max of 1: the whole budget is spent on the ellipsis", () => {
     expect(clipText("hello", 1)).toBe("\u2026");

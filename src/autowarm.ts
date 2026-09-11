@@ -5,9 +5,12 @@ import { mapLimit } from "./concurrency.js";
 import { openIndexSession } from "./search-index.js";
 import { markAutowarmStarted, addInFlight, deleteInFlight, clearInFlight } from "./autowarm-status.js";
 
-// Re-exported so existing importers (test/autowarm.test.ts, test/server.test.ts,
-// list-libraries.ts's own re-export path) keep pinning the live implementation, now defined
-// in autowarm-status.ts (A8 / PAR-721, Move 5).
+// Re-exported so existing importers keep pinning the live implementation, now defined in
+// autowarm-status.ts (A8 / PAR-721, Move 5): src/index.ts (the only PRODUCTION consumer —
+// do not delete this line, index.ts:48's orphan-process guard depends on it),
+// test/autowarm.test.ts, test/server.test.ts. list-libraries.ts is NOT a consumer of this
+// re-export — it was repointed to autowarm-status.js directly, which is what actually breaks
+// the list-libraries -> autowarm -> fetcher edge this item exists to remove.
 export { autowarmStatus, resetAutowarm } from "./autowarm-status.js";
 
 /**

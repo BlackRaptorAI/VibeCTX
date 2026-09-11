@@ -27,8 +27,11 @@ describe("mapLimit", () => {
       inFlight -= 1;
       return i;
     });
-    expect(maxObserved).toBeLessThanOrEqual(3);
-    expect(maxObserved).toBeGreaterThan(0);
+    // Exact, not just a ceiling: every worker's synchronous prefix (up to its first await) runs
+    // before any timer fires, so a mapLimit that silently serialised (a regressed `Math.min`)
+    // would show maxObserved < 3 here, not merely "within bounds" -- a one-sided
+    // `toBeLessThanOrEqual` cannot tell "ran 3 at once" from "ran fewer".
+    expect(maxObserved).toBe(3);
   });
 
   it("empty input returns an empty array and calls fn zero times", async () => {
@@ -52,18 +55,29 @@ describe("mapLimit", () => {
       return i * 2;
     });
     expect(out).toEqual([2, 4, 6]);
-    expect(maxObserved).toBeLessThanOrEqual(3);
+    // Exact: `Math.min(limit, items.length)` should cap concurrency at items.length (3), not
+    // merely "at or under" it.
+    expect(maxObserved).toBe(3);
   });
 
   it("limit of 1 runs items strictly one at a time, in order", async () => {
     const order: number[] = [];
+    let inFlight = 0;
+    let maxObserved = 0;
     const out = await mapLimit([1, 2, 3], 1, async (i) => {
+      inFlight += 1;
+      maxObserved = Math.max(maxObserved, inFlight);
       order.push(i);
       await new Promise((resolve) => setTimeout(resolve, 1));
+      inFlight -= 1;
       return i;
     });
     expect(order).toEqual([1, 2, 3]);
     expect(out).toEqual([1, 2, 3]);
+    // "in order" alone doesn't prove serial execution -- a fully-parallel implementation with
+    // fn's synchronous prefix run in order would ALSO yield [1,2,3] here. maxObserved pins the
+    // actual property the test's name claims.
+    expect(maxObserved).toBe(1);
   });
 
   it("a rejecting fn rejects the whole mapLimit call", async () => {

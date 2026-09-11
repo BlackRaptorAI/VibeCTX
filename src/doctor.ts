@@ -14,7 +14,11 @@ import { mapLimit } from "./concurrency.js";
  */
 
 /** Source-kind classification lives in source-kind.ts (shared with list_libraries and
- *  the resolver); re-exported here so existing importers keep working. */
+ *  the resolver, both of which import it directly — NOT through this re-export). This line
+ *  has no production consumer left after A8 / PAR-721 Move 2; it survives only because
+ *  test/doctor.test.ts imports classifySourceKind from here, and that test file is out of
+ *  this item's authorised scope to repoint (only test/project-deps.test.ts may change). Do
+ *  not read "existing importers" as more than that one test. */
 export { classifySourceKind, type SourceKind } from "./source-kind.js";
 
 /**
