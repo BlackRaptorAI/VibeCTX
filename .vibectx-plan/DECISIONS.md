@@ -14,7 +14,7 @@ priorities. **This file owns the decisions.** Every other document points; nothi
 transcribed wrong. Verified on extraction: 46 + 9 = 55 distinct numbers, **range D-01 to D-55, no
 gaps**. Those two files are retired; their decision sections are marked MOVED.
 
-**Numbering continues at D-68.**
+**Numbering continues at D-69.**
 
 ---
 
@@ -194,3 +194,58 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   means the re-read used the same method as the read.** Carrying the command converts a re-read into
   a re-run, and turns a third party's check into a copy-paste instead of a re-derivation. Retro-apply
   to PAR-720, 721, 722 and 653 — those are the issues about to be built from. | PAR-754 |
+
+---
+
+## D-68 — decided 2026-09-11 by Tom
+
+- **D-68** 2026-09-11 — **Before dispatching an instruction that depends on a language or runtime
+  rule the oversight seat is not certain of, build a minimal reproduction and RUN it.** Not the
+  refactor — **the mechanism.** Six lines in a scratch directory, never the repo. Where the question
+  cannot be reduced to something runnable, say so in the go block and mark it an **ASSUMPTION** for
+  the build session to verify before it touches anything.
+
+  **Evidence (D-67 — the command and its output):**
+
+  ```
+  status.ts:    export const inFlight = new Set<string>();
+                export let started = false;
+
+  autowarm.ts:  import { inFlight, started } from "./status.js";
+                export function startAutowarm() {
+                  inFlight.add("react");   // line 3
+                  started = true;          // line 4
+                }
+
+  $ tsc --noEmit                                   # TypeScript 5.6.3
+  autowarm.ts(4,3): error TS2632: Cannot assign to 'started' because it is an import.
+  ```
+
+  And the escape hatch a builder reaches for on seeing that error:
+
+  ```
+  autowarm.ts:  import * as s from "./status.js";
+                export function startAutowarm() { s.started = true; }
+
+  $ tsc --noEmit
+  autowarm.ts(3,5): error TS2540: Cannot assign to 'started' because it is a read-only property.
+
+  $ node main.mjs                                  # if it had somehow compiled
+  TypeError: Cannot assign to read only property 'started' of object '[object Module]'
+  ```
+
+  **Note what did NOT error: line 3.** Mutating an imported `const Set` across a module boundary is
+  legal; reassigning an imported `let` is not. **That asymmetry is the whole reason A8's mutation
+  list looked complete while being fatal** — it named `:54, :112, :126, :133`, all four `Set`
+  methods, and omitted `:55` and `:97`, the two scalar reassignments.
+
+  **Cost: about 40 seconds, in the oversight seat's own container. No repo, no build session, no
+  Mac.** The earlier claim *"I have no shell in the build sandbox, so I cannot test this"* was a real
+  limit wrongly generalised: the mechanism question needs none of those things. Four senior
+  specialists caught this defect by reading, which worked but cost three full reviews; the probe
+  cost forty seconds.
+
+  **Limit, stated plainly so this is not over-claimed:** a probe proves **language mechanics only.**
+  It cannot show whether an existing test breaks, whether an assertion is vacuous, or whether a
+  refactor works in the real codebase. Those need the real files and the real suite, and they remain
+  the build session's job. | A8 / PAR-721 |
