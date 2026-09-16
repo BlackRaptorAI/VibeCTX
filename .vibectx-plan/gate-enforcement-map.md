@@ -3,6 +3,20 @@
 > The CI enforcement this map described was removed from the repository and its history by
 > `a0852f2`. Nothing here is wired to anything. Enforcement now lives in the BlackRaptor Core 2.1.0
 > `Stop` hook, which validates gate verdicts in-session on the live path. See **D-52**.
+>
+> **Its own citations point at another retired file. Closed as MOOT — 2026-09-16.** Lines `32` and
+> `63` below cite `change-record-policy.md`, **retired 2026-09-08** under the header *"DO NOT CITE
+> THIS FILE AS AUTHORITY."* A retired document citing a retired document is not a live hazard, so
+> those two citations are **left exactly as written** — rewriting them would imply this map is
+> maintained, and it is not. *(Those two line numbers were re-measured after this banner was added.
+> They were cited as `21` and `52` on PAR-754's List 3, which was correct before the banner shifted
+> them — the same off-by-eight this seat has now made three times in two days when adding a header
+> above numbered citations. Cite by content, not by line, in a file anyone may prepend to.)*
+>
+> **The live rule, stated here once so nobody has to follow either chain:** a Change Record is
+> expected **for a tagged release, and for any item touching URL trust, fetching, or cache
+> integrity.** It is enforced by review routing, **not by CI** — no path is mechanically gated
+> (D-52). The ledger of records and signatures lives on **PAR-753**.
 
 # Gate enforcement map (template)
 

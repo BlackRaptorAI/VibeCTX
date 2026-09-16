@@ -112,6 +112,40 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   copy in `VibeCTX-020-phased-build-plan.md` is struck, and that file stays fully retired. Fixes a
   contradiction the oversight seat created on 2026-09-10 by banner-marking the plan historical while
   it still held the release criteria. | PAR-754 |
+
+  > **EXECUTED 2026-09-16 by the oversight seat, in both halves. D-59 was decided 2026-09-10 and
+  > nothing was struck for six days** — the plan's retirement banner never mentioned the GA gate, so
+  > `### Gate 7 — the GA gate` went on reading as live release criteria to anyone who landed there by
+  > search rather than by scrolling past the banner.
+  >
+  > **Half one — the struck copy.** `VibeCTX-020-phased-build-plan.md` now names the strike in its
+  > banner, and § Gate 7 is marked `STRUCK, D-59` **at its own heading**, with a note that at least
+  > one criterion in it is known wrong: the ship sequence omits `npm link`, without which
+  > `vibectx warm` exits `command not found` on a fresh clone (`CR-20260907-source-distribution.md`
+  > condition **F6**). The section is kept, not deleted — it is the record of what the gate looked
+  > like on 2026-09-08.
+  >
+  > **Half two — the authority itself was stale, and pointed back at the struck copy.** D-59 makes
+  > the Linear 0.2.0 milestone sole authority; **its closing line read *"Full detail in
+  > `claude/VibeCTX-020-phased-build-plan.md` (Gate 7)"*.** An authority citing the copy it
+  > supersedes is a loop, and striking one end without the other would have left it. Six corrections
+  > applied to the milestone, listed at its bottom in that milestone's own established convention:
+  > 7 of 16 → **8** landed; `839bfd7`/1202-in-36 → `b9ee0cf`, baseline **1271/40** at `47677b4`; the
+  > Change Record ledger to **16 records, 4 human-signed, 12 unsigned** with PAR-753 named as its
+  > single authority; the A3/A4 question closed; and the back-pointer removed.
+  >
+  > **One correction was a refusal to carry a claim forward.** The milestone said *"CI green on Node
+  > 22"*, measured at `839bfd7`. It now states plainly that **CI on `47677b4` is UNVERIFIED** and is
+  > a human-only check — `47677b4` is the first Node 22 exercise, every local run having been Node
+  > 26. **Inheriting a green claim across a commit it was never measured on is how a measurement
+  > outlives its evidence**, which is the failure D-67 exists to prevent.
+  >
+  > **Also closed here: PAR-754's List 3, as MOOT.** `gate-enforcement-map.md` cites the retired
+  > `change-record-policy.md` in two places — but that map has carried its own RETIRED banner since
+  > 2026-09-08. A retired document citing a retired document is not a live hazard. Its banner now
+  > says so, states the live Change Record rule once so no reader has to follow either chain, and
+  > **leaves the two citations exactly as written** — rewriting them would imply the map is
+  > maintained, and it is not.
 - **D-60** 2026-09-10 — **A3 (PAR-716) and A4 (PAR-717) owe Change Records.** Both changed cache
   integrity, which the live rule names directly; A3 additionally added a filesystem-delete
   primitive. They were originally cleared with "no gated path touched," which reasons from a control

@@ -5,6 +5,13 @@
 > **What it records is accurate as of `main` @ `839bfd7`** — 1202 tests across 36 files, CI green on
 > Node 22, Phases 0–4 closed, 7 of 16 items landed. **Everything still open is tracked in Linear under
 > PAR-515**, which is the authority from here.
+>
+> **THE GA GATE COPY IN THIS FILE IS STRUCK — D-59, executed 2026-09-16.** D-59 reads: *"The 0.2.0
+> milestone in Linear is the sole authority for the GA gate. The copy in
+> `VibeCTX-020-phased-build-plan.md` is struck, and that file stays fully retired."* That copy is
+> **§ Gate 7 — the GA gate**, and it is marked struck at its own heading so a reader who lands there
+> by search, rather than by scrolling from here, sees it. **D-59 was decided 2026-09-10 and this
+> banner did not say so for six days** — which is why Gate 7 still read as live release criteria.
 
 # VibeCTX 0.2.0 — phased build plan with blocking test gates
 
@@ -351,7 +358,18 @@ Order: **A11 and A16 together** (one job — both read the manifest) → **A17**
 
 **No code. Verification, signatures, and the tag.**
 
-### Gate 7 — the GA gate
+### ~~Gate 7 — the GA gate~~ — STRUCK, D-59
+
+> **DO NOT WORK FROM THIS SECTION. It is not the GA gate.**
+>
+> **The 0.2.0 milestone in Linear is the sole authority** — *"0.2.0 — GA release: audit remediation
+> + docs-cache scope"*, in project **VibeCTX 2.0**. Everything below is kept as the historical record
+> of what the gate looked like on 2026-09-08, and **at least one criterion below is known wrong:**
+> the ship sequence omits `npm link`, without which `vibectx warm` exits `command not found` on a
+> fresh clone (MEASURED three ways; `CR-20260907-source-distribution.md` condition **F6**). The
+> milestone carries the corrected sequence.
+>
+> Struck under **D-59**, decided 2026-09-10, executed 2026-09-16.
 
 **Automated**
 - [ ] Gates 0–6 all re-run green on a **fresh clone**, not an incremental working tree
