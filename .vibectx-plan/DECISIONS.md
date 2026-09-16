@@ -14,7 +14,7 @@ priorities. **This file owns the decisions.** Every other document points; nothi
 transcribed wrong. Verified on extraction: 46 + 9 = 55 distinct numbers, **range D-01 to D-55, no
 gaps**. Those two files are retired; their decision sections are marked MOVED.
 
-**Numbering continues at D-69.**
+**Numbering continues at D-70.**
 
 ---
 
@@ -115,9 +115,39 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 - **D-60** 2026-09-10 — **A3 (PAR-716) and A4 (PAR-717) owe Change Records.** Both changed cache
   integrity, which the live rule names directly; A3 additionally added a filesystem-delete
   primitive. They were originally cleared with "no gated path touched," which reasons from a control
-  that has not existed since `a0852f2`. **Outstanding Change Records: 11 → 13.** A5 and A6 touched
-  neither cache, URL trust, nor fetching — their clearance stands despite the same faulty
-  justification. | PAR-753 |
+  that has not existed since `a0852f2`. ~~**Outstanding Change Records: 11 → 13.**~~ **CORRECTED
+  2026-09-16 under D-65: 12 → 14.** The original figures predate D-65's signature audit, which found
+  `CR-20260909-par-714` agent-signed and therefore unsigned, moving the ledger from 11 unsigned to
+  12. A5 and A6 touched neither cache, URL trust, nor fetching — their clearance stands despite the
+  same faulty justification. | PAR-753 |
+
+  > **EXECUTED 2026-09-16 by the oversight seat. Both records are written**, after a recovery attempt
+  > for the original gate verdicts by Tom's ruling (try to recover; if not found, write the records
+  > with the verdicts marked unrecoverable):
+  >
+  > - `change-records/CR-20260909-par-717-cache-meta-validation.md`
+  > - `change-records/CR-20260910-par-716-refresh-index-session.md`
+  >
+  > **Ledger: 14 records → 16. Unsigned: 12 → 14.** The **71-condition triage surface is
+  > unchanged** — both new records have an **empty §3**, so they add no gate conditions to PAR-753.
+  >
+  > **RECOVERY FAILED, and the search is documented in each record's §3 so nobody repeats it.** Five
+  > sources, MEASURED 2026-09-16 at `main` @ `47677b4`: `.vibectx-plan/**/*.md` (only the template
+  > holds verdict blocks); **all 230 commit messages across all branches — zero verdict blocks**;
+  > the eight A3/A4 commit messages read individually; Linear PAR-716 and PAR-717 comments; and the
+  > session transcripts reachable from the oversight container. **No A3 or A4 verdict block exists
+  > anywhere reachable.**
+  >
+  > **The two causes are different, and the second is the one to learn from.** A4's verdicts were
+  > **forfeited by a `validate-verdicts.sh` Stop-hook wedge** — one of four such wedges (A10, A1, A4,
+  > A5). **A3 had no wedge.** Its verdicts were produced complete and schema-complete — thirteen gate
+  > dispatches carrying `evidence`, `standards` and `falsifier` — relayed into an oversight session,
+  > and **never written to any durable store.** So **the most heavily gated item in this project now
+  > has the same evidentiary standing as the least**, because of where its evidence was put rather
+  > than whether it existed. **A verdict that is not written to a durable store did not happen.**
+  >
+  > Neither record may be signed as equivalent to one written at the time, and each says so in its
+  > own §7. Both carry ACCEPT-WITH-RISK entries in §5 that are Tom's to take, not the seat's.
 - **D-61** 2026-09-10 — **PAR-741, 742, 743 and 745 are merged into PAR-749** and handled as one
   design item. They are two root causes — a lossy name transform used as a storage key, and
   `.meta.json` read at four different trust levels — not four defects. One decision, one gate pass,
@@ -129,6 +159,27 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   (`registry.ts:90`) ships 30 entries. **The "or it doesn't ship" launch gate and the `npx` install
   claim are struck as false** — `npx` distribution was abandoned 2026-09-07. Applies to
   `PRODUCT-STRATEGY.md` and `LAUNCH-STRATEGY.md`. This was item **A15**. | A15 |
+
+  > **EXECUTED 2026-09-16 by the oversight seat, by Tom's ruling. Both files are RETIRED with a
+  > banner, not line-edited** — each rests on the dead premise in three places
+  > (`PRODUCT-STRATEGY.md:70, :78, :130`; `LAUNCH-STRATEGY.md:32, :38, :123`, re-measured after the
+  > banners), so patching sentences would have left a strategy that still assumes a distribution
+  > model that does not exist. What each file still gets right is named in its banner so nothing
+  > useful is thrown away with the premise.
+  >
+  > **A THIRD instance was found 2026-09-15 that D-62 does not name, and it is the one that
+  > matters:** `.vibectx-plan/change-records/CR-20260906-release-0.1.3.md:40` reads *"Every consumer
+  > that runs `npx -y @blackraptorai/vibectx` at the new pin."* **That file is TRACKED (D-64)**,
+  > unlike the two gitignored strategy files — so a developer who clones the repository receives it,
+  > and the two D-62 named receive nobody. It is bannered **SUPERSEDED**, with its body left
+  > unedited: a Change Record is a point-in-time record and rewriting it would falsify it.
+  >
+  > **Fact carried in the banner, worth stating here too:** 0.1.3 was never published. `0.1.2`
+  > (July 2026) is still `latest` on npmjs.com, it predates the SSRF, ReDoS and unbounded-body
+  > fixes that CR records, and the npm account is no longer accessible — so **those three defects
+  > are still open in the only published package, and it can be neither deprecated nor
+  > superseded.** That is a fact about the world, not a documentation defect, and it is not closed
+  > by this decision.
 - **D-63** 2026-09-10 — **`ecosystem` is an internal field on `LibraryEntry`, never a config key.**
   Registry entries keep a single name-keyed namespace; **D-11 stands unchanged.** REJECTED: making
   `ecosystem` settable in `vibectx.config.json`. MEASURED 2026-09-10 at `main` @ `64d05e8` —
@@ -181,6 +232,44 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Consequences: outstanding is **12** (or **14** once D-60's A3/A4 records exist), not 11 and not 13;
   and `CR-20260909-par-714`'s **20 conditions are NOT discharged**, taking PAR-753's triage surface
   from 51 to **71**. Found by an independent audit of the oversight seat, then verified directly. | PAR-753 |
+
+  > **LEDGER UPDATED 2026-09-16 — and D-65's own breakdown was off by one.**
+  >
+  > **The headline number survives. The sub-count did not.** Re-running D-65's exact command today,
+  > `grep -rn "Signed:" .vibectx-plan/change-records/*.md`, returns **15 lines across 16 files** —
+  > because **`CR-20260731-agent-repair.md` has no `Signed:` line at all.** It predates the current
+  > template: four sections, no §7, and its *"## 4. Human sign-off"* reads **PENDING**. On the
+  > 14-record tree D-65 measured, the same command returned **13** lines, so *"the other 11 →*
+  > `______________`*"* was really **10 blanks plus one record the method could not see.**
+  >
+  > **2 + 1 + 10 + 1 = 14, so "12 unsigned" was right** — the agent-signed record and the
+  > no-signature-line record both count as unsigned, and they cancelled the error. **A correct total
+  > reached through a wrong breakdown is still a wrong measurement**, and it is recorded here because
+  > the next audit that trusts the breakdown rather than the total will be wrong by one.
+  >
+  > **A second trap, for whoever audits next.** `CR-20260907-source-distribution.md:170` writes
+  > `*Signed:*` in single asterisks, not `**Signed:**`. A stricter pattern anchored on `^\*\*Signed:\*\*`
+  > silently drops it — **this seat's own first pass did exactly that today** and would have reported
+  > 14 signature lines for 16 files. D-65's looser `"Signed:"` is the correct form; do not tighten it.
+  >
+  > **Ledger as of 2026-09-16: 16 records — 4 human-signed, 12 unsigned.**
+  >
+  > | | |
+  > |---|---|
+  > | Human-signed | `CR-20260720-install-dev-team` · `CR-20260722-add-research-integrity` (July 2026) · **`CR-20260909-par-717-cache-meta-validation`** · **`CR-20260910-par-716-refresh-index-session`** (2026-09-16) |
+  > | Agent-signed, therefore UNSIGNED | `CR-20260909-par-714-url-host-policy:246` |
+  > | Blank signature line | 10 records |
+  > | **No signature line at all** | `CR-20260731-agent-repair.md` — pre-template, §4 reads PENDING |
+  >
+  > **The two signed today are the first 0.2.0-era records to carry a human signature**, closing the
+  > *"zero 0.2.0-era records are human-signed"* finding above. Tom took the decision in-session on
+  > 2026-09-16 after the nine §5 risk acceptances were enumerated, and authorized the signature; each
+  > §7 records how it was given. **That is the same form as the two July signatures** — both read
+  > *"signature authorized in-session"* — and D-65 counts those as the only valid ones. It is **not**
+  > the form D-65 struck, which was an agent signing under its own name.
+  >
+  > **PAR-753's 71-condition triage surface is unchanged.** Both new records carry an empty §3, so
+  > signing them discharged no gate conditions — it accepted nine named risks instead. | PAR-753 |
 - **D-66** 2026-09-10 — **Every go block opens with the commit it was written against, and a step 0
   that checks it.** `Written against <sha>. Step 0: git rev-parse --short HEAD. If it differs, STOP
   and report — every line number below is void.` Reason: `main` moved `839bfd7` → `64d05e8` →
@@ -249,3 +338,63 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   It cannot show whether an existing test breaks, whether an assertion is vacuous, or whether a
   refactor works in the real codebase. Those need the real files and the real suite, and they remain
   the build session's job. | A8 / PAR-721 |
+
+---
+
+## D-69 — decided 2026-09-15 by Tom
+
+- **D-69** 2026-09-15 — **A go block may only require a step the receiving seat can actually
+  perform.** Before dispatch, the **tool grants of every gate named must be read, not assumed.**
+  Routing work to a seat that cannot execute it is a **router defect, never a gate defect.**
+
+  The dispatch artefact this rule governs is the **`.vibectx-plan/go/` folder** (created 2026-09-11):
+  a go block is a versioned document in the repository, written by the oversight seat and read by a
+  build session, not a message pasted once and lost. `go/README.md` distinguishes it from the
+  retired phase go cards in the parent directory.
+
+  **Evidence (D-67 — the command and its output).** Measured 2026-09-15 from
+  `BlackRaptor_Workforce_Golden/_source/dist/public/dev/*.md`, YAML frontmatter:
+
+  ```
+  $ grep -m1 -E '^tools:' dev/{test-auditor,code-reviewer,security-architect,schema-reviewer,completion-auditor}.md
+
+  test-auditor        tools: Read, Grep, Glob                       <- no Bash
+  schema-reviewer     tools: Read, Grep, Glob                       <- no Bash
+  security-architect  tools: Read, Grep, Glob, WebSearch, WebFetch  <- no Bash
+  code-reviewer       tools: Read, Grep, Glob, Bash
+  completion-auditor  tools: Bash, Read, Grep, Glob
+  ```
+
+  Of the 23 agents in `dev/`, **`code-reviewer` and `completion-auditor` are the only read-only
+  gates granted `Bash`.** Every producer seat has it. "Gates read, producers run" is the pack's
+  design, not an oversight.
+
+  **What this rule exists to prevent.** A8 was routed to `test-auditor` with steps that required a
+  shell — a suite count and a `git diff` — in a dispatch whose own text read *"do not route it to a
+  gate that cannot execute."* The gate disclosed the limit in the correct field and returned
+  CONCERNS. **Round 2's CONCERNS was therefore not an unclosed condition; it was the gate correctly
+  refusing to certify something outside its reach.**
+
+  **Correct routing, recorded so it is not re-derived:** `test-auditor` answers *are these
+  assertions real and non-tautological* — read-only, by the method its own charter prescribes
+  (*"Break the code in my head. Which of these tests goes red?"*). **`completion-auditor` — the gate
+  with `Bash` — answers *did they run*.** Two questions, two seats.
+
+  **Correction carried by this decision.** The oversight seat previously recorded this as a
+  **"systemic defect in the gate's environment"** on **PAR-721**, which reads: *"A quality gate that
+  cannot run the suite cannot gate test work — that is a systemic defect in the gate's environment,
+  not a defect in A8, and it needs its own item."* That claim is **wrong** and is to be struck. The
+  gate behaved correctly in every instance; the router did not.
+
+  **Scope of that correction, checked rather than assumed.** This decision first named **PAR-753** as
+  carrying the same claim. **It does not** — verified 2026-09-15 by reading the full issue body.
+  PAR-721 is the only VibeCTX record carrying it. The first draft of this decision asserted two
+  records from memory and was corrected in the same session, before the file was committed. **That
+  is the error this decision exists to stop, committed inside the decision itself.** It is left on
+  the record rather than quietly edited out. The
+  Agents-side filing **PAR-750** never made that claim and needs no correction — the measured
+  frontmatter was posted to it on 2026-09-15, confirming its §3 hypothesis and narrowing two of its
+  three proposed remedies.
+
+  **Limit, stated plainly.** Reading a grant proves what a seat *can* run. It does not prove the
+  seat *will* run it, nor that the step is the right one. | A8 / PAR-721 · PAR-750
