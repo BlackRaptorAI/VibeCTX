@@ -355,6 +355,13 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(readCache("react", REACT_URL, 168)?.content).toBe("# React"); // byte-identical to before
       // FIXED: nothing about the primary changed, so the followed page survives.
       expect(readCache("react", FOLLOWED_URL, 168)?.content).toBe("# Streaming");
+      // code-reviewer, A20/PAR-729 round 2: the regression guard the round-1 fix's own crux
+      // was missing — a 304 is genuinely CURRENT (its TTL was just refreshed), not stale, so
+      // `fresh` must stay true here. `isDocUnchanged(doc)` (true for both 304 AND a stale
+      // fallback) must NOT be what `stale` is derived from, or this would silently read false.
+      const entries = readActivityEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].fresh).toBe(true);
     });
 
     it("a genuine content change (a real 200, not a 304) still drops the followed-page cache", async () => {
@@ -428,6 +435,12 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(out).toMatch(/^hono: re-resolved via npm/);
       expect(readCache("hono", HONO_PRIMARY, 168)?.content).toBe("# Hono unchanged");
       expect(readCache("hono", followed, 168)?.content).toBe("# Followed page"); // survives
+      // code-reviewer, A20/PAR-729 round 2: the resolved-entry twin of the direct-fetch guard
+      // above — `out.stale` must NOT be derived from `isDocUnchanged`/`out.unchanged` (which is
+      // true here too, for the 304), or a genuinely current re-resolution would log fresh: false.
+      const entries = readActivityEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].fresh).toBe(true);
     });
 
     /**
