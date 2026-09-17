@@ -547,3 +547,33 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   (A7 / PAR-720).
 
 ---
+
+## D-73 — decided 2026-09-17, executing A17 / PAR-726
+
+- **D-73** 2026-09-17 — **The provenance stamp ships without a version/ref field; A11
+  (PAR-724) has not been built, and there is nothing to read.** PAR-726's own Fix section lists
+  "version or ref (from A11)" as one of four standing-stamp fields, on the premise that A11
+  already landed. Checked against the actual tree before starting (`git log --all --grep
+  PAR-724`: zero commits; grepped `LibraryEntry`/`ResolvedMeta`/`ResolveOutcome`/`CacheMeta`/
+  `DocResult` for a version field: none exists anywhere in `src/`) — the premise is false. A11
+  is Todo, not started, and is a substantial separate item (version-aware cache keys, a
+  per-tag npm/GitHub resolution chain) that this item is not the place to build as a side
+  effect. Per this repo's `CLAUDE.md`: "If a Done-when is wrong or can't be met, say so in the
+  PR and move on."
+  **What shipped instead:** the stamp carries the four facts that DO exist and are readable
+  without new plumbing — source URL, fetched-at (ISO, from cache meta — `fetcher.ts`'s
+  `DocResult` and `cache.ts`'s `writeCache`/`touchCache` now return the exact value they
+  persisted, not a second, separately-taken `new Date()`), fresh-or-stale (past the entry's
+  TTL), and curated-or-resolved (`entry.resolved === undefined`, the same reading
+  `list-libraries.ts` already established). One shared renderer, `sourceStampLine` in
+  `src/retrieval.ts`, used by both `get_docs` (`get-docs.ts`'s `docStamp`) and `search`
+  (`search.ts`'s `groupHeader`), so the wording cannot drift between the two tools the way the
+  three pre-A7 control-character classes did — the same lesson D-48 already recorded, applied
+  here to what a header states rather than what a regex matches.
+  **No version claim is fabricated or silently omitted without a trace:** the stamp simply
+  does not have a version slot yet. When A11 lands, it is a straightforward extension of
+  `StampFacts`/`sourceStampLine`, not a rework of this item's plumbing.
+  Ref: `src/retrieval.ts` (`sourceStampLine`), `src/get-docs.ts`, `src/search.ts`,
+  `src/fetcher.ts`, `src/cache.ts` (A17 / PAR-726).
+
+---
