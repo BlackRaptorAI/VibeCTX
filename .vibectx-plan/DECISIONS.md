@@ -789,6 +789,43 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
+## D-78 — decided 2026-09-17, executing PAR-777
+
+- **D-78** 2026-09-17 — **Two spellings of a name that differ only by PEP 503 punctuation
+  folding (`foo-bar` / `foo_bar` / `Foo.Bar`) are the SAME package for registry identity —
+  applied with no ecosystem check — but remain DISTINCT for cache-directory key derivation
+  (D-71).** `normalisePyPiName` (`src/package-names.ts`) already existed and was already used,
+  with no ecosystem check, at three read-only/fail-safe call sites (`resolveLibrary`'s lookup
+  fallback; `curatedKeys`/`isTaken`'s resolved-record guard) — this item extends the SAME rule
+  to `validateAliases` and `applyLayer`'s config-layer merge, the two places PAR-777's own
+  Problem statement named as still comparing by exact case-fold only.
+  **The two decisions are not in tension, though they look it side by side:** D-71 calls
+  `foo.bar`/`foo_bar` "two DISTINCT, independently valid npm names" for `urlSlug`/`libDirName`
+  — a cache key only needs to be collision-RESISTANT (every key is hash-suffixed regardless of
+  spelling), so folding punctuation there would buy nothing and cost the human-readable prefix
+  its meaning. A REGISTRY name needs the opposite property: recognising that two spellings name
+  the SAME PyPI project is the entire point (that recognition is what PAR-777 was filed to
+  restore). Two different questions, each answered consistently on its own terms.
+  **Accepted, examined risk, not an unexamined one:** unlike the three precedent call sites
+  (which only ever find-or-refuse, never remove anything), `applyLayer`'s merge can DELETE an
+  existing canonical entry and replace it with a different one under a twin spelling. If two
+  genuinely unrelated packages ever shared a PEP 503 form, a config entry for one would
+  silently evict the other from the registry — the shipped defaults contain no such pair
+  (checked by hand and pinned by test), and npm's own registry has rejected new names differing
+  only by punctuation runs since well before this was written, but a pair predating that rule
+  is not impossible. Accepted for the same reason the three precedent sites already accepted
+  the parallel risk: the failure costs a confusing override or config error to diagnose, never
+  a wrong document silently served through a hijacked cache entry.
+  **A related, adjacent gap NOT closed by this item:** `resolved-store.ts`'s persisted
+  `resolved.json` still dedupes by exact name only, so it can hold both `typing-extensions` and
+  `typing_extensions` on disk (the in-memory `installResolvedEntry` guard catches it at use
+  time; the file itself does not). Filed separately as a Linear follow-up — PAR-777's own
+  Problem statement names only `validateAliases` and the config merge.
+  Ref: `src/registry.ts` (`validateAliases`, `applyLayer`), `src/package-names.ts`
+  (`normalisePyPiName`) (PAR-777).
+
+---
+
 ## D-79 — decided 2026-09-17, executing A19 / PAR-728
 
 - **D-79** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
@@ -833,3 +870,70 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   singleton.
   Ref: `src/doctor-store.ts` (new), `src/doctor.ts`, `src/list-libraries.ts`, `src/get-docs.ts`,
   `src/retrieval.ts` (A19 / PAR-728).
+
+  **Round 1 review (code-reviewer + security-architect), findings fixed before merge:**
+  - **security-architect S-1 (BLOCKING):** the cache directory — and `doctor.json` with it — is
+    process-global, but a library's config (and so `reasons`, built in part from config-authored
+    `probeQueries` text and from raw error messages that can carry filesystem paths or internal
+    hostnames) is per project. Rendering `reasons` in `list_libraries` would have leaked one
+    project's config-authored or error text into another project's tool response. Fixed by never
+    rendering `reasons` in either surface — `list-libraries.ts`'s `[doctor: ...]` note and
+    `get_docs`'s stamp both state only the closed `kind` enum and the check date; `reasons`
+    stays persisted (a same-project `doctor --json` reader can still see it) and still
+    cleaned/clipped on read, but no caller may treat that cleaning as sufficient to render it
+    across a project boundary.
+  - **security-architect S-2 / code-reviewer B2 (BLOCKING, found independently by both):**
+    `saveDoctorVerdicts`'s `warn` defaulted to a no-op, so a K2 refusal or a write failure was
+    silent forever — no stderr line, no report note, exactly the "fallbacks are stated, never
+    silent" rule this file's own D-13 exists to prevent. Fixed by defaulting `warn` to stderr
+    (matching `resolved-store.ts`/`writeProjectRecord`'s own default exactly) and adding
+    `DoctorReport.notes?: string[]` — a new optional key, no schema bump — rendered by
+    `formatDoctorTable` as `note: ...` lines, the same pattern `warm.ts` already established for
+    its own best-effort persistence failures.
+  - **security-architect S-3 (BLOCKING):** `checkedAt` was validated only by
+    `Number.isFinite(Date.parse(...))`, which is not a length backstop (`cache-meta.ts`'s own
+    MEASURED finding: an arbitrarily long fractional-seconds run still parses to a finite
+    timestamp) — a third, unbounded copy of a gap that file's own comment already tracks for two
+    OTHER stores. Fixed by exporting `cache-meta.ts`'s `ISO_INSTANT` and reusing it here (D-48:
+    one definition, not a third local variant) rather than duplicating the gap. Verdict COUNT was
+    also unbounded (the file merges by name and never prunes) — fixed with a new
+    `MAX_DOCTOR_VERDICTS` (`limits.ts`, 500, ~1.71 MiB worst case), oldest-by-`checkedAt` dropped
+    first once a save would exceed it, the same rule `ACTIVITY_LOG_MAX_ENTRIES` applies to its
+    own file.
+  - **code-reviewer B1 (BLOCKING):** an `--offline` doctor run's "unreachable" is the EXPECTED,
+    correct answer for that call (README's own documented `--offline` behaviour), not a genuine
+    probe failure — persisting it poisoned every later ONLINE response with a stale, misleading
+    warning the moment the library was actually fetched and answered fine. Fixed: `runDoctor`
+    skips persistence entirely for an offline run; an earlier online verdict already on disk is
+    left untouched.
+  - **code-reviewer B3 (BLOCKING):** an unhealthy verdict's stamp/note carried no date, so it
+    read as a present-tense fact forever, even long after the library was fixed and simply never
+    re-checked. Fixed: `checkedAt` is now rendered in both surfaces (`retrieval.ts`'s new
+    `StampFacts.doctorCheckedAt`, always set together with `doctorKind`; `list-libraries.ts`'s
+    note gained `, checked <date>`).
+  - **Should-fix, applied:** N-2 (a persisted `reasons` element that was not a string used to be
+    silently filtered rather than dropping the whole record — the K1 doc comment's own claim);
+    N-3 (a forged `reasons` array was filtered/sliced in full before being bounded — now bounded
+    to `MAX_RAW_REASONS` first); N-4 (`SOURCE_KINDS` is now a `Record<SourceKind, true>`, which
+    fails to compile if `SourceKind` gains a member this file does not also list, rather than
+    silently rejecting the new kind at runtime); N-5 (`saveDoctorVerdicts` now round-trips each
+    verdict through `toDoctorVerdict(toRecord(v))` before writing, matching
+    `saveResolvedEntry`'s "the write side must produce something the read side would accept");
+    README updated for all three user-visible contract changes (the stamp shape, the `doctor
+    --json` key list, and the new `list_libraries`/`get_docs` doctor-verdict surfacing) —
+    code-reviewer S1.
+  - **Filed as Linear follow-ups, not fixed here** (all explicitly non-blocking): a persisted
+    verdict is keyed by bare library name with no URL/config scoping, so two projects with
+    different configs for the same name share one verdict (security-architect's accepted
+    fixed-vocabulary display closes the information-leak half of this; the correctness half —
+    a same-named-different-library verdict misapplied — is not); `readDoctorVerdicts()` has no
+    memoisation on what is now a per-call hot path; `doctor`'s own probes read their own
+    just-persisted verdict, adding a small self-referential stamp cost to the very measurement
+    that produced it; nothing prunes a verdict for a library removed from every registry (bounded
+    by `MAX_DOCTOR_VERDICTS`, not actively pruned); `doctor.json` is read without an `lstat`
+    regular-file gate first, a gap shared with `resolved-store.ts`'s own read path (parity, not a
+    new regression, but a new HOT-PATH exposure); `search` responses do not carry the same
+    doctor-verdict note `get_docs` does.
+  Ref (round 1 fixes): `src/doctor-store.ts`, `src/doctor.ts`, `src/list-libraries.ts`,
+  `src/get-docs.ts`, `src/retrieval.ts`, `src/cache-meta.ts`, `src/limits.ts`, `src/cli.ts`,
+  `README.md`.

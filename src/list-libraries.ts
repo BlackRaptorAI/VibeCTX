@@ -27,14 +27,18 @@ export interface ListLibrariesOptions {
  *  aliases), description, cache status — with `warming…` while the startup autowarm is
  *  fetching that entry (PAR-656) — the source kind classified from the cached document
  *  (`unknown` until cached; `vibectx doctor` fetches and probes), and `[resolved]` for
- *  entries resolve_library synthesized, and (A19/PAR-728) a `[doctor: ...]` note when the last
- *  `vibectx doctor` run found the entry unhealthy — e.g. index-only with no link followed
- *  successfully, or a probe that returned no match — a fact the cache-status and kind brackets
- *  alone do not carry (PAR-704: a source can be cleanly cached and still fail every probe).
- *  Absent entirely when doctor has never checked the entry, so "no note" never overclaims
- *  health the way `unknown` for the kind bracket already declines to. When `vibectx warm` has
- *  a record for the working directory, one closing line summarises it. Never touches the
- *  network. */
+ *  entries resolve_library synthesized, and (A19/PAR-728) a `[doctor: check failed (<kind>),
+ *  checked <date>]` note when the last `vibectx doctor` run found the entry unhealthy — e.g.
+ *  index-only with no link followed successfully, or a probe that returned no match — a fact
+ *  the cache-status and kind brackets alone do not carry (PAR-704: a source can be cleanly
+ *  cached and still fail every probe). Absent entirely when doctor has never checked the
+ *  entry, so "no note" never overclaims health the way `unknown` for the kind bracket already
+ *  declines to. Deliberately states only the closed `kind` enum and the check date, never
+ *  doctor's free-text `reasons` — the persisted verdict store is process-global while a
+ *  library's config is per-project, so free text from one project's `doctor` run could
+ *  otherwise leak into another project's response (security-architect, A19/PAR-728 round 1,
+ *  S-1). When `vibectx warm` has a record for the working directory, one closing line
+ *  summarises it. Never touches the network. */
 export function listLibrariesText(registry: Registry, opts: ListLibrariesOptions = {}): string {
   const warming = opts.warming ?? autowarmStatus().inFlight;
   const doctorVerdicts = readDoctorVerdicts();
@@ -61,11 +65,15 @@ export function listLibrariesText(registry: Registry, opts: ListLibrariesOptions
     const aka = e.aliases && e.aliases.length > 0 ? ` (aka ${e.aliases.map(show).join(", ")})` : "";
     const resolved = e.resolved ? " [resolved]" : ""; // synthesized by resolve_library, not curated (PAR-655)
     const description = e.resolved && e.description ? `(package-supplied) ${e.description}` : (e.description ?? "");
-    // A19/PAR-728 — `doctorVerdicts` is already clean/clipped on its own read boundary
-    // (doctor-store.ts's K1), but every field in this row is clipped again HERE regardless of
-    // where it came from (S2's own rule), so this is no exception.
+    // A19/PAR-728 — security-architect round 1, S-1 (BLOCKING): the cache directory `doctorVerdicts`
+    // is read from is process-global, but a library's config (and so its `reasons`, built in
+    // part from config-authored `probeQueries` text and from raw error messages that can carry
+    // filesystem paths) is per project. Rendering free-text `reasons` here would leak another
+    // project's config-authored or error text into THIS project's tool response. Fixed by
+    // rendering only the closed `kind` enum and the check date — never `reasons` — the same
+    // restriction `get_docs`'s own stamp (`retrieval.ts`'s `doctorKind`) already applied.
     const verdict = doctorVerdicts.get(e.name);
-    const doctorNote = verdict && !verdict.healthy ? ` [doctor: ${show(verdict.reasons[0] ?? "unhealthy")}]` : "";
+    const doctorNote = verdict && !verdict.healthy ? ` [doctor: check failed (${verdict.kind}), checked ${verdict.checkedAt}]` : "";
     return `- **${show(e.name)}**${aka} — ${show(description)} [${status}] [${kind}]${resolved}${doctorNote}`;
   });
   const record = readProjectRecord(opts.projectDir ?? process.cwd());

@@ -267,8 +267,10 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // this same file instead of a claim about it). `graph.edgeList.length` is pinned EXACTLY, not
 // just floored, in the "exact measured edge count" test directly below this constant -- so
 // `npx vitest run test/import-graph.test.ts` IS the command that reproduces this figure, run
-// against this exact file, every time. 34 src/*.ts files on disk, 34 graph nodes, 114 unique
-// runtime edges, zero unresolved specifiers, at this branch's tree as of this commit.
+// against this exact file, every time. 36 src/*.ts files on disk, 36 graph nodes, 136 unique
+// runtime edges, zero unresolved specifiers, at this branch's tree as of this commit
+// (A19/PAR-728, code-reviewer round 1, N1 — restated once here instead of leaving a reader to
+// walk every `+N` paragraph below back to the head figure by hand).
 // Two independent deltas land on this merge, from a shared prior base of 33 nodes / 110
 // edges: (D-71, PAR-749) `src/cache-meta.ts` is a new 34th file, and both `src/cache.ts` and
 // `src/cache-evict.ts` gained one new value-import edge into it (+1 node, +2 edges);
@@ -312,7 +314,16 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // whole-statement type import (excluded, same rule as warm.ts's own type-only import above),
 // and doctor.ts's `type EvictionSummary` addition rides an EXISTING runtime import statement
 // into a module (cache-evict.js) doctor.ts already had a live edge to, so neither adds one.
-const MEASURED_EDGE_COUNT = 133;
+// A19/PAR-728 review-fix round (code-reviewer/security-architect round 1 findings): +3 —
+// verified against `graph.edgeList`. doctor-store.ts -> cache-meta.js (the now-exported
+// `ISO_INSTANT`, reused rather than a third local copy of the same shape check, S-3a) and ->
+// limits.js (`MAX_DOCTOR_VERDICTS`, S-3b) are two new edges OUT of the same new file counted
+// above; doctor.ts -> text.js (`cleanText`, to render a `notes[]` failure line the same way
+// `formatWarmTable` already does, B2/S-2) is a new edge doctor.ts did not have before (its
+// existing edges into `source-kind.js`/`cache-evict.js`/`doctor-store.js` are unrelated
+// modules). cli.ts's `runDoctorCli` change (passing `io.stderr` as `warn`) adds an argument to
+// an existing call, not a new import — no edge.
+const MEASURED_EDGE_COUNT = 136;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

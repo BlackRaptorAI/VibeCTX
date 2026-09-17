@@ -358,6 +358,12 @@ export interface StampFacts {
    *  for the same reason. A closed enum (`SourceKind`), so unlike `version`/`url`/
    *  `redirectedFrom` it needs no separate cleaning here — there is no free-form text to forge. */
   doctorKind?: SourceKind;
+  /** A19/PAR-728, code-reviewer round 1, B3 — WHEN doctor reached that verdict (its
+   *  `checkedAt`), always set together with `doctorKind` and never alone: an unhealthy verdict
+   *  with no date reads as a present-tense fact forever, even long after the library was fixed
+   *  and simply never re-checked. Already shape-bounded on read (`doctor-store.ts`'s
+   *  `ISO_INSTANT` check), so — like `doctorKind` — nothing here needs its own cleaning. */
+  doctorCheckedAt?: string;
 }
 
 /** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
@@ -374,7 +380,8 @@ const MAX_STAMP_VERSION_CHARS = 100;
 export function sourceStampLine(f: StampFacts): string {
   const redirect = f.redirectedFrom !== undefined ? ` (redirected from ${clipText(f.redirectedFrom, MAX_STAMP_URL_CHARS)})` : "";
   const version = f.version !== undefined ? ` · version ${clipText(f.version, MAX_STAMP_VERSION_CHARS)}` : "";
-  const doctor = f.doctorKind !== undefined ? ` · doctor check failed (${f.doctorKind})` : "";
+  const doctorDate = f.doctorCheckedAt !== undefined ? `, checked ${f.doctorCheckedAt}` : "";
+  const doctor = f.doctorKind !== undefined ? ` · doctor check failed (${f.doctorKind}${doctorDate})` : "";
   return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}${doctor}`;
 }
 
@@ -399,7 +406,7 @@ export function sourceStampLine(f: StampFacts): string {
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
-  const withoutExtras = sourceStampLine({ ...f, version: undefined, redirectedFrom: undefined, doctorKind: undefined });
+  const withoutExtras = sourceStampLine({ ...f, version: undefined, redirectedFrom: undefined, doctorKind: undefined, doctorCheckedAt: undefined });
   if (withoutExtras.length <= maxChars) return withoutExtras;
   const url = clipText(f.url, MAX_STAMP_URL_CHARS);
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;

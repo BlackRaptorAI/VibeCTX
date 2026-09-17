@@ -248,7 +248,9 @@ describe("A19/PAR-728: doctor's verdict surfaced in list_libraries", () => {
       },
     ]);
     const text = listLibrariesText(registry);
-    expect(text).toMatch(/- \*\*fastify\*\* — Fastify web framework reference \[cached \S+\] \[index-only\] \[doctor: index-only, no links followed/);
+    expect(text).toMatch(
+      /- \*\*fastify\*\* — Fastify web framework reference \[cached \S+\] \[index-only\] \[doctor: check failed \(index-only\), checked 2026-09-17T00:00:00\.000Z\]/,
+    );
   });
 
   it("says nothing extra for a library doctor found healthy, or one doctor has never checked", () => {
@@ -260,16 +262,24 @@ describe("A19/PAR-728: doctor's verdict surfaced in list_libraries", () => {
     expect(text).not.toContain("[doctor:");
   });
 
-  it("clips an over-long doctor reason to the same field bound as every other row field", () => {
+  it("security-architect S-1: never renders doctor's free-text reasons, even a hostile one — only the closed kind enum and the check date", () => {
+    // The persisted store is process-global; `reasons` can carry config-authored probeQuery
+    // text or a raw error message from a DIFFERENT project's own doctor run. list_libraries
+    // must never repeat that text, regardless of what it says.
     writeCache("fastify", "https://fastify.dev/llms.txt", "# Fastify\n- [A](/docs/A.md)");
     saveDoctorVerdicts([
-      { name: "fastify", kind: "index-only", healthy: false, reasons: [`x${"y".repeat(400)}`], checkedAt: "2026-09-17T00:00:00.000Z" },
+      {
+        name: "fastify",
+        kind: "index-only",
+        healthy: false,
+        reasons: ["some other project's secret internal hostname: internal.example.corp"],
+        checkedAt: "2026-09-17T00:00:00.000Z",
+      },
     ]);
-    const line = listLibrariesText(registry).split("\n").find((l) => l.startsWith("- **fastify"))!;
-    const shown = /\[doctor: ([^\]]+)\]/.exec(line)?.[1];
-    expect(shown).toBeDefined();
-    expect(shown!.length).toBeLessThanOrEqual(200);
-    expect(shown!.endsWith("…")).toBe(true);
+    const text = listLibrariesText(registry);
+    expect(text).not.toContain("internal.example.corp");
+    expect(text).not.toContain("some other project's");
+    expect(text).toMatch(/\[doctor: check failed \(index-only\), checked 2026-09-17T00:00:00\.000Z\]/);
   });
 });
 

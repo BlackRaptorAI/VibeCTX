@@ -6,6 +6,7 @@ import { lastEvictionSummary, formatBytes, type EvictionSummary } from "./cache-
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
 import { mapLimit } from "./concurrency.js";
 import { saveDoctorVerdicts } from "./doctor-store.js";
+import { cleanText } from "./text.js";
 
 /**
  * `vibectx doctor` — proves retrieval works per library by running each entry's
@@ -86,9 +87,15 @@ export interface DoctorReport {
   /** A19/PAR-728, CR-20260907-par-652-governance (doctor-json-eviction) — the same summary
    *  `formatDoctorTable` has always rendered in its text output, now also on the JSON report;
    *  a new optional key needs no schemaVersion bump (see DOCTOR_SCHEMA_VERSION above). Present
-   *  only when THIS run's cache writes actually evicted something (`lastEvictionSummary()`),
-   *  matching the same condition the text table already used before this. */
+   *  only when the LAST eviction in this process (`lastEvictionSummary()`, process-wide state —
+   *  not necessarily triggered by anything this specific run did; code-reviewer round 1, S2)
+   *  actually evicted something, matching the same condition the text table already used
+   *  before this. */
   eviction?: EvictionSummary;
+  /** D-13 — a best-effort side effect (persisting this run's verdicts, see `runDoctor`) that
+   *  did not happen, stated here rather than left to a stderr line a `--json` caller never
+   *  sees (code-reviewer/security-architect round 1, B2/S-2). Omitted when nothing went wrong. */
+  notes?: string[];
 }
 
 export interface DoctorOptions {
@@ -96,6 +103,8 @@ export interface DoctorOptions {
   library?: string;
   /** Cache-only: the network is never touched; not-cached libraries are reported unreachable. */
   offline?: boolean;
+  /** Where a best-effort failure (saving this run's verdicts) is reported; default stderr. */
+  warn?: (message: string) => void;
 }
 
 const DEFAULT_TTL_HOURS = 168;
@@ -228,13 +237,31 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
   }
   const libraries = await mapLimit(entries, DOCTOR_CONCURRENCY, (e) => checkLibrary(e, opts.offline === true));
   const generatedAt = new Date().toISOString();
+  const warn = opts.warn ?? ((m: string) => process.stderr.write(m));
+  const notes: string[] = [];
   // A19/PAR-728 — best effort (D-13): the report above is already complete regardless of
-  // whether this succeeds, so a write failure here is silently swallowed, not surfaced as a
-  // doctor failure. `saveDoctorVerdicts` itself never throws; this guards a future change to it.
-  try {
-    saveDoctorVerdicts(libraries.map((l) => ({ name: l.library, kind: l.kind, healthy: l.healthy, reasons: l.reasons, checkedAt: generatedAt })));
-  } catch {
-    // best effort — see above.
+  // whether this succeeds, so a write failure here never fails the run, only the persistence
+  // side effect — reported both to stderr and, since a `--json` caller never sees stderr, as a
+  // report note (`warm.ts`'s `writeProjectRecord` call is the exact template this mirrors).
+  //
+  // code-reviewer round 1, B1 (BLOCKING): an `--offline` run's "unreachable" verdicts are the
+  // EXPECTED, correct answer for that call ("nothing cached, network not touched" — README's
+  // own documented behaviour), not a genuine probe failure — persisting them would poison every
+  // later online response with a stale, misleading warning the moment the library is actually
+  // fetched and answers fine. Skipped entirely for an offline run; an earlier online verdict
+  // already on disk is left exactly as it was.
+  if (opts.offline !== true) {
+    try {
+      const saved = saveDoctorVerdicts(
+        libraries.map((l) => ({ name: l.library, kind: l.kind, healthy: l.healthy, reasons: l.reasons, checkedAt: generatedAt })),
+        warn,
+      );
+      if (!saved) notes.push("doctor verdicts not saved: newer schema on disk");
+    } catch (e) {
+      const reason = e instanceof Error ? e.message : String(e);
+      notes.push(`doctor verdicts not saved: ${reason}`);
+      warn(`vibectx: doctor verdicts not saved: ${reason}\n`);
+    }
   }
   const eviction = lastEvictionSummary();
   return {
@@ -245,6 +272,7 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
     total: libraries.length,
     configIssues: configIssues(registry),
     ...(eviction !== undefined && eviction.evicted.length > 0 ? { eviction } : {}),
+    ...(notes.length > 0 ? { notes } : {}),
   };
 }
 
@@ -316,6 +344,9 @@ export function formatDoctorTable(report: DoctorReport): string {
   for (const issue of report.configIssues ?? []) {
     lines.push(`✗ config ${issue.path} (${issue.scope}): ${issue.reason} — file skipped`);
   }
+  // D-13 / code-reviewer, security-architect round 1, B2/S-2 — a best-effort failure stated
+  // here too, not just on stderr, so a `--json` caller (which never sees stderr) can see it.
+  for (const n of report.notes ?? []) lines.push(cleanText(`note: ${n}`));
   // PAR-652 item 7a: doctor's job is to say why retrieval is not what you expected, and
   // "the document was evicted under the size cap" is one of the answers. Reported only when
   // this run actually evicted something, so a healthy cache says nothing about it.

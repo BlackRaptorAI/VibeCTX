@@ -1681,7 +1681,7 @@ describe("A19/PAR-728: doctor's verdict surfaced in the get_docs stamp", () => {
     ]);
     const out = await getDocs(entry, { topic: "querystring parsing" });
     expect(out).toContain("querystring module");
-    expect(out).toContain("· doctor check failed (index-only)");
+    expect(out).toContain("· doctor check failed (index-only, checked 2026-09-17T00:00:00.000Z)");
   });
 
   it("no note when doctor found the entry healthy, or has never checked it", async () => {

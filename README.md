@@ -250,12 +250,14 @@ out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a 
 matches you get, in full:
 
 ```
-Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved
+Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved [· version <v>] [· doctor check failed (<kind>, checked <date>)]
 No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
 
 `<url>` is the URL the document was actually served from; the `(redirected from <url>)`
-clause appears only when a redirect moved it away from the one that was requested.
+clause appears only when a redirect moved it away from the one that was requested. The
+`· doctor check failed (…)` segment (0.2.0) appears only when the last `vibectx doctor`
+run found this library unhealthy — see [Checking coverage](#checking-coverage-vibectx-doctor).
 
 ## Don't know which library? `search`
 
@@ -1001,15 +1003,25 @@ Unknown top-level keys in the config (for example `$comment`) are ignored.
 Names and aliases are trimmed and lower-cased before anything else, so `"name": "Next.js"`
 overrides `next.js`. Precedence:
 
-- **Config beats default alias.** A config entry whose `name` or alias equals a *default's
-  alias* wins; that alias is silently dropped from the default (`{"name": "next"}` loads and
-  `next` is yours, while `next.js` and `nextjs` still reach the default).
-- **Alias vs. canonical name is an error.** A config alias equal to any library's `name`
-  (default or config), the same alias on two config entries, or an alias equal to its own
-  entry's name fails to load, with a message naming both sides.
-- **An override keeps the default's aliases unless you say otherwise.** Overriding a default
-  (same `name`) and omitting `aliases` inherits them; `"aliases": []` clears them; an
-  explicit list replaces them.
+- **Config beats default alias — including its PEP 503 twin.** A config entry whose `name` or
+  alias equals a *default's alias*, or a PEP 503 twin of one (`-`, `_`, `.` runs collapse to
+  one `-`), wins; that alias is silently dropped from the default (`{"name": "next"}` loads
+  and `next` is yours; `{"name": "react_dom"}` claims the default `react-dom` alias the same
+  way, while `next.js`/`react` still reach their own remaining aliases).
+- **Two spellings of one name are one entry, not two.** `foo-bar`, `foo_bar` and `Foo.Bar` are
+  the same package under PEP 503, so `{"name": "ai.sdk"}` *overrides* the default `ai-sdk` —
+  inheriting its aliases (see below) and taking its place under your spelling, in the same
+  registry slot — rather than adding a second entry. The library's on-disk cache is keyed by
+  name, so an override under a different spelling starts a fresh cache directory; the old one
+  is unused, not deleted. Two entries in the *same* config file that are PEP 503 twins of each
+  other fail to load, naming both.
+- **Alias vs. canonical name is an error, exact spelling or PEP 503 twin alike.** A config
+  alias equal to — or a PEP 503 twin of — any library's `name` (default or config), the same
+  alias (or its twin) on two config entries, or an alias equal to its own entry's name fails
+  to load, with a message naming both sides.
+- **An override keeps the replaced entry's aliases unless you say otherwise.** Overriding a
+  default or another entry (same name, or a PEP 503 twin of it) and omitting `aliases`
+  inherits them; `"aliases": []` clears them; an explicit list replaces them.
 - **A pin also claims its PEP 503 spelling.** A config (or default) name or alias owns the
   form with runs of `-`, `_`, `.` collapsed to `-` as well, so `{"name": "typing_extensions"}`
   answers `typing-extensions` and `Typing.Extensions`, and no auto-resolved record can sit
@@ -1201,19 +1213,41 @@ never stops the rest of the table. At most three libraries are checked at a time
 `--json` emits `{ schemaVersion: 1, generatedAt, libraries: [{ library, kind, url,
 cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed, dropped }],
 followed, dropped, healthy, reasons }], healthy, total, configIssues: [{ path, scope,
-reason }] }` — keys in that order, `null` for a missing URL or age. `configIssues` (added
-in 0.2.0) lists discovered config files that were skipped; while it is non-empty the exit
-code is `1` however healthy the libraries look, because the entries those files pin are
-simply missing. New keys may be appended in later versions; consumers should
-read keys by name and must not assert exact key sets. `reasons[]` strings are
-human-readable and not a contract. If you snapshot the output, note that `generatedAt`,
-`cacheAgeHours`, `url` (which candidate resolved) and `reasons[]` are non-deterministic
-run to run; `schemaVersion` is bumped only when a key is renamed, removed or changes meaning.
+reason }], eviction?, notes? }` — keys in that order, `null` for a missing URL or age.
+`configIssues` (added in 0.2.0) lists discovered config files that were skipped; while it
+is non-empty the exit code is `1` however healthy the libraries look, because the entries
+those files pin are simply missing. `eviction` (0.2.0) carries the same "documents evicted
+under the cache size cap" summary the human table already prints as a `cache: evicted …`
+line, present only when the last eviction in this process actually evicted something —
+not necessarily triggered by this specific run. `notes` (0.2.0) reports a best-effort
+failure to persist this run's verdicts (see below) — a newer `doctor.json` on disk than
+this version writes, or a write error — so a `--json` caller (which never sees stderr)
+still learns about it; present only when something went wrong. New keys may be appended
+in later versions; consumers should read keys by name and must not assert exact key sets.
+`reasons[]` strings are human-readable and not a contract. If you snapshot the output,
+note that `generatedAt`, `cacheAgeHours`, `url` (which candidate resolved) and `reasons[]`
+are non-deterministic run to run; `schemaVersion` is bumped only when a key is renamed,
+removed or changes meaning.
 
 Honest limit: doctor measures **retrieval, not correctness**. A ✓ means an agent
 asking that question today gets sections back; it does not check that they are the
 right ones. `list_libraries` shows the same kind per library, classified from the
 cache without touching the network (`unknown` until something is cached).
+
+**Doctor's verdict follows you to `list_libraries` and `get_docs` (0.2.0).** Each run
+persists every checked library's `{kind, healthy, reasons, checkedAt}` to `doctor.json` in
+the cache directory (skipped for `--offline` runs — an offline "unreachable" is the
+expected answer for that call, not a real probe failure, and persisting it would poison
+later online responses). `list_libraries` then appends `[doctor: check failed (<kind>),
+checked <date>]` to a row whose last check was unhealthy, and `get_docs`'s `Source:` stamp
+gains `· doctor check failed (<kind>, checked <date>)` on the same condition — closing the
+gap where a library can be cleanly cached and still fail every probe with no warning
+anywhere outside a manual `doctor` run. Neither surface repeats doctor's free-text
+`reasons` — the persisted verdict is shared across every project on the machine, so only
+the closed `kind` and the check date are shown; run `vibectx doctor` in the project itself
+for the detail. Absent entirely when doctor has never checked a library, so the note never
+overclaims health the way the `unknown` kind already declines to, and the verdict is only
+as fresh as the last `doctor` run — the check date is there so you can tell.
 
 ## Activity log: `vibectx log`
 

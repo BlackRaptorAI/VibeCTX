@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache, urlSlug, libDirName } from "../src/cache.js";
@@ -656,6 +656,56 @@ describe("A19/PAR-728: runDoctor persists each library's verdict to doctor-store
     await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }), { library: "react" });
     expect(readDoctorVerdicts().get("fastify")).toBeDefined(); // not erased by the react-only run
     expect(readDoctorVerdicts().get("react")?.healthy).toBe(true);
+  });
+
+  it("code-reviewer round 1, B1 (BLOCKING): an --offline run never persists a verdict — its 'unreachable' is the expected answer for that call, not a genuine probe failure", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await runDoctor(reg({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"], probeQueries: ["x"] }), { offline: true });
+    expect(spy).not.toHaveBeenCalled();
+    expect(readDoctorVerdicts().size).toBe(0); // nothing written at all
+  });
+
+  it("B1: an --offline run never overwrites an earlier ONLINE run's good verdict with a misleading offline 'unreachable' one", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] })); // online: healthy
+    expect(readDoctorVerdicts().get("react")?.healthy).toBe(true);
+    vi.stubGlobal("fetch", vi.fn());
+    await runDoctor(reg({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"] }), { offline: true });
+    expect(readDoctorVerdicts().get("react")?.healthy).toBe(true); // untouched by the unrelated offline run
+  });
+
+  it("code-reviewer/security-architect round 1, B2/S-2 (BLOCKING): a save refused under K2 is reported on stderr AND as a report note, not silently", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "doctor.json"), JSON.stringify({ schemaVersion: 99, verdicts: [] }), "utf8");
+    const warned: string[] = [];
+    const report = await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }), {
+      warn: (m) => warned.push(m),
+    });
+    expect(warned.some((m) => m.includes("newer schemaVersion"))).toBe(true);
+    expect(report.notes).toBeDefined();
+    expect(report.notes!.join(" ")).toContain("doctor verdicts not saved");
+    expect(formatDoctorTable(report)).toContain("note: doctor verdicts not saved");
+    const raw = JSON.parse(readFileSync(join(dir, "doctor.json"), "utf8"));
+    expect(raw.verdicts).toEqual([]); // untouched
+  });
+
+  it("B2/S-2: with no warn given, the default writes to process.stderr, not nowhere", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "doctor.json"), JSON.stringify({ schemaVersion: 99, verdicts: [] }), "utf8");
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }));
+      expect(spy).toHaveBeenCalled();
+      expect(spy.mock.calls.map((c) => String(c[0])).join(" ")).toContain("newer schemaVersion");
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

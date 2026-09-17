@@ -388,8 +388,10 @@ export async function getDocsDetailed(
   // A19/PAR-728 — doctor's LAST verdict for this entry (PAR-704: a source can be cleanly
   // cached and still fail every probe), read once here rather than re-probed on this call.
   // Set only when unhealthy, same rule `list-libraries.ts`'s `[doctor: ...]` note applies.
+  // `doctorCheckedAt` always travels with `doctorKind` (code-reviewer round 1, B3) — an
+  // unhealthy verdict with no date would read as present-tense forever, even long after a fix.
   const doctorVerdict = readDoctorVerdicts().get(entry.name);
-  const doctorKind = doctorVerdict && !doctorVerdict.healthy ? doctorVerdict.kind : undefined;
+  const doctorUnhealthy = doctorVerdict && !doctorVerdict.healthy;
   const stampFacts = {
     url: doc.finalUrl,
     redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined,
@@ -397,7 +399,8 @@ export async function getDocsDetailed(
     stale: doc.stale,
     curated,
     version: matchedVersion,
-    doctorKind,
+    doctorKind: doctorUnhealthy ? doctorVerdict.kind : undefined,
+    doctorCheckedAt: doctorUnhealthy ? doctorVerdict.checkedAt : undefined,
   };
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
