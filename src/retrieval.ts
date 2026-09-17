@@ -316,6 +316,7 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  Recorded as a deliberate, flagged gap rather than invented or silently dropped; see D-73 in
  *  .vibectx-plan/DECISIONS.md. */
 export interface StampFacts {
+  /** PAR-811: rendered with its query string (and fragment) stripped — see `stripStampQuery`. */
   url: string;
   /** ISO, from the document's own cache meta — ambient `Date.now()` for this MUST NOT be
    *  substituted; see fetcher.ts's DocResult / cache.ts's writeCache/touchCache. Bounded and
@@ -333,8 +334,44 @@ export interface StampFacts {
  *  so a caller that used to clip separately sees no change in outcome, only in ownership. */
 const MAX_STAMP_URL_CHARS = 300;
 
+/**
+ * PAR-811 (security-architect, surfaced verifying PAR-791/792): the query string is the ONLY
+ * mechanism this tool has for reaching an authenticated internal endpoint — `fetcher.ts` sends
+ * nothing but a `user-agent` header and a conditional `If-None-Match`, no config surface exists
+ * anywhere for custom headers or credentials — so a token in a config entry's `urls`
+ * (`?token=…`, a realistic internal-docs pattern) is not a misuse case, it is the undocumented
+ * way to do the one thing this tool doesn't otherwise support. Left unstripped, that token
+ * reached the model's own context on every `get_docs`/`search` call this stamp appears in — a
+ * wider exposure than any on-disk cache file, since it leaves the process on every response
+ * rather than sitting in a local file. Same fix, same reasoning, as `activity-log.ts`'s
+ * `sanitizeLoggedUrl` (D-51/PAR-792): strip the query, and the fragment for the same reason
+ * (rarely survives this far — `link-policy.ts`'s `sanitizeRemoteUrl` already clears it on most
+ * paths — stripped again here so this function does not depend on that holding).
+ *
+ * Falls back to the ORIGINAL string on a parse failure: `f.url` is already a fetched or
+ * config-validated URL by the time it reaches this render path, not something this function is
+ * positioned to refuse — best-effort stripping, never a new way for the stamp to go missing.
+ *
+ * SCOPE (PAR-811's own issue, stated plainly): this closes the leak for the rendered TEXT
+ * stamp only — `GetDocsOutcome.source.url` / `SearchGroup.url` (the structured, --json fields)
+ * are untouched, since those never leave the process the way a rendered response does. It does
+ * not add a general redaction policy, and it does not add a real authenticated-fetch mechanism
+ * (custom headers, say) so a credential never has to travel in a URL at all — both stay open,
+ * deliberately deferred to 0.2.1, not folded into this fix.
+ */
+function stripStampQuery(url: string): string {
+  try {
+    const u = new URL(url);
+    u.search = "";
+    u.hash = "";
+    return u.href;
+  } catch {
+    return url;
+  }
+}
+
 export function sourceStampLine(f: StampFacts): string {
-  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
@@ -350,7 +387,7 @@ export function sourceStampLine(f: StampFacts): string {
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
-  const url = clipText(f.url, MAX_STAMP_URL_CHARS);
+  const url = clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS);
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;
   if (withoutCurated.length <= maxChars) return withoutCurated;
   const withoutFreshness = `Source: ${url} · fetched ${f.fetchedAt}`;

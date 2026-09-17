@@ -1256,6 +1256,48 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
     const rendered = line.slice("Source: ".length, line.indexOf(" · fetched"));
     expect(rendered.length).toBe(300);
   });
+
+  /** PAR-811 (security-architect, surfaced verifying PAR-791/792): a URL query string is the
+   *  ONLY mechanism this tool has for reaching an authenticated internal endpoint, so a token
+   *  there (a realistic internal-docs pattern) must never reach a rendered response — the
+   *  widest exposure this tool has, since the stamp reaches the model's own context on every
+   *  call. Same fix as `activity-log.ts`'s `sanitizeLoggedUrl` (D-51/PAR-792). */
+  it("PAR-811: strips the query string (and fragment) from the stamped url — a token must never reach a rendered response", () => {
+    const line = sourceStampLine({
+      url: "https://docs.internal.example.com/llms.txt?token=super-secret&user=alice#section-2",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    });
+    expect(line).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("super-secret");
+    expect(line).not.toContain("token");
+    expect(line).not.toContain("section-2");
+  });
+
+  it("PAR-811: a malformed url that new URL() cannot parse falls back to the original string, never dropping the stamp", () => {
+    const line = sourceStampLine({ url: "not a valid url at all", fetchedAt: "t", stale: false, curated: true });
+    expect(line).toBe("Source: not a valid url at all · fetched t · fresh · curated");
+  });
+});
+
+describe("fitStampLine (A17/PAR-726): the same stamp, degraded to fit a small budget", () => {
+  it("PAR-811: strips the query string in every degraded variant, not only the full line", () => {
+    const facts = {
+      url: "https://docs.internal.example.com/llms.txt?token=super-secret",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    };
+    const full = fitStampLine(facts, 1000);
+    expect(full).not.toContain("super-secret");
+    const withoutCurated = fitStampLine(facts, full.length - 1);
+    expect(withoutCurated).not.toContain("super-secret");
+    expect(withoutCurated).not.toContain("curated");
+    const urlOnly = fitStampLine(facts, "Source: https://docs.internal.example.com/llms.txt".length);
+    expect(urlOnly).toBe("Source: https://docs.internal.example.com/llms.txt");
+    expect(urlOnly).not.toContain("super-secret");
+  });
 });
 
 describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was searched and the topic was not found in it'", () => {
