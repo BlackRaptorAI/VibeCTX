@@ -175,6 +175,28 @@ describe("getDocs index following", () => {
     expect(out.length).toBeLessThan(hugeTopic.length); // the response is genuinely smaller than the input, not merely different
   });
 
+  /** PAR-747 (F-10) — the two interpolations A6 (PAR-719) left out of scope when it bounded the
+   *  no-match message's topic echo and note block: `entry.name` (config-authored) and `doc.url`
+   *  (a resolved registry entry's own URL). Both are ALREADY bounded by the time this test was
+   *  written — `entry.name` via `retrieval.ts`'s `noMatchNote` (`MAX_NOTE_LIBRARY_CHARS`, A18/
+   *  PAR-727), and `doc.url`/`doc.finalUrl` via `sourceStampLine`/`fitStampLine`'s
+   *  `MAX_STAMP_URL_CHARS` (A17/PAR-726, security-architect round 1 S-1) — this closes the one
+   *  thing PAR-747 was actually missing: an integration-level test proving it end to end through
+   *  `getDocs`, not just at `noMatchNote`'s own unit level (`test/retrieval.test.ts`). */
+  it("(PAR-747) bounds a pathologically long library name AND URL in the no-match response, not just the topic echo", async () => {
+    const hugeName = "acme-fastify-".repeat(40); // 520 chars
+    const hugeUrl = `https://fastify.dev/${"docs-".repeat(80)}llms.txt`; // 421 chars, same allowed host
+    const hugeEntry = { name: hugeName, urls: [hugeUrl] };
+    writeCache(hugeName, hugeUrl, ["# Fastify", "- [Request](/docs/Request.md)"].join("\n"));
+    const spy = stubFetch({});
+    const out = await getDocs(hugeEntry, { topic: "zzz-unmatched" });
+    expect(spy).not.toHaveBeenCalled(); // served from cache -- proves this isn't a network-shaped failure instead
+    expect(out).toContain("No sections in"); // still the genuine no-match diagnostic, not some other error path
+    expect(out).not.toContain(hugeName); // the raw, full-length library name never appears
+    expect(out).not.toContain(hugeUrl); // the raw, full-length url never appears
+    expect(out.length).toBeLessThan(hugeName.length + hugeUrl.length);
+  });
+
   it("reports followed links whose fetch failed", async () => {
     seedIndex(["# Fastify", "- [Request](/docs/Request.md)", "- [Reply](/docs/Reply.md)"].join("\n"));
     stubFetch({}); // every fetch 404s
