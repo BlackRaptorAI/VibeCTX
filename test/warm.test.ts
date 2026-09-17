@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCache, writeCache } from "../src/cache.js";
+import { readCache, writeCache, libDirName } from "../src/cache.js";
 import { loadDiscoveredRegistry, loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
@@ -280,7 +280,7 @@ describe("runWarm (PAR-656)", () => {
     writePackageJson({ react: "19", hono: "4" });
     stubFetch({ [REACT_URL]: "# React", [HONO_URL]: "# Hono" });
     // Make react's cache directory unwritable by planting a FILE where the library dir should be.
-    writeFileSync(join(cache, "react"), "not a directory", "utf8");
+    writeFileSync(join(cache, libDirName("react")), "not a directory", "utf8");
     const report = await runWarm(registry(), { dir: project });
     expect(byName(report).react.status).toBe("unreachable");
     expect(byName(report).react.note).toMatch(/^error: /);
@@ -290,7 +290,7 @@ describe("runWarm (PAR-656)", () => {
   it("S-C: a run sweeps orphan temp files out of the cache directories first", async () => {
     writeCache("react", REACT_URL, "# React fresh");
     mkdirSync(join(cache, "projects"), { recursive: true });
-    const orphans = [join(cache, "resolved.json.4242.1757000000000.tmp"), join(cache, "projects", "abc.json.4242.1757000000000.tmp"), join(cache, "react", "page.md.4242.1757000000000.tmp")];
+    const orphans = [join(cache, "resolved.json.4242.1757000000000.tmp"), join(cache, "projects", "abc.json.4242.1757000000000.tmp"), join(cache, libDirName("react"), "page.md.4242.1757000000000.tmp")];
     for (const o of orphans) writeFileSync(o, "half a file", "utf8");
     writeFileSync(join(cache, "keep.tmp"), "not ours", "utf8");
     writePackageJson({ react: "19" });

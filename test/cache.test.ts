@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache, urlSlug } from "../src/cache.js";
+import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache, urlSlug, libDirName } from "../src/cache.js";
 import { sweepTempFiles, sweepCacheTempFiles, tempPathFor, SWEEP_MIN_AGE_MS } from "../src/atomic-store.js";
 
 let dir: string;
@@ -51,7 +51,7 @@ describe("N-6, superseded by A4 — a hostile or missing fetchedAt reads as UNCA
   // shape, hostile fetchedAt) now drops the WHOLE meta, so readCache reports the entry
   // uncached, matching every other corrupt-file case (a torn content/meta pair, PAR-656 S4).
   const URL_ = "https://react.dev/llms.txt";
-  const metaPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(URL_)}.meta.json`);
 
   it.each(["yesterday", "", "not-a-date"])("fetchedAt %j → uncached (readCache returns undefined), not silently served", (bad) => {
     writeCache("react", URL_, "# React");
@@ -70,8 +70,8 @@ describe("N-6, superseded by A4 — a hostile or missing fetchedAt reads as UNCA
 
 describe("A4 (PAR-717) — toCacheMeta, the four corruption classes", () => {
   const URL_ = "https://react.dev/llms.txt";
-  const metaPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
-  const contentPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.md`);
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(URL_)}.meta.json`);
+  const contentPath = () => join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
 
   it("truncated .meta.json: readCache reports the entry uncached, never throws", () => {
     writeCache("react", URL_, "# React");
@@ -206,8 +206,8 @@ describe("toCacheMeta — field-level boundaries (S5, code-reviewer A4 round 2)"
 
 describe("A4 security gate, round 1 (security-architect: CONCERNS → fixed)", () => {
   const URL_ = "https://react.dev/llms.txt";
-  const metaPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
-  const contentPath = () => join(dir, "react", `${URL_.replace(/[^a-z0-9]/gi, "_")}.md`);
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(URL_)}.meta.json`);
+  const contentPath = () => join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
 
   it("F1: a directory where the content file should be reads as uncached, not a throw (existsSync is true for a directory too)", () => {
     writeCache("react", URL_, "# React");
@@ -246,6 +246,21 @@ describe("A4 security gate, round 1 (security-architect: CONCERNS → fixed)", (
     expect(hit?.meta.url).toBe("https://127.0.0.1:9999/llms.txt");
   });
 
+  /**
+   * Source tripwire (test-auditor B, A4 round 3): no `src/` file dereferences a returned
+   * `CacheHit`'s `meta.url` (e.g. `hit.meta.url`) — the invariant the D-47 exemption above
+   * rests on: an internal-host `meta.url` is safe to accept ONLY as long as nothing outside
+   * this file's own read path renders or re-fetches it.
+   *
+   * D-71 (PAR-749, security-architect round 2, S3) added two NEW `meta.url` accesses
+   * (`cache.ts`'s `readCache`/`touchCache`, comparing a local `CacheMeta`'s own `url` against
+   * the URL actually requested) — deliberately NOT matched by the regex below, and correctly
+   * so: those are `meta.url` on a bare `CacheMeta` local, not `hit.meta.url` on a `CacheHit`,
+   * an equality comparison rather than a dereference, and live inside the same read path this
+   * invariant is ABOUT, not a new external consumer of it. The regex still requires a literal
+   * `.meta.url` (a leading dot, i.e. property access off SOME object) specifically to exclude
+   * that shape.
+   */
   it("source tripwire (test-auditor B, A4 round 3): no src/ file reads CacheHit.meta.url as a property — the invariant the D-47 exemption above rests on", () => {
     const srcDir = new URL("../src/", import.meta.url);
     const offenders: string[] = [];
@@ -262,8 +277,8 @@ describe("A4 security gate, round 1 (security-architect: CONCERNS → fixed)", (
 describe("cache — atomic writes (PAR-656 S4)", () => {
   const URL_ = "https://react.dev/llms.txt";
   const paths = () => {
-    const d = join(dir, "react");
-    const slug = URL_.replace(/[^a-z0-9]/gi, "_");
+    const d = join(dir, libDirName("react"));
+    const slug = urlSlug(URL_);
     return { dir: d, content: join(d, `${slug}.md`), meta: join(d, `${slug}.meta.json`) };
   };
 
@@ -280,7 +295,7 @@ describe("cache — atomic writes (PAR-656 S4)", () => {
     expect(readFileSync(p.meta, "utf8")).not.toContain("\\n"); // no escaped newline landed in the file at all
     expect(readCache("react", URL_, 168)?.meta.etag).toBeUndefined();
     writeCache("hono", "https://hono.dev/llms.txt", "# Hono", "x".repeat(600));
-    const honoMeta = join(dir, "hono", `${"https://hono.dev/llms.txt".replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    const honoMeta = join(dir, libDirName("hono"), `${urlSlug("https://hono.dev/llms.txt")}.meta.json`);
     expect(JSON.parse(readFileSync(honoMeta, "utf8")).etag).toBeUndefined();
   });
 
@@ -296,9 +311,9 @@ describe("cache — atomic writes (PAR-656 S4)", () => {
   });
 
   it("a failed write (the library dir is a file) throws and leaves no temp file where the dir should be", () => {
-    writeFileSync(join(dir, "react"), "not a dir", "utf8");
+    writeFileSync(join(dir, libDirName("react")), "not a dir", "utf8");
     expect(() => writeCache("react", URL_, "# React")).toThrow();
-    expect(readdirSync(dir)).toEqual(["react"]);
+    expect(readdirSync(dir)).toEqual([libDirName("react")]);
   });
 
   it("an overwrite replaces the old content in one step: after the write there is exactly one content file and it is the new one", () => {
@@ -362,9 +377,9 @@ describe("S-C — orphan temp files are swept from the cache directories", () =>
 
   it("sweepCacheTempFiles reaches the per-library document directories too, and leaves real files alone", () => {
     writeCache("react", URL_, "# React");
-    const libDir = join(dir, "react");
+    const libDir = join(dir, libDirName("react"));
     writeFileSync(orphan(libDir, "page.md"), "half a document", "utf8");
-    writeFileSync(orphan(join(dir, "react"), "page.meta.json"), "{", "utf8");
+    writeFileSync(orphan(join(dir, libDirName("react")), "page.meta.json"), "{", "utf8");
     const before = readdirSync(libDir).filter((f) => !f.endsWith(".tmp")).sort();
     sweepCacheTempFiles(dir);
     expect(readdirSync(libDir).sort()).toEqual(before);
@@ -450,35 +465,32 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
   });
 
   /**
-   * Round 3 (test-auditor, F8) — a CHARACTERIZATION test, not a proof of correctness: pins
-   * TODAY's disclosed, known-destructive behaviour so the future item that makes `libDirIn`'s
-   * mapping injective has a tripwire showing exactly what changes. `libDirIn`'s regex folds any
-   * character outside `[a-z0-9_-]` to `_`, so two DISTINCT, independently valid npm names —
-   * `foo.bar` and `foo_bar` — share one cache directory. The C2/SF-C provenance checks above
-   * CANNOT catch this: the deleted pair genuinely is one vibectx wrote, just for the sibling
-   * library sharing the folded name. See `dropFollowedPageCache`'s own doc comment.
+   * D-71 (PAR-749) — REPLACES the old CHARACTERIZATION test of this same finding (round 3,
+   * test-auditor, F8), which pinned the disclosed, destructive collision this fix closes:
+   * `libDirIn`'s fold used to map any character outside `[a-z0-9_-]` to `_`, so two DISTINCT,
+   * independently valid npm names — `foo.bar` and `foo_bar` — shared one cache directory, and
+   * the C2/SF-C provenance checks (which compare a `.meta.json`'s own `url` against the slug,
+   * not the library name against anything) could not catch it: the deleted pair genuinely was
+   * one vibectx wrote, just for the sibling library sharing the folded name. `libDirName` now
+   * appends a short hash of the FULL library name to the fold, so the two names resolve to
+   * different directories and neither's cache is touched by the other's refresh.
    */
-  it("CHARACTERIZATION (disclosed, not fixed here): two library names that fold to the same directory collide — refreshing one deletes the other's cached primary", () => {
+  it("two library names that fold to the same characters no longer collide — refreshing one leaves the other's cached primary alone", () => {
     const fooBarPrimary = "https://foo-bar.example.com/dot/llms.txt";
     const fooUnderscoreBarPrimary = "https://foo-bar.example.com/underscore/llms.txt";
     writeCache("foo.bar", fooBarPrimary, "# foo.bar's own primary");
-    writeCache("foo_bar", fooUnderscoreBarPrimary, "# foo_bar's own primary"); // libDirIn folds "." and "_" alike: same directory as "foo.bar"
-    // Round 3 (test-auditor, F8a): pin the PRECONDITION, not only the outcome — without this,
-    // a future fix that rejects/normalises colliding names (rather than hash-suffixing the
-    // directory) could remove the collision entirely and leave this test silently green,
-    // proving nothing. Confirms both writes actually landed as two distinct, real files first.
+    writeCache("foo_bar", fooUnderscoreBarPrimary, "# foo_bar's own primary"); // same fold as "foo.bar", different hash suffix
     expect(readCache("foo.bar", fooBarPrimary, 168)?.content).toBe("# foo.bar's own primary");
     expect(readCache("foo_bar", fooUnderscoreBarPrimary, 168)?.content).toBe("# foo_bar's own primary");
+    // The two names now resolve to distinct directories entirely.
+    expect(libDirName("foo.bar")).not.toBe(libDirName("foo_bar"));
 
     // "foo.bar" refreshes: its own drop call only keeps ITS OWN new candidate URL.
     const fooBarNewUrl = "https://foo-bar.example.com/dot/llms-full.txt";
     dropFollowedPageCache("foo.bar", [fooBarNewUrl]);
 
-    // TODAY's behaviour: "foo_bar"'s cache, sharing the SAME directory, is gone — even though
-    // "foo_bar" was never refreshed and its own candidate URL was never offered to keepUrls.
-    // Not a C2/SF-C bypass: the deleted pair genuinely is one vibectx wrote (for "foo_bar"),
-    // which is exactly why those provenance checks cannot help here.
-    expect(readCache("foo_bar", fooUnderscoreBarPrimary, 168)).toBeUndefined();
+    // "foo_bar" was never refreshed and lives in its own directory now — its cache survives.
+    expect(readCache("foo_bar", fooUnderscoreBarPrimary, 168)?.content).toBe("# foo_bar's own primary");
   });
 
   it("never follows or removes a symlinked file inside a real library directory", () => {
@@ -487,7 +499,7 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
       const outsideVictim = join(outside, "victim.md");
       writeFileSync(outsideVictim, "precious", "utf8");
-      const planted = join(dir, "react", "planted.md");
+      const planted = join(dir, libDirName("react"), "planted.md");
       symlinkSync(outsideVictim, planted);
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
@@ -515,32 +527,32 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
   describe("round 2 (security-architect, C2) · only a proven <slug>.md/<slug>.meta.json pair is deleted", () => {
     it("a lone .md with no .meta.json companion survives", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
-      writeFileSync(join(dir, "react", "orphan.md"), "not vibectx's to delete", "utf8");
+      writeFileSync(join(dir, libDirName("react"), "orphan.md"), "not vibectx's to delete", "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", "orphan.md"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), "orphan.md"))).toBe(true);
     });
 
     it("a lone .meta.json with no .md companion survives", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
-      writeFileSync(join(dir, "react", "orphan.meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+      writeFileSync(join(dir, libDirName("react"), "orphan.meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", "orphan.meta.json"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), "orphan.meta.json"))).toBe(true);
     });
 
     it("a .md whose .meta.json fails validation (truncated JSON) survives with both halves intact", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
       writeCache("react", "https://react.dev/streaming.md", "# Streaming");
       const slug = urlSlug("https://react.dev/streaming.md");
-      writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ not json", "utf8");
+      writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), "{ not json", "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", `${slug}.md`))).toBe(true);
-      expect(existsSync(join(dir, "react", `${slug}.meta.json`))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), `${slug}.md`))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), `${slug}.meta.json`))).toBe(true);
     });
 
     it("a .md whose .meta.json exceeds the size bound survives, without being parsed", () => {
@@ -549,24 +561,24 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       const slug = urlSlug("https://react.dev/streaming.md");
       // Oversized but otherwise well-formed JSON, so a failure here can only be the size guard.
       const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(5000) });
-      writeFileSync(join(dir, "react", `${slug}.meta.json`), oversized, "utf8");
+      writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), oversized, "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", `${slug}.md`))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), `${slug}.md`))).toBe(true);
     });
 
     it("round 3 (code-reviewer, SF-A): a foreign pair literally named .md / .meta.json (empty slug) is never deleted", () => {
       writeCache("react", "https://react.dev/llms.txt", "# React");
       // A pair this tool did not write, whose slug happens to be empty — urlSlug() can never
       // produce "" for a non-empty URL, so no legitimate followed page ever has this name.
-      writeFileSync(join(dir, "react", ".md"), "not vibectx's, empty slug", "utf8");
-      writeFileSync(join(dir, "react", ".meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+      writeFileSync(join(dir, libDirName("react"), ".md"), "not vibectx's, empty slug", "utf8");
+      writeFileSync(join(dir, libDirName("react"), ".meta.json"), JSON.stringify({ url: "https://example.com/x", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", ".md"))).toBe(true);
-      expect(existsSync(join(dir, "react", ".meta.json"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), ".md"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), ".meta.json"))).toBe(true);
     });
 
     it("round 4 (code-reviewer, SF-C; security-architect, N1): a foreign pair with a NON-EMPTY, name-shaped slug whose meta names a DIFFERENT URL is never deleted", () => {
@@ -574,13 +586,13 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       // A pair this tool did not write, named plausibly (not the empty-slug case above) but
       // whose .meta.json's own `url` field does not map back to this filename via urlSlug —
       // proof this file was not produced by writeCache for the URL it claims to describe.
-      writeFileSync(join(dir, "react", "my-notes.md"), "not vibectx's, foreign slug", "utf8");
-      writeFileSync(join(dir, "react", "my-notes.meta.json"), JSON.stringify({ url: "https://example.com/totally-different", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
+      writeFileSync(join(dir, libDirName("react"), "my-notes.md"), "not vibectx's, foreign slug", "utf8");
+      writeFileSync(join(dir, libDirName("react"), "my-notes.meta.json"), JSON.stringify({ url: "https://example.com/totally-different", fetchedAt: "2026-01-01T00:00:00.000Z" }), "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
 
-      expect(existsSync(join(dir, "react", "my-notes.md"))).toBe(true);
-      expect(existsSync(join(dir, "react", "my-notes.meta.json"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), "my-notes.md"))).toBe(true);
+      expect(existsSync(join(dir, libDirName("react"), "my-notes.meta.json"))).toBe(true);
     });
 
     it("round 4: dropFollowedPageCache(\"\", ...) is a no-op — an empty library never collapses the scan to the cache root", () => {
@@ -624,5 +636,86 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
 
       expect(said).toHaveLength(0);
     });
+  });
+});
+
+/**
+ * D-71 (PAR-749, Root 1) — the read-side verification `readCache` and `touchCache` never did:
+ * a meta whose own `url` does not match the URL actually requested is not this entry, however
+ * the file got there (a foreign file planted under a name-shaped slug; before this item, also
+ * a genuine `urlSlug` fold collision — now impossible, since `urlSlug` is injective).
+ */
+describe("D-71 (PAR-749, Root 1) — readCache/touchCache verify the record's own url against the request", () => {
+  const REQUESTED = "https://react.dev/llms.txt";
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(REQUESTED)}.meta.json`);
+
+  it("readCache reports a miss, not the foreign content, when the meta's own url does not match the URL requested", () => {
+    writeCache("react", REQUESTED, "# Not the requested document");
+    // Overwrite the meta as if this exact file name had been produced for a DIFFERENT URL —
+    // the shape `toCacheMeta` fully accepts (valid url, valid fetchedAt), so only the new
+    // url-match check can catch this, not A4's validator.
+    writeFileSync(metaPath(), JSON.stringify({ url: "https://react.dev/other-page.md", fetchedAt: new Date().toISOString() }), "utf8");
+    expect(readCache("react", REQUESTED, 168)).toBeUndefined();
+  });
+
+  it("touchCache is a no-op, not a throw, when the meta's own url does not match the URL being refreshed", () => {
+    writeCache("react", REQUESTED, "# Not the requested document");
+    const mismatched = JSON.stringify({ url: "https://react.dev/other-page.md", fetchedAt: "2020-01-01T00:00:00.000Z" });
+    writeFileSync(metaPath(), mismatched, "utf8");
+    expect(() => touchCache("react", REQUESTED)).not.toThrow();
+    // Not refreshed: the file on disk is untouched, byte for byte.
+    expect(readFileSync(metaPath(), "utf8")).toBe(mismatched);
+  });
+
+  it("a genuine round trip (writeCache's own meta) still matches, so this check costs the good case nothing", () => {
+    writeCache("react", REQUESTED, "# React");
+    expect(readCache("react", REQUESTED, 168)?.content).toBe("# React");
+  });
+});
+
+/**
+ * D-71 (PAR-749) Done-when: "A test enumerates those call sites so a new one cannot be added
+ * without failing." Two complementary checks, both needed (code-reviewer, round 1, B2 — the
+ * first version of this test only enumerated FILES, and skipped the three files every one of
+ * the six named call sites actually lives in, so it could not have caught the bug it exists to
+ * prevent):
+ *
+ *   1. No `src/*.ts` file OUTSIDE `cache-meta.ts`/`cache.ts`/`cache-evict.ts` so much as
+ *      mentions the `.meta.json` suffix — a new reader in some other file is caught here.
+ *   2. INSIDE those two consumer files, `readMetaFile` (`cache-meta.ts`) is the ONLY thing
+ *      that ever parses one — asserted by requiring the six named functions to still exist by
+ *      name (a call site silently renamed or removed without updating this test fails) AND
+ *      requiring neither file to contain its own `JSON.parse` (a new ad hoc reader added
+ *      BESIDE `readMetaFile`, Root 2's original defect, fails here instead of shipping as a
+ *      fifth trust level).
+ */
+describe("D-71 (PAR-749) — call-site enumeration: every `.meta.json` reader is exactly this list", () => {
+  const stripComments = (code: string): string => code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+  const srcDir = new URL("../src/", import.meta.url);
+  const read = (name: string): string => readFileSync(new URL(name, srcDir), "utf8");
+
+  it("no src/ file outside cache-meta.ts/cache.ts/cache-evict.ts mentions the .meta.json suffix", () => {
+    const offenders: string[] = [];
+    for (const name of readdirSync(srcDir).filter((f) => f.endsWith(".ts"))) {
+      if (name === "cache-meta.ts" || name === "cache.ts" || name === "cache-evict.ts") continue;
+      if (read(name).includes(".meta.json")) offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("readCache, writeCache, touchCache and dropFollowedPageCache still exist by name in cache.ts, and neither cache.ts nor cache-evict.ts parses a .meta.json itself", () => {
+    const cacheSrc = stripComments(read("cache.ts"));
+    for (const name of ["readCache", "writeCache", "touchCache", "dropFollowedPageCache"]) {
+      expect(cacheSrc).toMatch(new RegExp(`function ${name}\\(`));
+    }
+    expect(cacheSrc).not.toMatch(/JSON\.parse/);
+  });
+
+  it("cache-evict.ts's recency reader and enforceCacheSizeCap still exist by name, and cache-evict.ts parses a .meta.json nowhere itself", () => {
+    const evictSrc = stripComments(read("cache-evict.ts"));
+    for (const name of ["resolveRecency", "enforceCacheSizeCap"]) {
+      expect(evictSrc).toMatch(new RegExp(`function ${name}\\(`));
+    }
+    expect(evictSrc).not.toMatch(/JSON\.parse/);
   });
 });

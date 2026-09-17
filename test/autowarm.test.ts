@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { readCache, writeCache } from "../src/cache.js";
+import { readCache, writeCache, urlSlug, libDirName } from "../src/cache.js";
 import { DEFAULT_REGISTRY, loadDiscoveredRegistry, type Registry } from "../src/registry.js";
 import {
   AUTOWARM_CONCURRENCY,
@@ -100,10 +100,10 @@ describe("configuredEntriesNeedingWarm", () => {
   });
 
   it("A4: a corrupt meta.json reads as uncached (never throws), so that entry needs warm like any other uncached one", () => {
-    mkdirSync(join(dir, "react"), { recursive: true });
-    const slug = REACT_URL.replace(/[^a-z0-9]/gi, "_");
-    writeFileSync(join(dir, "react", `${slug}.md`), "# React", "utf8");
-    writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ corrupt", "utf8");
+    mkdirSync(join(dir, libDirName("react")), { recursive: true });
+    const slug = urlSlug(REACT_URL);
+    writeFileSync(join(dir, libDirName("react"), `${slug}.md`), "# React", "utf8");
+    writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), "{ corrupt", "utf8");
     let names: string[] = [];
     expect(() => {
       names = configuredEntriesNeedingWarm(registry()).map((e) => e.name);
@@ -177,7 +177,7 @@ describe("startAutowarm", () => {
   });
 
   it("Q5: a cache directory that cannot be written (a file where the library dir belongs) fails that entry only; the run completes and reports it", async () => {
-    writeFileSync(join(dir, "zod"), "not a directory", "utf8"); // writeCache → mkdirSync throws ENOTDIR/EEXIST
+    writeFileSync(join(dir, libDirName("zod")), "not a directory", "utf8"); // writeCache → mkdirSync throws ENOTDIR/EEXIST
     writeCache("react", REACT_URL, "# React fresh");
     const reg: Registry = { entries: new Map([...registry().entries].filter(([k]) => k !== "hono")) };
     vi.stubGlobal("fetch", vi.fn(async () => new Response("# Zod", { status: 200, headers: { "content-type": "text/plain" } })));
@@ -194,10 +194,10 @@ describe("startAutowarm", () => {
     // A4: that one entry just reads as uncached, and the run completes normally for all of
     // them (react, hono and zod all attempted below; react because its meta reads as
     // uncached, not because anything threw).
-    mkdirSync(join(dir, "react"), { recursive: true });
-    const slug = REACT_URL.replace(/[^a-z0-9]/gi, "_");
-    writeFileSync(join(dir, "react", `${slug}.md`), "# React", "utf8");
-    writeFileSync(join(dir, "react", `${slug}.meta.json`), "{ corrupt", "utf8");
+    mkdirSync(join(dir, libDirName("react")), { recursive: true });
+    const slug = urlSlug(REACT_URL);
+    writeFileSync(join(dir, libDirName("react"), `${slug}.md`), "# React", "utf8");
+    writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), "{ corrupt", "utf8");
     const notes: string[] = [];
     const summary = await startAutowarm(registry(), {
       warn: (m) => notes.push(m),

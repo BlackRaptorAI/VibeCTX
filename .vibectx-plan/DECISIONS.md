@@ -456,9 +456,74 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-71 — decided 2026-09-17, executing A7 / PAR-720
+## D-71 — decided 2026-09-17 by Tom
 
-- **D-71** 2026-09-17 — **D-48's class is the character SET, not the substitution; each call
+- **D-71** 2026-09-17 — **A cache storage key must be verifiable against the record it names —
+  BOTH the key is made collision-resistant AND every reader verifies the record against the
+  request.** Consolidates PAR-741, PAR-742, PAR-743 and PAR-745 (already merged into
+  **PAR-749** on 2026-09-10, D-61) into one design item, built as PAR-749.
+
+  **Two roots.** (1) `urlSlug` and `libDir`'s name-folding regexes were lossy and used
+  directly as storage keys with no collision check: two distinct URLs (or library names)
+  differing only in a character the fold maps to `_` produced the identical file name, and
+  `readCache` never compared the requested URL against the `url` field the meta file itself
+  carried — so a collision (or a foreign file planted under a name-shaped slug) could serve
+  one document's content under another's name, silently. (2) `.meta.json` had four readers at
+  four different trust levels — a strict per-field validator, a strict validator plus a
+  provenance round-trip, an ad hoc lax parse, and no check at all.
+
+  **Fix, both halves, in the same item.** `urlSlug` and the library-directory fold (now
+  `libDirName`) each append a short hash (12 hex characters, SHA-256-derived, 48 bits) of the
+  FULL, untruncated input to the folded, human-legible prefix — an ACCIDENTAL collision between
+  two unrelated inputs is now astronomically unlikely (not a mathematical impossibility; a
+  48-bit digest is a collision-resistance bound, not an injectivity guarantee), whatever their
+  folded form. On the URL dimension that is deliberately not the only defense: `readCache` and
+  `touchCache` now additionally verify the meta's own `url` against the URL actually requested
+  and treat a mismatch as a miss/no-op — this is the check that actually makes serving the
+  wrong document impossible, independent of hash collision resistance. The library-name
+  dimension has no equivalent second check (a library name is not itself stored in
+  `.meta.json`); accepted, because the input space there is narrower (an npm/package name, not
+  an arbitrary URL) and the worst case is loss of re-fetchable cache, never wrong content served
+  as right. The strict validator (`toCacheMeta`) and the provenance check
+  (`urlSlug(meta.url) === slug`, generalised as `metaMatchesSlug`) are extracted to a new
+  shared module, `src/cache-meta.ts`, imported by both `src/cache.ts` and `src/cache-evict.ts`
+  — there is no longer a second, laxer `.meta.json` parser anywhere in the codebase.
+  `cache-evict.ts`'s recency reader now uses the same shared validator; its stale comments
+  asserting the pre-A4 ("an unparsable `fetchedAt` reads as stale") behaviour are corrected.
+  `enforceCacheSizeCap`'s own delete decision deliberately keeps deciding by proven
+  `<slug>.md`/`<slug>.meta.json` pair shape under an already-D-46-proven root, not by the
+  `metaMatchesSlug` identity proof `dropFollowedPageCache` needs — eviction frees space from
+  any such pair regardless of whose URL its meta claims, and it is by the same mechanism (it
+  discovers whatever pairs exist on disk rather than deriving an expected name from a URL) that
+  it keeps reaching pre-D-71 ("old-format") cache files for cleanup, with no special-case code.
+
+  **Migration:** none needed, deliberately. Existing cache entries under old (non-hash-suffixed)
+  names are simply not found by the new key derivation, so they are orphaned and re-fetched
+  fresh under the new name on next use — this is a full cache invalidation on upgrade, for
+  every user, not a background migration; a user relying on `offline` mode should run
+  `vibectx warm` while online before or right after upgrading, or `get_docs`/`search` degrade
+  for anything not yet re-cached. Orphaned old-format files are only reclaimed once the cache
+  actually exceeds `VIBECTX_CACHE_MAX_MB` (default 512 MB) and `enforceCacheSizeCap` sweeps —
+  under a typical, unexceeded cache they persist on disk indefinitely (wasted space, not a
+  correctness or security issue: `scanCache` discovers pairs by walking disk rather than
+  deriving expected names, so old- and new-format entries for the same logical document can
+  coexist without aliasing each other). Flagged for the 0.2.0 release note / Change Record,
+  not just here.
+
+  **Verified disproven, recorded so nobody re-derives it (PAR-749's own text):** the Root 1
+  collision never undermined A3's provenance check in `dropFollowedPageCache` —
+  `keep.has(slug)` short-circuits before `urlSlug(meta.url) !== slug`, so a collision caused a
+  false KEEP (preservation, the safe direction), never a wrong delete. The harm was entirely on
+  the read path (`readCache`), which this item closes.
+
+  **Gates:** `code-reviewer` + `security-architect` (D-70 lean process — this item touches
+  cache-key derivation, the on-disk cache, and eviction/delete paths). | PAR-749
+
+---
+
+## D-72 — decided 2026-09-17, executing A7 / PAR-720
+
+- **D-72** 2026-09-17 — **D-48's class is the character SET, not the substitution; each call
   site's replacement choice is its own decision, made once and shared.** `src/text.ts` exports
   one binding onto the union class, `stripControlBidi(s, replacement = "")`, so the set is
   defined exactly once and every caller supplies only what to put in a matched character's

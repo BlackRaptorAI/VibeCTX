@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeCache, urlSlug } from "../src/cache.js";
+import { writeCache, urlSlug, libDirName } from "../src/cache.js";
 import { loadRegistry, type LibraryEntry, type Registry } from "../src/registry.js";
 import {
   runDoctor,
@@ -35,7 +35,7 @@ function reg(...entries: LibraryEntry[]): Registry {
 /** Seed the cache and back-date its fetchedAt so cache age / staleness rules can be tested. */
 function seedAged(library: string, url: string, content: string, ageHours: number) {
   writeCache(library, url, content);
-  const metaPath = join(dir, library.replace(/[^a-z0-9_-]/gi, "_"), `${urlSlug(url)}.meta.json`);
+  const metaPath = join(dir, libDirName(library), `${urlSlug(url)}.meta.json`);
   const meta = JSON.parse(readFileSync(metaPath, "utf8"));
   meta.fetchedAt = new Date(Date.now() - ageHours * 3600_000).toISOString();
   writeFileSync(metaPath, JSON.stringify(meta), "utf8");
@@ -510,7 +510,7 @@ describe("runDoctor per-library failure isolation", () => {
     // fetched" miss. toCacheMeta now makes readCache report it uncached directly, so it
     // takes the SAME path any other unreachable library takes.
     writeCache("broken", "https://broken.example.com/llms.txt", "# Broken");
-    const metaPath = join(dir, "broken", `${urlSlug("https://broken.example.com/llms.txt")}.meta.json`);
+    const metaPath = join(dir, libDirName("broken"), `${urlSlug("https://broken.example.com/llms.txt")}.meta.json`);
     writeFileSync(metaPath, "{ not json", "utf8");
     writeCache("react", REACT_URL, REACT_DOC);
     stubFetch({});

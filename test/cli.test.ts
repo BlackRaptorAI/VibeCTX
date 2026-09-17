@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeCache } from "../src/cache.js";
+import { writeCache, libDirName } from "../src/cache.js";
 import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
@@ -292,8 +292,8 @@ describe("dispatchCli resolve (PAR-655)", () => {
   });
 
   it("A5 (PAR-718): with the cache directory read-only, resolving a real, previously-uncached name never throws — exits cleanly with a 'NOT saved' note, no stack trace, real EACCES", async () => {
-    mkdirSync(join(dir, "elysia"), { recursive: true });
-    chmodSync(join(dir, "elysia"), 0o700);
+    mkdirSync(join(dir, libDirName("elysia")), { recursive: true });
+    chmodSync(join(dir, libDirName("elysia")), 0o700);
     chmodSync(dir, 0o500);
     try {
       stubFetch({
@@ -323,7 +323,7 @@ describe("dispatchCli resolve (PAR-655)", () => {
       // text `vibectx resolve` actually prints) is the assertion that matters.
     } finally {
       chmodSync(dir, 0o700);
-      if (existsSync(join(dir, "elysia"))) chmodSync(join(dir, "elysia"), 0o700);
+      if (existsSync(join(dir, libDirName("elysia")))) chmodSync(join(dir, libDirName("elysia")), 0o700);
     }
   });
 });
