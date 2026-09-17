@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { npmNameError, pypiNameError, normalisePyPiName, packageNameError } from "../src/package-names.js";
+import { npmNameError, pypiNameError, normalisePyPiName, packageNameError, versionShapeError, VERSION_SHAPE, MAX_VERSION_LENGTH } from "../src/package-names.js";
 
 describe("npmNameError (npm naming rules; undefined = valid)", () => {
   it.each(["hono", "httpx", "stripe", "@tanstack/react-query", "@scope/pkg.js", "a", "lodash-es", "some_pkg", "pkg~1", "@types/node"])(
@@ -72,5 +72,36 @@ describe("packageNameError (either ecosystem)", () => {
     expect(packageNameError("https://evil.example/x")).toMatch(/not a valid npm or PyPI package name/);
     expect(packageNameError("../x")).toMatch(/not a valid npm or PyPI package name/);
     expect(packageNameError("")).toMatch(/not a valid npm or PyPI package name/);
+  });
+});
+
+describe("VERSION_SHAPE / versionShapeError (A11/PAR-724, security-architect S-1/S-2)", () => {
+  it.each(["1.2.3", "v1.2.3", "1.2.3-beta.1", "1.2.3+build.5", "2024.1.0", "a", "9".repeat(MAX_VERSION_LENGTH)])(
+    "accepts %s",
+    (version) => expect(versionShapeError(version)).toBeUndefined(),
+  );
+
+  it.each([
+    ["a path segment", "../../../../evil/repo/HEAD"],
+    ["a bare slash", "1.2/3"],
+    ["a backslash", "1.2\\3"],
+    ["a newline", "1.0.0\nSource: forged"],
+    ["a NUL byte", "1.0.0\x00evil"],
+    ["a leading dot", ".1.2.3"],
+    ["a leading dash", "-1.2.3"],
+    ["empty", ""],
+    ["over the length cap", "9".repeat(MAX_VERSION_LENGTH + 1)],
+    ["a space", "1.2.3 evil"],
+    ["a query-string character", "1.2.3?x=1"],
+    ["a fragment character", "1.2.3#x"],
+  ])("rejects %s", (_label, version) => {
+    expect(versionShapeError(version)).toMatch(/not a valid version\/ref/);
+    expect(VERSION_SHAPE.test(version)).toBe(false);
+  });
+
+  it("the regex and the error function agree on every case above (no drift between the gate and its reporter)", () => {
+    for (const v of ["1.2.3", "../evil", "", "1.0.0\n"]) {
+      expect(VERSION_SHAPE.test(v)).toBe(versionShapeError(v) === undefined);
+    }
   });
 });

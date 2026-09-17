@@ -150,7 +150,7 @@ describe("dispatchCli", () => {
     const report = JSON.parse(a.out.join(""));
     expect(Object.keys(report)).toEqual(["schemaVersion", "generatedAt", "libraries", "healthy", "total", "configIssues"]);
     expect(report.configIssues).toEqual([]);
-    expect(report.schemaVersion).toBe(1);
+    expect(report.schemaVersion).toBe(1); // DOCTOR_SCHEMA_VERSION — unrelated to PROJECT_RECORD_SCHEMA_VERSION
     expect(report.total).toBe(DEFAULT_REGISTRY.length);
     expect(report.total).toBe(30); // PAR-654: the vibe-coder top-30
     expect(report.healthy).toBe(0);
@@ -272,7 +272,8 @@ describe("dispatchCli resolve (PAR-655)", () => {
     stubFetch({});
     const a = io();
     expect(await dispatchCli(["node", "dist/index.js", "resolve", "zz-nothing"], a)).toBe(1);
-    expect(a.out.join("")).toMatch(/^Could not resolve "zz-nothing": npm: no metadata/);
+    // A16/PAR-725: both registries genuinely 404 — the "does not exist" existence claim.
+    expect(a.out.join("")).toMatch(/^Could not resolve "zz-nothing": "zz-nothing" does not exist in npm or PyPI\. npm: no metadata/);
   });
 
   it("--pypi forces PyPI; --config loads the config first", async () => {
@@ -384,7 +385,7 @@ describe("dispatchCli warm (PAR-656)", () => {
     expect(existsSync(join(dir, "projects"))).toBe(true);
   });
 
-  it("--json emits schemaVersion 1 first; --offline never fetches; exit 1 when something is not cached", async () => {
+  it("--json emits schemaVersion first; --offline never fetches; exit 1 when something is not cached", async () => {
     writeFileSync(join(project, "package.json"), JSON.stringify({ dependencies: { react: "19", hono: "4" } }), "utf8");
     writeCache("react", REACT_URL, REACT_DOC);
     const spy = stubFetch({});
@@ -393,7 +394,7 @@ describe("dispatchCli warm (PAR-656)", () => {
     expect(spy).not.toHaveBeenCalled();
     const report = JSON.parse(a.out.join(""));
     expect(Object.keys(report).slice(0, 4)).toEqual(["schemaVersion", "generatedAt", "dir", "offline"]);
-    expect(report.schemaVersion).toBe(1);
+    expect(report.schemaVersion).toBe(PROJECT_RECORD_SCHEMA_VERSION);
     expect(report.offline).toBe(true);
     expect(report.dependencies.map((d: { name: string; status: string }) => [d.name, d.status])).toEqual([
       ["react", "already fresh"],
@@ -411,7 +412,7 @@ describe("dispatchCli warm (PAR-656)", () => {
     expect(await dispatchCli(["node", "dist/index.js", "warm", project, "--json"], a)).toBe(0);
     const report = JSON.parse(a.out.join(""));
     expect(report.notes).toContain("project record not written: newer schema on disk");
-    expect(a.err.join("")).toMatch(/newer schemaVersion 2/);
+    expect(a.err.join("")).toMatch(new RegExp(`newer schemaVersion ${PROJECT_RECORD_SCHEMA_VERSION + 1}`));
   });
 
   it("defaults the directory to the working directory", async () => {

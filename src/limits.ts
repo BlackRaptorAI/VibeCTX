@@ -12,11 +12,31 @@ export const MAX_LLMS_CANDIDATES = 8;
  *  express ships `Readme.md`, resend `readme.md`, django `README.rst`. */
 export const README_VARIANTS = ["README.md", "readme.md", "Readme.md", "README.rst"] as const;
 export const MAX_README_CANDIDATES = README_VARIANTS.length;
-/** Candidate URLs one resolved entry may carry (= one ecosystem's full probe list). */
-export const MAX_URLS_PER_ENTRY = MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES;
-/** Hard ceiling on requests one resolution may issue: both metadata documents, then the
- *  preferred ecosystem's candidates and — if none served — the other's (R2). */
-export const MAX_FETCHES_PER_RESOLUTION = MAX_METADATA_FETCHES + MAX_METADATA_FETCHES * MAX_URLS_PER_ENTRY;
+/** A11/PAR-724 — tag-name spellings tried at GitHub's `refs/tags/<tag>` ref when a
+ *  version is pinned: `v<version>` (the overwhelmingly common convention) and bare
+ *  `<version>`. Not a general "usual variants" enumerator — two is what covers the
+ *  ordinary case without multiplying the fetch budget further; anything else (a
+ *  `<name>@<version>` monorepo tag, say) falls through to the unversioned chain below,
+ *  same as an unreachable README always has. */
+export const MAX_VERSION_TAG_VARIANTS = 2;
+/** README filename variants × tag variants, at GitHub's `refs/tags/<tag>` ref, tried
+ *  before the unversioned chain when a version is pinned (A11/PAR-724). */
+export const MAX_VERSIONED_README_CANDIDATES = MAX_VERSION_TAG_VARIANTS * README_VARIANTS.length;
+/** One extra registry metadata fetch, for the chosen ecosystem only, at the exact pinned
+ *  version — separate from MAX_METADATA_FETCHES (which is spent on the unversioned `/latest`
+ *  lookup every resolution needs regardless) because it fires only when a version is given
+ *  (A11/PAR-724). Narrower purpose than the `/latest` fetch: confirm the version is
+ *  registered and read its (possibly different) repository field, not synthesize documents
+ *  from it directly. */
+export const MAX_VERSION_METADATA_FETCHES = 1;
+/** Candidate URLs one resolved entry may carry (= one ecosystem's full probe list, version
+ *  candidates included). */
+export const MAX_URLS_PER_ENTRY = MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES + MAX_VERSIONED_README_CANDIDATES;
+/** Hard ceiling on requests one resolution may issue: both metadata documents, the one
+ *  version-specific metadata fetch when a version is pinned, then the preferred ecosystem's
+ *  candidates and — if none served — the other's (R2). */
+export const MAX_FETCHES_PER_RESOLUTION =
+  MAX_METADATA_FETCHES + MAX_VERSION_METADATA_FETCHES + MAX_METADATA_FETCHES * MAX_URLS_PER_ENTRY;
 /** Resolutions (name validated, metadata about to be fetched) one process may start per hour. */
 export const MAX_RESOLUTIONS_PER_HOUR = 100;
 
