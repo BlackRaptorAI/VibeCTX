@@ -1363,6 +1363,43 @@ describe("sourceStampLine / fitStampLine — version field (A11/PAR-724)", () =>
   });
 });
 
+describe("sourceStampLine / fitStampLine — doctorKind field (A19/PAR-728)", () => {
+  const base = { url: "https://example.com/llms.txt", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true };
+
+  it("appends a doctor-check-failed note after version when present", () => {
+    expect(sourceStampLine({ ...base, version: "18.2.0", doctorKind: "index-only" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · version 18.2.0 · doctor check failed (index-only)",
+    );
+  });
+
+  it("appends right after curated/resolved when there is no version", () => {
+    expect(sourceStampLine({ ...base, doctorKind: "unreachable" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · doctor check failed (unreachable)",
+    );
+  });
+
+  it("omits the segment entirely when undefined — unchanged from before A19", () => {
+    expect(sourceStampLine(base)).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+  });
+
+  it("fitStampLine drops doctorKind together with version/redirectedFrom, not ahead of or behind them", () => {
+    const facts = { ...base, redirectedFrom: "https://old.example.com/llms.txt", version: "18.2.0", doctorKind: "index-only" as const };
+    const full = sourceStampLine(facts);
+    const withoutExtras = `Source: ${facts.url} · fetched ${facts.fetchedAt} · fresh · curated`;
+    const line = fitStampLine(facts, full.length - 1);
+    expect(line).toBe(withoutExtras);
+    expect(line).not.toContain("doctor");
+    expect(line).not.toContain("version");
+    expect(line).not.toContain("redirected");
+  });
+
+  it("fitStampLine returns the full line unchanged when it already fits, doctorKind included", () => {
+    const facts = { ...base, doctorKind: "readme" as const };
+    const full = sourceStampLine(facts);
+    expect(fitStampLine(facts, full.length)).toBe(full);
+  });
+});
+
 describe("versionFallbackNote (A11/PAR-724): the non-silent 'no versioned document, showing latest' statement", () => {
   it("names the requested version and states the substitution plainly", () => {
     expect(versionFallbackNote("2.1.0")).toBe("No document found for version 2.1.0; showing the latest available instead.");

@@ -11,6 +11,7 @@ import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
 import { derivedAllowedHosts } from "../src/link-policy.js";
 import { documentHash, readIndex, resetSearchIndexMemo, searchIndexPath } from "../src/search-index.js";
 import { readActivityEntries } from "../src/activity-log.js";
+import { saveDoctorVerdicts } from "../src/doctor-store.js";
 
 let dir: string;
 
@@ -1655,6 +1656,53 @@ describe("getDocsToolText — version matching (A11/PAR-724)", () => {
     const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "2.0.0", offline: true });
     expect(out).toContain("Version 2.0.0 was requested, but this call is offline — version-matching needs the network. Showing the cached document instead.");
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("A19/PAR-728: doctor's verdict surfaced in the get_docs stamp", () => {
+  it("PAR-704 shape: an index-only entry doctor found unhealthy carries a 'doctor check failed' note in the stamp, even on a response that itself answered fine", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Server querystring parsing](/docs/latest/Reference/Request.md): server options",
+      ].join("\n"),
+    );
+    stubFetch({
+      "https://fastify.dev/docs/latest/Reference/Request.md": "# Request\n\n## querystring parsing\n\nUses the querystring module.",
+    });
+    saveDoctorVerdicts([
+      {
+        name: entry.name,
+        kind: "index-only",
+        healthy: false,
+        reasons: ["index-only, no links followed (answered from the link list at best)"],
+        checkedAt: "2026-09-17T00:00:00.000Z",
+      },
+    ]);
+    const out = await getDocs(entry, { topic: "querystring parsing" });
+    expect(out).toContain("querystring module");
+    expect(out).toContain("· doctor check failed (index-only, checked 2026-09-17T00:00:00.000Z)");
+  });
+
+  it("no note when doctor found the entry healthy, or has never checked it", async () => {
+    seedIndex("# Fastify\n\n## querystring parsing\n\nUses the querystring module.");
+    stubFetch({});
+    const out = await getDocs(entry, { topic: "querystring parsing" });
+    expect(out).not.toContain("doctor check failed");
+    saveDoctorVerdicts([{ name: entry.name, kind: "full-text", healthy: true, reasons: [], checkedAt: "2026-09-17T00:00:00.000Z" }]);
+    const out2 = await getDocs(entry, { topic: "querystring parsing" });
+    expect(out2).not.toContain("doctor check failed");
+  });
+
+  it("drops the doctor note under budget pressure, together with version/redirectedFrom, rather than truncating it", async () => {
+    seedIndex("# Fastify\n\n## querystring parsing\n\nUses the querystring module for parsing.");
+    stubFetch({});
+    saveDoctorVerdicts([
+      { name: entry.name, kind: "index-only", healthy: false, reasons: ["no match: \"x\""], checkedAt: "2026-09-17T00:00:00.000Z" },
+    ]);
+    const out = await getDocs(entry, { topic: "querystring parsing", maxTokens: 14 });
+    expect(out).not.toContain("doctor");
+    expect(out).not.toMatch(/doctor check failed \(index-o$/); // never a mid-field cut
   });
 });
 

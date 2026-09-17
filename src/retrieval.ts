@@ -1,5 +1,6 @@
 import { clipText } from "./text.js";
 import { tokenize } from "./tokenize.js";
+import type { SourceKind } from "./source-kind.js";
 
 /** A heading and the text under it, with where it sits in the heading tree (D-25). */
 export interface SplitSection {
@@ -347,6 +348,22 @@ export interface StampFacts {
    *  version-specific match. Undefined on every unversioned call and on a versioned call that
    *  fell back to the latest available document. */
   version?: string;
+  /** A19/PAR-728 — the source kind `vibectx doctor` classified this entry as on its LAST run,
+   *  set only when that run also found it unhealthy (index-only with no link followed, or a
+   *  probe that returned no match — see doctor.ts's `LibraryReport.healthy`). Never set merely
+   *  because the entry IS index-only or readme; many such entries are perfectly healthy. This
+   *  is doctor's stated verdict, not a live re-probe — get_docs does not re-run doctor's checks
+   *  on every call — so it can be stale relative to a fix made since doctor last ran; that is
+   *  the same staleness `list_libraries`' own `[doctor: ...]` note (list-libraries.ts) accepts
+   *  for the same reason. A closed enum (`SourceKind`), so unlike `version`/`url`/
+   *  `redirectedFrom` it needs no separate cleaning here — there is no free-form text to forge. */
+  doctorKind?: SourceKind;
+  /** A19/PAR-728, code-reviewer round 1, B3 — WHEN doctor reached that verdict (its
+   *  `checkedAt`), always set together with `doctorKind` and never alone: an unhealthy verdict
+   *  with no date reads as a present-tense fact forever, even long after the library was fixed
+   *  and simply never re-checked. Already shape-bounded on read (`doctor-store.ts`'s
+   *  `ISO_INSTANT` check), so — like `doctorKind` — nothing here needs its own cleaning. */
+  doctorCheckedAt?: string;
 }
 
 /** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
@@ -363,7 +380,9 @@ const MAX_STAMP_VERSION_CHARS = 100;
 export function sourceStampLine(f: StampFacts): string {
   const redirect = f.redirectedFrom !== undefined ? ` (redirected from ${clipText(f.redirectedFrom, MAX_STAMP_URL_CHARS)})` : "";
   const version = f.version !== undefined ? ` · version ${clipText(f.version, MAX_STAMP_VERSION_CHARS)}` : "";
-  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}`;
+  const doctorDate = f.doctorCheckedAt !== undefined ? `, checked ${f.doctorCheckedAt}` : "";
+  const doctor = f.doctorKind !== undefined ? ` · doctor check failed (${f.doctorKind}${doctorDate})` : "";
+  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}${doctor}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
@@ -373,20 +392,21 @@ export function sourceStampLine(f: StampFacts): string {
  *  9th character — is a plausible, well-formed, WRONG date presented as fact, which is worse
  *  than the missing stamp A17 exists to fix.
  *
- *  `version` (A11/PAR-724) and `redirectedFrom` (PAR-776) drop TOGETHER as the first degrade
- *  step, neither ahead of the other: both are optional annotations added after
- *  url/fetched-at/fresh-stale/curated already existed, each built without knowledge of the
- *  other, and neither's own URL is the SOLE place that fact is known the way `url` itself is
- *  (the caller already had the requested version and the pre-redirect candidate URL going in).
- *  Picking an order between two independently-added "drop me first" fields would be inventing
- *  a priority neither feature actually depends on; dropping both together avoids that. At the
+ *  `version` (A11/PAR-724), `redirectedFrom` (PAR-776) and `doctorKind` (A19/PAR-728) drop
+ *  TOGETHER as the first degrade step, none ahead of the others: each is an optional annotation
+ *  added after url/fetched-at/fresh-stale/curated already existed, each built without knowledge
+ *  of the others, and none's own presence is the SOLE place that fact is known the way `url`
+ *  itself is (the caller already had the requested version, the pre-redirect candidate URL and
+ *  the persisted doctor verdict going in). Picking an order between three independently-added
+ *  "drop me first" fields would be inventing a priority none of the three features actually
+ *  depends on; dropping them together avoids that. At the
  *  extreme (`maxChars` too small even for `Source: <url>`), this returns that shortest variant
  *  anyway and leaves it to the caller's own backstop — unchanged from get_docs' pre-A17
  *  behaviour for an oversized `Source:` line alone, already accepted and pinned by test. */
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
-  const withoutExtras = sourceStampLine({ ...f, version: undefined, redirectedFrom: undefined });
+  const withoutExtras = sourceStampLine({ ...f, version: undefined, redirectedFrom: undefined, doctorKind: undefined, doctorCheckedAt: undefined });
   if (withoutExtras.length <= maxChars) return withoutExtras;
   const url = clipText(f.url, MAX_STAMP_URL_CHARS);
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;

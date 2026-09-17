@@ -393,7 +393,10 @@ describe("doctor reports what was evicted", () => {
     process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
     writeCache("zod", url("new"), "x".repeat(4000));
 
-    const text = formatDoctorTable(report);
+    // A19/PAR-728: `formatDoctorTable` renders `report.eviction` (set once, by `runDoctor`),
+    // not a live re-read of `lastEvictionSummary()` — so a report built by hand, as this test
+    // does, must carry it explicitly, same as `runDoctor` itself now does.
+    const text = formatDoctorTable({ ...report, eviction: lastEvictionSummary() });
     expect(text).toContain("cache: evicted 1 least-recently-fetched document(s)");
     expect(text).toContain("VIBECTX_CACHE_MAX_MB");
     // D-71 (PAR-749, code-reviewer round 2, S1): doctor strips the on-disk directory's hash

@@ -74,8 +74,13 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  *  is the more exposed of the two, since it renders through `cleanText`
  *  (`project-deps.ts:119-121`), which strips control/bidi but does not clip length. Carried
  *  forward as a follow-up item, not fixed here: those two files are outside this item's
- *  authorised scope (`src/cache-meta.ts`, `src/cache.ts`, `src/cache-evict.ts` + tests). */
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
+ *  authorised scope (`src/cache-meta.ts`, `src/cache.ts`, `src/cache-evict.ts` + tests).
+ *
+ *  Exported (A19/PAR-728, security-architect S-3a) so `doctor-store.ts`'s `checkedAt` — a new
+ *  use site, not one of the two pre-existing unbounded ones above — reuses this shared shape
+ *  (D-48: one definition, not a local variant per module) rather than adding a third copy of
+ *  the same unbounded-length gap this comment already tracks. */
+export const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 
 /** Longest `url` this file will hold — generous, not load-bearing (see `validMetaUrl`). */
 const MAX_META_URL = 2048;
