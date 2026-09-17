@@ -613,3 +613,24 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `src/get-docs.ts`, `src/retrieval.ts` (`StampFacts.redirectedFrom`) (PAR-776).
 
 ---
+
+## D-75 — decided 2026-09-17, executing PAR-778
+
+- **D-75** 2026-09-17 — **`package.json`'s `engines.node` floor is `>=20.19.0`, exactly matching
+  the version `vitest`'s `vite` dependency requires (`^20.19.0 || >=22.12.0`) at its low end,
+  not the fuller range.** The declared floor (`>=18` before this) covered building and running
+  the server but not the test toolchain, so a fresh clone on Node 18 installed successfully and
+  then failed `npm test` with no warning at install time (`engine-strict` is off, MEASURED —
+  npm reports `EBADENGINE` but does not refuse the install). CI already runs Node 22, which
+  satisfies both ends of `vite`'s range regardless of which floor `engines` states.
+  **Known, accepted gap:** `>=20.19.0` alone does not reject Node 22.0.0–22.11.x, which passes
+  the `engines` check but still fails on `vite`'s actual requirement (the gap between
+  `20.19.0` and `22.12.0`'s lower bound in a plain `>=` comparison). The fully accurate value
+  would be the disjunctive range itself (`"^20.19.0 || >=22.12.0"`); PAR-778's Done-when
+  specified the simpler `>=20.19.0` exactly, and that is what shipped — the simpler promise,
+  not a tighter enforcement gate. `engines` remains advisory either way (`engine-strict` is not
+  set), so neither form actually blocks an install; the value it did have was accuracy of the
+  documented claim, which this closes for the common case.
+  Ref: `package.json`, `package-lock.json`, `README.md`, `CONTRIBUTING.md` (PAR-778).
+
+---
