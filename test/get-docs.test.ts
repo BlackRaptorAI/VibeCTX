@@ -185,7 +185,7 @@ describe("getDocs index following", () => {
    *  `getDocs`, not just at `noMatchNote`'s own unit level (`test/retrieval.test.ts`). */
   it("(PAR-747) bounds a pathologically long library name AND URL in the no-match response, not just the topic echo", async () => {
     const hugeName = "acme-fastify-".repeat(40); // 520 chars
-    const hugeUrl = `https://fastify.dev/${"docs-".repeat(80)}llms.txt`; // 421 chars, same allowed host
+    const hugeUrl = `https://fastify.dev/${"docs-".repeat(80)}llms.txt`; // 428 chars, same allowed host
     const hugeEntry = { name: hugeName, urls: [hugeUrl] };
     writeCache(hugeName, hugeUrl, ["# Fastify", "- [Request](/docs/Request.md)"].join("\n"));
     const spy = stubFetch({});
@@ -194,7 +194,13 @@ describe("getDocs index following", () => {
     expect(out).toContain("No sections in"); // still the genuine no-match diagnostic, not some other error path
     expect(out).not.toContain(hugeName); // the raw, full-length library name never appears
     expect(out).not.toContain(hugeUrl); // the raw, full-length url never appears
-    expect(out.length).toBeLessThan(hugeName.length + hugeUrl.length);
+    // Clipped, not silently dropped: each field's leading 299 characters (clipText's own bound,
+    // one short of MAX_NOTE_LIBRARY_CHARS/MAX_STAMP_URL_CHARS before its "…") must still be
+    // present — a bound that emptied the field instead of clipping it would pass the two
+    // `not.toContain` assertions above just as easily, and would not be the behavior this test
+    // means to pin.
+    expect(out).toContain(hugeName.slice(0, 299));
+    expect(out).toContain(hugeUrl.slice(0, 299));
   });
 
   it("reports followed links whose fetch failed", async () => {
