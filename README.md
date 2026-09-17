@@ -153,11 +153,21 @@ gives way, the same "the cap always wins" rule that already applies to a single 
 snippet. The table of contents on the no-topic path gets the same discipline: it is capped as
 a share of the budget too, so a document with many headings cannot make the table of contents
 itself crowd out the document head. The one exception is the short "no sections/snippets
-matched" diagnostic: it is deliberately NOT bounded by `maxTokens`, so its advice ("try
-broader terms") survives even a very small budget in full. The `topic` it echoes back is
-length-clipped, and so is the note block folded into that same message; the library name and
-source URL it names are not, so a very long configured URL is the one thing that can still make
-this message large.
+matched" diagnostic (genuinely zero matches — see below for the different, budgeted case where
+something DID match but couldn't fit): it is deliberately NOT bounded by `maxTokens`, so its
+advice ("try broader terms") survives even a very small budget in full. Everything it names —
+the echoed `topic`, the note block folded into that same message, the library name, and (via
+the `Source:` stamp two paragraphs below) the source URL — is now length-clipped too.
+
+A no-match response is never silence about WHAT was searched, either: it opens with the same
+standing `Source:` stamp every other response carries (below), so "nothing matched" reads as a
+positive claim — this document, this old, was searched and the topic is not in it — never as
+"nothing was looked at". A topic that DID match something, but where the budget was too small
+to render any of it, gets the same treatment rather than an empty response indistinguishable
+from a genuine no-match: `N matching sections found, but none fit inside the response budget.
+Raise maxTokens to see them.` This one IS budgeted like an ordinary answer, not exempt like the
+zero-match diagnostic above — at the smallest budgets the note itself can still be truncated,
+the same "the cap always wins" rule as everywhere else in this file.
 
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe
@@ -224,7 +234,7 @@ matches you get, in full:
 
 ```
 Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved
-No code snippets matched "<topic>" in <library> docs. Try mode "sections" or broader terms.
+No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
 
 `<url>` is the URL the document was actually served from; the `(redirected from <url>)`
@@ -1140,6 +1150,10 @@ One entry per call, never per section or per followed link. Fields, per tool:
 - **url**, **contentHash** — the document actually consulted, and a hash of its
   content (the same 16-hex-character hash `search`'s index uses to detect a changed
   document) — proof of *which* document without a second copy of what it said.
+  `url` has its query string and fragment stripped (a config-authored URL carrying a
+  `?token=…` must not land in a log file in plaintext) and is validated by shape only
+  — `https`, well-formed — not by the fetch-time host allow-list, so a document served
+  from an `allowInternalHosts` entry still shows up here instead of silently vanishing.
 - **fresh** — whether the copy consulted was within its TTL.
 - **outcome** — `matched` (content was found and served), `no-match` (the document was
   consulted but the topic/query found nothing in it), `not-cached` (nothing was
@@ -1158,6 +1172,25 @@ Set `VIBECTX_NO_LOG=1` to turn logging off entirely (no file is even created). A
 corrupt or unwritable `activity.json` never breaks a retrieval — the same D-13
 discipline every store in the cache directory follows — it costs one line on stderr
 and the entry is simply not recorded.
+
+**Owner-only permissions.** `activity.json` is written `0600` (readable and writable
+only by you), self-healing on every write — a copy left world-readable by an older
+vibectx version is corrected the moment the next entry is recorded, not merely held
+steady from then on. **This protection is scoped to the log file itself** — its query
+string stripping and 0600 mode apply to `activity.json` only, not to the rest of the
+cache directory, and not to what vibectx returns to your agent. If a config entry's
+`urls` carries a secret in its query string (an internal docs endpoint behind a
+`?token=…`), that token still appears — unstripped, at default file permissions — in
+cache file names, `.meta.json`, the search index and project records, **and it is
+printed in the `Source:` line of every `get_docs` and `search` response**, so it also
+reaches your agent's context and whatever model provider that agent uses. vibectx has
+no way to send credentials in a request header — it sends a user agent and a
+conditional `If-None-Match`, nothing else — so a token in the URL is the only form it
+can carry one at all. If that applies to you, reach the endpoint by network-level means
+instead (a VPN, a fronting proxy, an IP allow-list) where you can; otherwise treat both
+your agent's transcripts and the whole cache directory as holding that secret (a
+`chmod 700` on the cache directory is on you — vibectx sets that mode only on a cache
+root it creates itself, not one that already existed).
 
 `--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
 contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;

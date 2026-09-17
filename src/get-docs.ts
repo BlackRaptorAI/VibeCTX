@@ -19,6 +19,8 @@ import {
   extractLinks,
   followLimit,
   fitStampLine,
+  noMatchNote,
+  thinMatchNote,
   MAX_FOLLOWED_BYTES,
   type SplitSection,
 } from "./retrieval.js";
@@ -82,13 +84,6 @@ const sectionKey = (s: { heading: string; body: string }) => `${s.heading}\n${s.
  *  five followed URLs plus three skip-category lines at realistic URL lengths, bounded so it
  *  can never itself starve the answer on an ordinary call. ASSUMED, not measured. */
 const MAX_NOTE_BLOCK_CHARS = 1000;
-
-/** A6 (PAR-719), round 1 (test-auditor, F4) — `topic` has no length bound at the MCP schema
- *  (unlike `search`'s `query`, capped at 1000 chars there) and is echoed verbatim into the
- *  no-match message. Bounded on echo, matching this codebase's own convention for other
- *  attacker-influenced strings rendered into a response (`MAX_LIBRARY_CHARS`/`MAX_URL_CHARS`
- *  in `search.ts`). ASSUMED, not measured. */
-const MAX_ECHOED_TOPIC_CHARS = 200;
 
 /** A17 (PAR-726), code-reviewer round 1, S1 — `resolutionNote` carries the resolved package's
  *  own (untrusted) description, unbounded beyond `resolved-store.ts`'s ~200-char
@@ -297,21 +292,27 @@ export async function getDocsDetailed(
   // explanation first (never truncating it) loses elaboration, not the fact.
   const staleBanner = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
   const prefix = staleBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length) ? staleBanner : "";
+  // A18 (PAR-727): built once, reused by both the standing `docStamp` below and `thinMatch`'s
+  // own re-fitted stamp further down — the same facts, just re-degraded around less room.
+  // PAR-776 (D-74): `url` here is the URL the content actually came from (`doc.finalUrl`), not
+  // the candidate that was requested — unlike the structured `source` above, this is what a
+  // human or a model reading the response needs to know the document's real origin is.
+  // `redirectedFrom` carries the candidate too, only when it differs, so the line states BOTH
+  // when they diverge rather than silently substituting one for the other.
+  const stampFacts = {
+    url: doc.finalUrl,
+    redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined,
+    fetchedAt: doc.fetchedAt,
+    stale: doc.stale,
+    curated,
+  };
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
   // resolution note and the stale prefix already spent, so a small budget degrades the stamp
   // to a shorter COMPLETE line rather than leaving it to the final `clipToBudget` backstop to
   // cut a field in half (measured pre-fix: `maxTokens: 14` rendered `fetched 2026-09-1` — a
   // real, well-formed, WRONG date).
-  // PAR-776 (D-74): the RENDERED "Source:" line names the URL the content actually came from
-  // (`doc.finalUrl`), not the candidate that was requested — unlike the structured `source`
-  // above, this is what a human or a model reading the response needs to know the document's
-  // real origin is. `redirectedFrom` carries the candidate too, only when it differs, so the
-  // line states BOTH when they diverge rather than silently substituting one for the other.
-  const docStamp = fitStampLine(
-    { url: doc.finalUrl, redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined, fetchedAt: doc.fetchedAt, stale: doc.stale, curated },
-    Math.max(0, budgetChars - resolutionPrefix.length - prefix.length),
-  );
+  const docStamp = fitStampLine(stampFacts, Math.max(0, budgetChars - resolutionPrefix.length - prefix.length));
 
   if (!topic) {
     const headings = doc.content.split("\n").filter((l) => /^#{1,3}\s/.test(l)).slice(0, 60);
@@ -513,8 +514,10 @@ export async function getDocsDetailed(
     // A17 (PAR-726): the lowercase inline "(source: url)" fragment this used to carry is gone
     // — replaced by the same `docStamp` line every other path renders, closing a wording
     // inconsistency this file's own ground-truth review flagged (capitalized `Source:` line
-    // everywhere else, lowercase inline fragment only here).
-    text: `${resolutionPrefix}${prefix}${docStamp}\nNo ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${clipText(entry.name, MAX_STAMP_FIELD_CHARS)} docs.${
+    // everywhere else, lowercase inline fragment only here). A18 (PAR-727): the sentence
+    // itself is now `retrieval.ts`'s `noMatchNote` — the one grammar shared by both modes,
+    // cleaning/clipping `topic`/`entry.name` centrally instead of this file doing it inline.
+    text: `${resolutionPrefix}${prefix}${docStamp}\n${noMatchNote(what, topic ?? "", entry.name)}${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     contentHash,
@@ -545,13 +548,55 @@ export async function getDocsDetailed(
   // the no-topic path uses, for the case a maximal header alone is over budget.
   const header = `${resolutionPrefix}${prefix}${docStamp}${noteBlock}\n\n`;
 
+  // A18 (PAR-727) — the thin-match case: real matches exist (`matchedCount > 0`) but the
+  // budget left `assemble`/`assembleSnippets` NOTHING to render once the (full-size) header
+  // above was paid for. That silence is exactly the condition D-29 already forces this file to
+  // treat as "the header alone reached the budget" — which means the OUTER `clipToBudget`
+  // backstop would swallow any body text at that same point regardless of what it contained.
+  // A `thinMatchNote` appended to the SAME oversized header would therefore never be visible:
+  // dead code, not a fix. So this path builds its OWN, smaller header instead — the note's own
+  // length is reserved FIRST, `docStamp` re-degrades (via `fitStampLine`) around what is left,
+  // and `noteBlock` (index-follow accounting) is dropped entirely: D-43's "the answer outranks
+  // the accounting" applies here too — when there is no room for the real answer, the
+  // EXPLANATION of why outranks the follow/skip bookkeeping that no longer matters as much.
+  //
+  // code-reviewer round 1, S1 — the first version of this stopped there, and MEASURED, it left
+  // the note itself invisible in the large majority of budgets that actually reach `thinMatch`
+  // (94.6% of a swept range, for a document with a longish URL): `fitStampLine` has a floor it
+  // cannot degrade below (`Source: <url>` — up to ~308 chars once the url itself is clipped),
+  // so whenever that floor alone reaches the room reserved for it, the note that was supposed
+  // to get PRIORITY got silently sliced off by the plain head-truncating `clipToBudget`
+  // instead. Fixed by making the priority real, not aspirational: the stamp is included ONLY
+  // when even its shortest complete form fits beside the note; otherwise it is dropped
+  // entirely, never rendered as a partial (mid-URL) fragment — the same lesson A17's B2 finding
+  // established for the fetched-at date, applied here to the stamp as a whole. D-43's ordering
+  // is now genuinely: note first, stamp only if there's room left for the WHOLE thing.
+  const thinMatch = (what: string, matchedCount: number): GetDocsOutcome => {
+    const note = thinMatchNote(what, matchedCount);
+    const stampRoom = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);
+    const stamp = fitStampLine(stampFacts, stampRoom);
+    const head = stamp.length <= stampRoom ? `${stamp}\n` : "";
+    return {
+      text: clipToBudget(`${resolutionPrefix}${prefix}${head}${note}`, budgetChars),
+      source,
+      contentHash,
+      isIndex,
+      matched: matchedCount,
+      returnedFromFollowed: 0,
+      followed,
+      dropped,
+    };
+  };
+
   if ((args.mode ?? "sections") === "snippets") {
     const snippets = rankSplitSnippets(corpusSections, topic);
     if (snippets.length === 0) {
       return noMatch("code snippets", 'Try mode "sections" or broader terms.');
     }
+    const assembled = assembleSnippets(snippets, budget, header.length);
+    if (assembled.length === 0) return thinMatch("code snippets", snippets.length);
     return {
-      text: clipToBudget(`${header}${assembleSnippets(snippets, budget, header.length)}`, budgetChars),
+      text: clipToBudget(`${header}${assembled}`, budgetChars),
       source,
       contentHash,
       isIndex,
@@ -568,10 +613,12 @@ export async function getDocsDetailed(
   if (ranked.length === 0) {
     return noMatch("sections", "Try broader terms or call get_docs without a topic for the table of contents.");
   }
+  const assembled = assemble(ranked, budget, header.length);
+  if (assembled.length === 0) return thinMatch("sections", ranked.length);
   return {
-    text: clipToBudget(`${header}${assemble(ranked, budget, header.length)}`, budgetChars),
-    contentHash,
+    text: clipToBudget(`${header}${assembled}`, budgetChars),
     source,
+    contentHash,
     isIndex,
     matched: ranked.length,
     returnedFromFollowed: fromFollowed(selectSections(ranked, budget, header.length)),

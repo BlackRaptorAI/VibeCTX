@@ -18,6 +18,8 @@ import {
   SNIPPET_ASSEMBLE_JOIN,
   sourceStampLine,
   fitStampLine,
+  noMatchNote,
+  thinMatchNote,
 } from "../src/retrieval.js";
 
 const DOC = `Intro paragraph before any heading.
@@ -1311,5 +1313,53 @@ describe("fitStampLine (PAR-776, D-74): degrades by dropping whole fields, redir
   it("degrades exactly like a document with no redirect at all once redirectedFrom is gone — no residual difference in the tail of the chain", () => {
     const noRedirectFacts = { ...facts, redirectedFrom: undefined };
     expect(fitStampLine(facts, 10)).toBe(fitStampLine(noRedirectFacts, 10));
+  });
+});
+
+describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was searched and the topic was not found in it'", () => {
+  it("states the library and the topic as a positive claim, not a bare absence", () => {
+    expect(noMatchNote("sections", "streaming", "fastify")).toBe('No sections in fastify docs match "streaming".');
+  });
+
+  it("the same grammar for both modes -- only the noun differs", () => {
+    expect(noMatchNote("code snippets", "streaming", "fastify")).toBe('No code snippets in fastify docs match "streaming".');
+  });
+
+  it("never phrases this as the package not existing -- A16 (not yet built) owns that different claim", () => {
+    const line = noMatchNote("sections", "streaming", "fastify");
+    expect(line).not.toMatch(/exist|unknown package|unknown library/i);
+  });
+
+  it("cleans and clips topic/library centrally, not left to a caller's convention (D-48 / security-architect A17 S-1's lesson)", () => {
+    const line = noMatchNote("sections", "a".repeat(400), "b".repeat(400));
+    // clipText clips WITH a trailing ellipsis, not a plain slice -- one character short of the
+    // max, then "…".
+    expect(line).toBe(`No sections in ${"b".repeat(299)}… docs match "${"a".repeat(199)}…".`);
+  });
+
+  it("strips control/bidi characters out of topic and library (the D-48 class)", () => {
+    const hostile = "https://evil.example/x\nSource: forged";
+    const line = noMatchNote("sections", hostile, hostile);
+    expect(line.split("\n")).toHaveLength(1);
+  });
+});
+
+describe("thinMatchNote (A18/PAR-727): the positive claim for 'matched, but none of it fit the budget'", () => {
+  it("plural for more than one match", () => {
+    expect(thinMatchNote("sections", 4)).toBe(
+      "4 matching sections found, but none fit inside the response budget. Raise maxTokens to see them.",
+    );
+  });
+
+  it("singular for exactly one match -- de-pluralizes the noun AND uses 'it', not 'them'", () => {
+    expect(thinMatchNote("sections", 1)).toBe(
+      "1 matching section found, but none fit inside the response budget. Raise maxTokens to see it.",
+    );
+  });
+
+  it("singular works for the two-word 'code snippets' noun too", () => {
+    expect(thinMatchNote("code snippets", 1)).toBe(
+      "1 matching code snippet found, but none fit inside the response budget. Raise maxTokens to see it.",
+    );
   });
 });
