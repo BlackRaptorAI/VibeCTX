@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import { cleanText, clipText } from "../src/text.js";
+import { cleanText, clipText, stripControlBidi } from "../src/text.js";
 
 /**
  * Relocated regex allow-list tripwire (A8 / PAR-721, Move 3). cleanText's control/bidi
@@ -17,7 +17,7 @@ describe("text.ts regex allow-list tripwire", () => {
     const literals = [...src.matchAll(/(?:^|[=(,:\s])\/((?:\\.|\[(?:\\.|[^\]\n])*\]|[^/\n\\[])+)\/[gimsuy]*/g)].map((m) => m[1]);
     expect(new Set(literals)).toEqual(
       new Set([
-        "[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", // the one control/bidi class, /g -- D-48's single shared contract
+        "[\\u0000-\\u001f\\u007f-\\u009f\\u200b-\\u200f\\u2028\\u2029\\u202a-\\u202e\\u2066-\\u2069\\ufeff]", // the one control/bidi class, /g -- D-48's single shared contract (A7/PAR-720: now includes U+2028/U+2029)
       ]),
     );
   });
@@ -43,6 +43,9 @@ describe("cleanText (A8 / PAR-721, Move 3 -- moved from project-deps.ts; behavio
   });
   it("strips a BOM / zero-width no-break space (U+FEFF)", () => {
     expect(cleanText(chars(0xfeff) + "hello")).toBe("hello");
+  });
+  it("strips the line/paragraph separators (U+2028/U+2029) -- A7/PAR-720: previously caught only by debug.ts's own copy", () => {
+    expect(cleanText("a" + chars(0x2028, 0x2029) + "b")).toBe("ab");
   });
   it("leaves ordinary text, including punctuation, untouched", () => {
     expect(cleanText("hello, world! 123 -- OK?")).toBe("hello, world! 123 -- OK?");
@@ -84,6 +87,25 @@ describe("clipText -- first direct tests (A8 / PAR-721): zero existed before thi
   it("empty string input, any max", () => {
     expect(clipText("", 10)).toBe("");
     expect(clipText("", 0)).toBe("");
+  });
+});
+
+describe("stripControlBidi -- the one exported binding onto the D-48 class (A7 / PAR-720)", () => {
+  const chars = (...codes: number[]): string => codes.map((c) => String.fromCharCode(c)).join("");
+
+  it("defaults to delete, identically to cleanText", () => {
+    const dirty = "a" + chars(0x00, 0x9b, 0x200b, 0xfeff) + "b";
+    expect(stripControlBidi(dirty)).toBe(cleanText(dirty));
+    expect(stripControlBidi(dirty)).toBe("ab");
+  });
+  it("substitutes the given replacement for every matched character, not just the first", () => {
+    expect(stripControlBidi("a" + chars(0x00, 0x9b) + "b", " ")).toBe("a  b");
+  });
+  it("U+009B (control sequence introducer) is matched -- the character this issue exists for", () => {
+    expect(stripControlBidi("fast" + chars(0x9b) + "web", " ")).toBe("fast web");
+  });
+  it("leaves ordinary text untouched with any replacement", () => {
+    expect(stripControlBidi("hello, world!", "X")).toBe("hello, world!");
   });
 });
 
