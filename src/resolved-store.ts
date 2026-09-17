@@ -5,6 +5,7 @@ import { cacheRoot } from "./cache.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, pypiNameError } from "./package-names.js";
 import { MAX_URLS_PER_ENTRY } from "./limits.js";
+import { stripControlBidi } from "./text.js";
 import type { LibraryEntry, ResolvedMeta } from "./registry.js";
 
 /**
@@ -27,12 +28,13 @@ export function resolvedStorePath(): string {
   return join(cacheRoot(), FILE_NAME);
 }
 
-/** Keep a description to one plain line of at most 200 characters. */
+/** Keep a description to one plain line of at most 200 characters. Control/bidi characters
+ *  (D-48's shared class, `text.ts`) become a space, not nothing: this text is untrusted
+ *  natural-language prose from a package registry, and a control character may be a real word
+ *  separator (a tab, a newline) — deleting it would run two words together (A7 / PAR-720). */
 export function cleanDescription(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const oneLine = value
-    .replace(/[\u0000-\u001f\u007f]/g, " ") // control characters
-    .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, "") // zero-width and bidi controls (L1)
+  const oneLine = stripControlBidi(value, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (oneLine.length === 0) return undefined;

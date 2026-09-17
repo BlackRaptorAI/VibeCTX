@@ -455,3 +455,30 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   MEASURED annotations. The old process documents are in `.vibectx-plan/archive/`.
 
 ---
+
+## D-71 — decided 2026-09-17, executing A7 / PAR-720
+
+- **D-71** 2026-09-17 — **D-48's class is the character SET, not the substitution; each call
+  site's replacement choice is its own decision, made once and shared.** `src/text.ts` exports
+  one binding onto the union class, `stripControlBidi(s, replacement = "")`, so the set is
+  defined exactly once and every caller supplies only what to put in a matched character's
+  place. `cleanText`/`clipText` (list_libraries, warm, project-deps, config, the CLI) and
+  `debugField` keep deleting — technical/structural text (paths, names, debug fields) where a
+  merged character is harmless. `resolved-store.ts`'s `cleanDescription` keeps its pre-existing
+  choice of a space for C0/DEL/C1 (a tab or newline used as a real word separator must not run
+  two words together — unchanged behaviour, already true before this item), but now ALSO spaces
+  the zero-width/bidi/BOM characters it used to delete, because the one-class contract does not
+  allow splitting the union into "space these, delete those" at a single call site without
+  reintroducing the local-variant defect D-48 exists to forbid. Measured, that is the one real
+  behaviour change: a zero-width joiner or similar mid-word mark in a description
+  (`"x" + U+200D + "y"`) now renders `"x y"` where it used to render `"xy"` (code-reviewer, A7
+  round 1). Accepted: this
+  text is already flagged `(package-supplied)` and untrusted, `\s+` collapse absorbs most cases,
+  and a visible space artifact next to two words running together is the smaller defect. The
+  union itself also grew: U+2028/U+2029 (line/paragraph separator) were previously caught only
+  by `debug.ts`'s own copy of the class and now apply everywhere; U+0080–U+009E and U+FEFF now
+  apply to `cleanDescription`, which previously missed them.
+  Ref: `src/text.ts`, `src/debug.ts`, `src/resolved-store.ts`, `test/control-bidi-union.test.ts`
+  (A7 / PAR-720).
+
+---

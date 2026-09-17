@@ -267,20 +267,25 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // this same file instead of a claim about it). `graph.edgeList.length` is pinned EXACTLY, not
 // just floored, in the "exact measured edge count" test directly below this constant -- so
 // `npx vitest run test/import-graph.test.ts` IS the command that reproduces this figure, run
-// against this exact file, every time. 33 src/*.ts files on disk, 33 graph nodes, 110 unique
-// runtime edges, zero unresolved specifiers, at this branch's tree as of this commit.
+// against this exact file, every time. 33 src/*.ts files on disk, 33 graph nodes, 112 unique
+// runtime edges, zero unresolved specifiers, at this branch's tree as of this commit. The
+// count moved from 110 to 112 at A7/PAR-720 (D-48): debug.ts and resolved-store.ts each gained
+// one new edge to text.ts, switching their inline control/bidi regex to the shared
+// `stripControlBidi` -- two edges, no new node, no file added or removed.
 // Cross-checked by a second, independent route: counting every relative `from "./…"`
-// specifier site by hand across src/ (123), minus whole-statement `import type`/`export
-// type` relative imports (9 by inspection), before de-duplicating a handful of files that
-// import the same module twice (resolve->limits, warm->project-store,
-// autowarm->autowarm-status, doctor->source-kind, fetcher->link-policy) -- lands on the same
-// figure. EDGE_COUNT_FLOOR exists SEPARATELY from the exact-count assertion: it is what the
+// specifier site by hand across src/ (125), minus whole-statement `import type`/`export
+// type` relative imports (9 by inspection -- warm.ts's `export type { WarmRow, WarmStatus }
+// from "./project-store.js"` is one of the 9, so it is NOT a second edge on top of warm.ts's
+// runtime import from the same file), before de-duplicating a handful of files that import
+// the same module twice (resolve->limits, autowarm->autowarm-status, doctor->source-kind,
+// fetcher->link-policy) -- lands on the same figure. EDGE_COUNT_FLOOR exists SEPARATELY from
+// the exact-count assertion: it is what the
 // two `reaches()`-based done-when tests further down implicitly rely on staying well above
 // zero, set with real margin under the exact count so an unrelated future file addition
 // cannot trip it, while staying close enough to still catch a real regression -- 0 edges with
 // 33 nodes is the vacuous "resolver silently drops everything" failure mode this whole
 // non-vacuity block exists to catch, and a floor of merely "greater than zero" would not.
-const MEASURED_EDGE_COUNT = 110;
+const MEASURED_EDGE_COUNT = 112;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {
