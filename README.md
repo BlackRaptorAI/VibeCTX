@@ -218,7 +218,9 @@ Every response that actually has a document to show — this one included — ca
 past its cache TTL, and whether the entry is curated (from the default registry or your
 config) or auto-resolved from a package name. Not just the FIRST time a name resolves — every
 call, so an agent two calls later still knows what it is reading, and can weigh it as
-retrieved external text rather than instruction. (Two things can precede it on the same
+retrieved external text rather than instruction. The url is rendered with its query string
+and fragment stripped — see [Activity log](#activity-log-vibectx-log) for why, and for the
+handful of other response surfaces (not the stamp) that still print a URL whole. (Two things can precede it on the same
 response: a `> STALE:` banner when the cached copy is past its TTL, and the one-time `>
 Resolved …` note on the call that first resolves a package name. The one response that never
 had a document — nothing reachable, nothing cached — still states curated-or-resolved; it
