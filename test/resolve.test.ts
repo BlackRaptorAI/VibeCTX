@@ -23,8 +23,9 @@ import {
 } from "../src/resolve.js";
 import { writeFileSync, readFileSync } from "node:fs";
 import { RESOLVED_SCHEMA_VERSION, readResolvedEntries } from "../src/resolved-store.js";
-import { readIndex, resetSearchIndexMemo } from "../src/search-index.js";
+import { documentHash, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 import { readCache, libDirName } from "../src/cache.js";
+import { readActivityEntries } from "../src/activity-log.js";
 import type { Registry } from "../src/registry.js";
 
 let dir: string;
@@ -709,6 +710,52 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     const reg: Registry = { entries: new Map([["typing_extensions", pin]]) };
     expect(lookupLibrary(reg, "Typing.Extensions")).toBe(pin);
     expect(lookupLibrary(reg, "typing-extensions")).toBe(pin);
+  });
+});
+
+describe("resolveToolText activity log (A20/PAR-729, D-51)", () => {
+  const registry = (): Registry => ({
+    entries: new Map([["hono", { name: "hono", urls: ["https://hono.dev/llms.txt"], aliases: ["honojs"] }]]),
+  });
+
+  it("the already-curated fast path (no network) still logs one entry: matched, canonical library, no url", async () => {
+    stubFetch({});
+    await resolveToolText(registry(), "honojs");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "resolve_library", library: "hono", outcome: "matched" });
+    expect(entries[0].url).toBeUndefined();
+  });
+
+  it("a successful resolution logs the chosen url, its contentHash, fresh: true and outcome matched", async () => {
+    const readme = "# httpx";
+    stubFetch({
+      [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },
+      "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": readme,
+    });
+    await resolveToolText(registry(), "httpx");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "resolve_library",
+      library: "httpx",
+      url: "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md",
+      contentHash: documentHash(readme),
+      fresh: true,
+      outcome: "matched",
+    });
+  });
+
+  it("a failed resolution logs unresolved, by the requested name (no canonical name exists)", async () => {
+    stubFetch({});
+    await resolveToolText(registry(), "zz-nothing");
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "resolve_library", library: "zz-nothing", outcome: "unresolved" });
+  });
+
+  it("warm.ts and refresh.ts call resolvePackage directly, never resolveToolText — their resolutions are NOT logged as resolve_library calls", async () => {
+    stubFetch({ [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" }, "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md": "# httpx" });
+    await resolvePackage("httpx");
+    expect(readActivityEntries()).toEqual([]);
   });
 });
 

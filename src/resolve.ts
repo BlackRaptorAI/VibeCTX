@@ -13,8 +13,9 @@ import { fetchUrl, getLibraryDoc } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, normalisePyPiName, pypiNameError } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
-import { indexCachedDocument } from "./search-index.js";
+import { indexCachedDocument, documentHash } from "./search-index.js";
 import { classifySourceKind, type SourceKind } from "./source-kind.js";
+import { recordActivity } from "./activity-log.js";
 
 /**
  * resolve_library (PAR-655): any npm / PyPI package name → a docs source, with no
@@ -87,6 +88,9 @@ export interface ResolveOutcome {
   chosen?: string;
   kind?: SourceKind;
   chars?: number;
+  /** `documentHash` (search-index.ts) of the chosen document's content — what the activity
+   *  log records instead of the text (A20/PAR-729, D-51). Set exactly when `chosen` is. */
+  contentHash?: string;
   entry?: LibraryEntry;
   /** False when resolved.json could not be written — another schema version on disk (K2), or
    *  (A5, PAR-718) the write itself failing on a read-only `$HOME` or a full disk; `saveNote`
@@ -505,6 +509,7 @@ export async function resolvePackage(
       chosen: doc.url,
       kind: classifySourceKind(doc.url, doc.content),
       chars: doc.content.length,
+      contentHash: documentHash(doc.content),
       entry,
       saved,
       saveNote,
@@ -528,6 +533,11 @@ export function lookupLibrary(registry: Registry, name: string): LibraryEntry | 
  * is already a real (non-resolved) entry is reported without any network call; anything
  * else is resolved, adopted into the live registry (a resolved entry may be re-resolved,
  * e.g. to switch ecosystem) and reported.
+ *
+ * A20/PAR-729 (D-51): both branches write exactly one activity-log entry. The already-
+ * curated fast path counts as `matched` — the name resolved to a real entry, even though no
+ * network call was made; a failed `resolvePackage` is `unresolved`, and `library` falls back
+ * to the requested name (cleaned by the log's own field bound) since no canonical one exists.
  */
 export async function resolveToolText(registry: Registry, name: string, ecosystem?: Ecosystem): Promise<string> {
   // S2: judge "already curated" on the folded key too, so an exact-case resolved entry
@@ -536,6 +546,7 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
   const curated = existing && !existing.resolved ? existing : lookupLibrary(registry, name.trim().toLowerCase());
   if (curated && !curated.resolved) {
     const existingCurated = curated;
+    recordActivity({ tool: "resolve_library", library: existingCurated.name, outcome: "matched" });
     return [
       `"${name}" is already in the registry as "${existingCurated.name}" — nothing to resolve.`,
       "  urls (probed in order):",
@@ -545,5 +556,13 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
   }
   const out = await resolvePackage(name, { ecosystem });
   if (out.ok && out.entry) installResolvedEntry(registry, out.entry); // refuses a curated key (S2); replaces a resolved one
+  recordActivity({
+    tool: "resolve_library",
+    library: out.entry?.name ?? name,
+    url: out.chosen,
+    contentHash: out.contentHash,
+    fresh: out.chosen ? true : undefined, // a resolution's document is always freshly fetched (forceRefresh: true)
+    outcome: out.ok ? "matched" : "unresolved",
+  });
   return out.text;
 }

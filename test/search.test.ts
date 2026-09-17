@@ -29,6 +29,7 @@ import {
   MAX_RENDERED_LIBRARIES,
   SEARCH_SCHEMA_VERSION,
 } from "../src/search.js";
+import { readActivityEntries } from "../src/activity-log.js";
 
 /**
  * PAR-659 · D-35 — cross-library `search`. Every case here runs against a real cache
@@ -999,4 +1000,41 @@ describe("D-42 · a shed corpus is rebuilt and rewritten once, not on every sear
     expect(third.tokenized).toBe(0);
     expect(third.indexWritten).toBe(false);
   }, 300_000);
+});
+
+describe("runSearch activity log (A20/PAR-729, D-51)", () => {
+  it("an unfiltered matching search logs one entry: no single library, the (already-bounded) query, outcome matched", () => {
+    warmAll();
+    search({ query: "streaming responses" });
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "search", query: "streaming responses", outcome: "matched" });
+    expect(entries[0].library).toBeUndefined();
+  });
+
+  it("a single-library filter names that library; a multi-library filter names none", () => {
+    warmAll();
+    search({ query: "streaming responses", libraries: ["hono"] });
+    expect(readActivityEntries()[0].library).toBe("hono");
+    search({ query: "streaming responses", libraries: ["hono", "ai-sdk"] });
+    expect(readActivityEntries()[1].library).toBeUndefined();
+  });
+
+  it("a query that matches nothing logs no-match; an empty (uncached) scope logs not-cached", () => {
+    warmAll();
+    search({ query: "zzz-nothing-matches-this-corpus" });
+    expect(readActivityEntries()[0].outcome).toBe("no-match");
+    search({ query: "streaming responses", libraries: ["hono"] }); // hono cached but nothing narrower is
+    resetSearchIndexMemo();
+    const reg: Registry = { entries: new Map([["ghost", { name: "ghost", urls: ["https://ghost.example/llms.txt"] }]]) };
+    const emptyResult = runSearch(reg, { query: "anything" });
+    expect(emptyResult.searched).toBe(0);
+    expect(readActivityEntries().at(-1)?.outcome).toBe("not-cached");
+  });
+
+  it("searchToolText (the MCP tool wrapper) and the CLI path both fire exactly one entry, through the same runSearch call — never two", () => {
+    warmAll();
+    searchToolText(registry(), { query: "streaming responses" });
+    expect(readActivityEntries()).toHaveLength(1);
+  });
 });

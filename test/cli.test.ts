@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { writeCache, libDirName } from "../src/cache.js";
 import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
-import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
+import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, parseLogArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
 import { resetSearchIndexMemo } from "../src/search-index.js";
 import { MAX_QUERY_CHARS, MAX_TOKENS_BUDGET, SEARCH_SCHEMA_VERSION } from "../src/search.js";
 
@@ -763,5 +763,71 @@ describe("dispatchCli search (PAR-659)", () => {
     expect(code).toBe(1); // nothing in the cache says "warm"
     expect(o.out.join("")).toContain('No sections matched "warm"');
     expect(o.out.join("")).not.toContain("dependencies cached");
+  });
+});
+
+describe("parseLogArgs (A20/PAR-729)", () => {
+  it("defaults to a human table", () => {
+    expect(parseLogArgs([])).toEqual({ json: false });
+  });
+
+  it("parses --json", () => {
+    expect(parseLogArgs(["--json"])).toEqual({ json: true });
+  });
+
+  it("rejects an unknown flag or a bare argument — log takes no config and names no registry entry", () => {
+    expect(() => parseLogArgs(["--bogus"])).toThrow(/Unknown option "--bogus"/);
+    expect(() => parseLogArgs(["react"])).toThrow(/Unexpected argument "react"/);
+    expect(() => parseLogArgs(["--config", "c.json"])).toThrow(/Unknown option "--config"/);
+  });
+});
+
+describe("dispatchCli log (A20/PAR-729, D-51)", () => {
+  it("with no activity yet, prints an empty table (or an empty --json envelope) and exits 0", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "log"], o)).toBe(0);
+    expect(o.out.join("")).toContain("0 entries");
+    const j = io();
+    expect(await dispatchCli(["node", "vibectx", "log", "--json"], j)).toBe(0);
+    expect(JSON.parse(j.out.join(""))).toEqual({ schemaVersion: 1, entries: [] });
+  });
+
+  it("reads back an entry a prior get_docs/search/resolve/refresh call wrote, in the shared schemaVersion envelope with a stable key order", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    const fetchSpy = vi.fn(() => {
+      throw new Error("must not fetch: react is already cached");
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    // search is the CLI path most directly reachable without a transport (runSearchCli calls
+    // runSearch directly — the same function the MCP tool wraps, so this also proves the two
+    // callers share one write, not two).
+    const search = io();
+    await dispatchCli(["node", "vibectx", "search", "useEffect cleanup", "--library", "react", "--config", writeConfig([{ name: "react", urls: [REACT_URL] }])], search);
+    const j = io();
+    await dispatchCli(["node", "vibectx", "log", "--json"], j);
+    const report = JSON.parse(j.out.join(""));
+    expect(report.schemaVersion).toBe(1);
+    expect(report.entries).toHaveLength(1);
+    expect(report.entries[0]).toMatchObject({ tool: "search", library: "react", outcome: "matched" });
+    expect(Object.keys(report.entries[0])).toEqual(["tool", "library", "query", "outcome", "timestamp"]);
+  });
+
+  it("the human table names the tool, library and outcome", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    vi.stubGlobal("fetch", vi.fn(() => new Response("not found", { status: 404 })));
+    await dispatchCli(["node", "vibectx", "search", "useEffect", "--library", "react", "--config", writeConfig([{ name: "react", urls: [REACT_URL] }])], io());
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "log"], o)).toBe(0);
+    const table = o.out.join("");
+    expect(table).toContain("search");
+    expect(table).toContain("react");
+    expect(table).toContain("matched");
+    expect(table).toContain("1 entry");
+  });
+
+  it("`log` needs no config and touches no registry — a bad --config elsewhere in the args does not apply to it", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "vibectx", "log", "--json"], o)).toBe(0);
+    expect(JSON.parse(o.out.join("")).entries).toEqual([]);
   });
 });

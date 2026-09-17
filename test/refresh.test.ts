@@ -8,6 +8,7 @@ import { refreshToolText, resetFullRefreshWindow } from "../src/refresh.js";
 import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 import { runSearch } from "../src/search.js";
 import { MAX_FULL_REFRESHES_PER_HOUR } from "../src/limits.js";
+import { readActivityEntries } from "../src/activity-log.js";
 
 let dir: string;
 
@@ -358,5 +359,67 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       // delete it (the same instruction test/retrieval.test.ts's own history follows for A6).
       expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined();
     });
+  });
+});
+
+describe("refreshToolText activity log (A20/PAR-729, D-51)", () => {
+  it("a successful single-library refresh logs one entry: canonical library, its url, contentHash, fresh: true, matched", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    stubFetch({ [REACT_URL]: "# React new" });
+    await refreshToolText(registry, "reactjs");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "react",
+      url: REACT_URL,
+      contentHash: documentHash("# React new"),
+      fresh: true,
+      outcome: "matched",
+    });
+  });
+
+  it("a single-library refresh that fails to fetch anything logs not-cached, with no url", async () => {
+    stubFetch({}); // both 404
+    await refreshToolText(registry, "react");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "refresh", library: "react", outcome: "not-cached" });
+    expect(entries[0].url).toBeUndefined();
+  });
+
+  it("an unknown library name logs unresolved, by the requested name, and fetches nothing", async () => {
+    const spy = stubFetch({});
+    await refreshToolText(registry, "nope");
+    expect(spy).not.toHaveBeenCalled();
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "refresh", library: "nope", outcome: "unresolved" });
+  });
+
+  it("a full (no-argument) refresh logs ONE entry for the whole call, with no single library or url, matched when at least one target succeeded", async () => {
+    stubFetch({ [REACT_URL]: "# React new" }); // hono 404s
+    await refreshToolText(registry);
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "refresh", outcome: "matched" });
+    expect(entries[0].library).toBeUndefined();
+    expect(entries[0].url).toBeUndefined();
+  });
+
+  it("a full refresh where every target fails logs not-cached", async () => {
+    stubFetch({}); // both 404
+    await refreshToolText(registry);
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "refresh", outcome: "not-cached" });
+  });
+
+  it("a rate-limited full refresh logs not-cached without fetching or resolving anything", async () => {
+    stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+    for (let i = 0; i < MAX_FULL_REFRESHES_PER_HOUR; i++) await refreshToolText(registry);
+    const spy = stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+    await refreshToolText(registry);
+    expect(spy).not.toHaveBeenCalled();
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(MAX_FULL_REFRESHES_PER_HOUR + 1);
+    expect(entries.at(-1)).toMatchObject({ tool: "refresh", outcome: "not-cached" });
+    expect(entries.at(-1)?.library).toBeUndefined();
   });
 });
