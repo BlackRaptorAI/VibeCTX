@@ -401,6 +401,9 @@ describe("etag revalidation", () => {
 
     expect(doc?.content).toBe("# Cached content");
     expect(doc?.staleNote).toBeUndefined();
+    // PAR-744 — the field `refresh.ts` now uses to distinguish a 304 (nothing to drop) from a
+    // genuine fresh fetch: a byte-identical revalidation must say so, not look like a change.
+    expect(doc?.notModified).toBe(true);
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     // 304 must refresh the TTL clock (touchCache)
     const after = readCache(entry.name, entry.urls[0], 999)!.meta.fetchedAt;
@@ -419,7 +422,28 @@ describe("etag revalidation", () => {
     );
     const doc = await getLibraryDoc(entry);
     expect(doc?.content).toBe("# Fresh content");
+    // PAR-744 — a genuine fresh fetch (a real 200, not a revalidation) must NOT be mistaken
+    // for a 304: the field is absent, not false, matching every other optional DocResult flag.
+    expect(doc?.notModified).toBeUndefined();
     expect(readCache(entry.name, entry.urls[0], 999)?.meta.etag).toBe('"v2"');
+  });
+
+  /** PAR-744 — `fetchLinkedPage` gets the same `notModified` flag `getLibraryDoc` does, for
+   *  the same reason: a followed page revalidated via 304 is not a page that changed. */
+  it("fetchLinkedPage: a 304 revalidation sets notModified on the returned page, a fresh 200 does not", async () => {
+    const source = "https://docs.example.com/llms.txt";
+    const link = "https://docs.example.com/guide.md";
+    writeCache("linked-lib", link, "# Cached guide", '"etag-1"');
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 304 })));
+    const revalidated = await fetchLinkedPage("linked-lib", link, source, 0);
+    expect(revalidated).toEqual({ status: "ok", page: { content: "# Cached guide", url: link, notModified: true } });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("# New guide", { status: 200, headers: { "content-type": "text/plain" } })),
+    );
+    const fresh = await fetchLinkedPage("linked-lib", link, source, 0);
+    expect(fresh).toEqual({ status: "ok", page: { content: "# New guide", url: link } }); // notModified absent, not false
   });
 });
 
