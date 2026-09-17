@@ -278,19 +278,23 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // -- re-measured on the merged tree, not summed by hand, because two deltas landing on the
 // same file is exactly the case a by-hand sum gets wrong.
 // Cross-checked by a second, independent route: counting every relative `from "./…"`
-// specifier site by hand across src/ (127), minus whole-statement `import type`/`export type`
-// relative imports (9 by inspection -- warm.ts's `export type { WarmRow, WarmStatus } from
-// "./project-store.js"` is one of these, so it is NOT a second edge on top of warm.ts's
-// runtime import from the same file), before de-duplicating a handful of files that import
-// the same module twice (resolve->limits, autowarm->autowarm-status, doctor->source-kind,
-// fetcher->link-policy) -- lands on the same figure. EDGE_COUNT_FLOOR exists SEPARATELY from
-// the exact-count assertion: it is what the two `reaches()`-based done-when tests further down
-// implicitly rely on staying well above zero, set with real margin under the exact count so an
+// specifier site by hand across src/ (137, was 127 before A20/PAR-729's activity-log.ts:
+// its own 5 relative imports -- ./atomic-store.js, ./cache.js, ./link-policy.js,
+// ./limits.js, ./text.js -- plus one new edge INTO it from each of get-docs.ts, search.ts,
+// resolve.ts, refresh.ts and cli.ts, all runtime value imports, none a repeat of an
+// existing edge), minus whole-statement `import type`/`export type` relative imports (9 by
+// inspection -- warm.ts's `export type { WarmRow, WarmStatus } from "./project-store.js"`
+// is one of these, so it is NOT a second edge on top of warm.ts's runtime import from the
+// same file), before de-duplicating a handful of files that import the same module twice
+// (resolve->limits, autowarm->autowarm-status, doctor->source-kind, fetcher->link-policy)
+// -- lands on the same figure. EDGE_COUNT_FLOOR exists SEPARATELY from the exact-count
+// assertion: it is what the two `reaches()`-based done-when tests further down implicitly
+// rely on staying well above zero, set with real margin under the exact count so an
 // unrelated future file addition cannot trip it, while staying close enough to still catch a
 // real regression -- 0 edges with 34 nodes is the vacuous "resolver silently drops everything"
 // failure mode this whole non-vacuity block exists to catch, and a floor of merely "greater
 // than zero" would not.
-const MEASURED_EDGE_COUNT = 114;
+const MEASURED_EDGE_COUNT = 124;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

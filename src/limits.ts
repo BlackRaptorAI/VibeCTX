@@ -30,3 +30,13 @@ export const MAX_RESOLUTIONS_PER_HOUR = 100;
  * itself, not one. Single-library `refresh` is uncapped — the concern is bulk egress from the
  * no-argument form, not routine per-library use. */
 export const MAX_FULL_REFRESHES_PER_HOUR = 5;
+
+/**
+ * `activity.json`'s entry cap (D-51, A20, PAR-729): oldest dropped first once a write would
+ * exceed it — see `activity-log.ts`'s own top comment for why this single count also bounds
+ * the file's bytes. ASSUMED, the same way `DEFAULT_CACHE_MAX_MB` is: not derived from a
+ * measurement of how much history is useful, a judgement about what a local, single-user
+ * activity record should cost on disk. MEASURED (`activity-log.ts`): 2,000 entries at every
+ * field's worst-case length is ~2.06 MiB, pretty-printed exactly as the file is written.
+ */
+export const ACTIVITY_LOG_MAX_ENTRIES = 2000;

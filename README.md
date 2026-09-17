@@ -870,6 +870,8 @@ MCP protocol — is never written to.
 
 `VIBECTX_NO_AUTOWARM=1` in the server's environment turns off the
 [background revalidation on startup](#warm-your-projects-docs).
+`VIBECTX_NO_LOG=1` turns off the local [activity log](#activity-log-vibectx-log) — no
+`activity.json` is written and no directory is even created.
 `allowedHosts` (optional) lists extra hosts followed index links may target — see
 [`allowedHosts` and followed links](#any-library-no-config).
 `allowInternalHosts` (optional boolean, default `false`) lets **that entry's own `urls`**
@@ -1105,6 +1107,72 @@ asking that question today gets sections back; it does not check that they are t
 right ones. `list_libraries` shows the same kind per library, classified from the
 cache without touching the network (`unknown` until something is cached).
 
+## Activity log: `vibectx log`
+
+**Privacy note, up front.** This is new data vibectx has never held before: every
+`get_docs`, `search`, `resolve_library` and `refresh` call writes one local record of
+*what you asked for* — the topic or search query, a library name, a document URL — to
+`activity.json` in the cache directory. It never leaves your machine, and it never
+records document **text**, only a hash of it (see below). It exists so you (or a
+governance process reading `vibectx log --json`, the same way it reads `warm --json`)
+can check what vibectx actually served, instead of only what a report *claims* it
+served — the gap this closes is a real one: a signed Change Record in this repo once
+attested that four retro rows existed and were verified line by line, when in fact all
+three files checked were still the blank template. The verification had run without
+ever recording what it actually read.
+
+```bash
+vibectx log                # human table
+vibectx log --json         # machine shape (below)
+```
+
+```
+timestamp             tool             library    outcome    detail
+2026-09-17T18:00:00Z  get_docs         next.js    matched    app router layout
+2026-09-17T18:00:03Z  search           —          matched    server actions streaming
+2026-09-17T18:00:07Z  resolve_library  elysia     matched    —
+2026-09-17T18:00:11Z  refresh          hono       not-cached —
+
+4 entries
+```
+
+One entry per call, never per section or per followed link. Fields, per tool:
+
+- **tool** — `get_docs`, `search`, `resolve_library` or `refresh`.
+- **library** — the canonical name, when the call names exactly one. Absent for a
+  `search` over more than one library (or none named) and for a full, no-argument
+  `refresh` — there is no single document either call can be said to be "about".
+- **query** — the topic (`get_docs`) or search query, cleaned and clipped to 200
+  characters. Never the document text.
+- **url**, **contentHash** — the document actually consulted, and a hash of its
+  content (the same 16-hex-character hash `search`'s index uses to detect a changed
+  document) — proof of *which* document without a second copy of what it said.
+- **fresh** — whether the copy consulted was within its TTL.
+- **outcome** — `matched` (content was found and served), `no-match` (the document was
+  consulted but the topic/query found nothing in it), `not-cached` (nothing was
+  available to serve), or `unresolved` (the library name itself could not be
+  established).
+
+**No document text, ever.** The same boundary the search index already holds (a
+derived, content-free cache — see [Design notes](#design-notes) below): this file
+records what was *looked at*, never what it *said*. A `version` field is reserved in
+the schema for a future source — vibectx does not track a package's own semver
+anywhere today, so it is always absent.
+
+**Bounded and off-able.** At most 2,000 entries; past that, the oldest are dropped as
+new ones are written — this is a recent-activity record, not an unbounded audit log.
+Set `VIBECTX_NO_LOG=1` to turn logging off entirely (no file is even created). A
+corrupt or unwritable `activity.json` never breaks a retrieval — the same D-13
+discipline every store in the cache directory follows — it costs one line on stderr
+and the entry is simply not recorded.
+
+`--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
+contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;
+`schemaVersion` is bumped only when a key is renamed, removed or changes meaning. This
+is the entire interface — no separate API for a gate or a harness to call: anything
+that wants to check what vibectx actually did reads this the same way it reads
+`warm --json`.
+
 ## Design notes
 
 - **Offline-first:** past-TTL cache is served (flagged `STALE:`) when the network fails —
@@ -1127,6 +1195,12 @@ cache without touching the network (`unknown` until something is cached).
 - **Deterministic retrieval:** markdown heading-split + BM25 scoring over a camelCase-aware,
   lightly stemmed tokenizer — see [How ranking works](#how-ranking-works). No embeddings,
   no external calls at query time, same answer every run.
+- **Self-reporting, honestly bounded:** every retrieval writes one local, content-free record
+  — see [Activity log](#activity-log-vibectx-log). Local only, capped at 2,000 entries,
+  off with `VIBECTX_NO_LOG=1`. VibeCTX claims only that it flags invented package names and
+  serves the docs for the version you pinned — it does not claim to keep an agent on task or
+  prevent drift, and the log does not change that; it is evidence of what was served, not a
+  guarantee about what using it accomplished.
 
 ## Using this in a company / behind an air gap?
 

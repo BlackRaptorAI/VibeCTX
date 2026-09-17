@@ -1,6 +1,7 @@
 import { clipText, cleanText } from "./text.js";
 import { readCache, type CacheHit } from "./cache.js";
 import { resolveLibrary, type LibraryEntry, type Registry } from "./registry.js";
+import { recordActivity } from "./activity-log.js";
 import {
   bm25,
   idf,
@@ -399,7 +400,7 @@ function notIndexedNote(shed: string[]): string {
  * skipped, an unreadable index is a note, an unwritable one is a note. Never touches the
  * network (D-35) and never mutates the registry.
  */
-export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcome {
+function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
   const now = (opts.now ?? (() => new Date()))();
   const notes: string[] = [];
   const unknown: string[] = [];
@@ -628,6 +629,25 @@ export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcom
   base.matchedLibraries -= groups.length - withBodies.length;
   base.groups = selectAcrossLibraries(withBodies, budget);
   return base;
+}
+
+/** A20/PAR-729, D-51: one activity-log entry per call, whichever of `runSearchCore`'s three
+ *  return points it took — a thin wrapper around the core rather than a call at each of
+ *  them, so a future new return point cannot silently skip logging the way three separate
+ *  call sites could drift. `library` is set only when the caller named exactly one — a
+ *  multi-library or unfiltered search has no single document to attribute the outcome to,
+ *  the same reasoning `refresh`'s full (no-argument) form applies (see refresh.ts). Outcome:
+ *  `matched` — at least one group was returned; `no-match` — libraries were searched but
+ *  none matched; `not-cached` — nothing in scope had a cached document to search at all. */
+export function runSearch(registry: Registry, opts: SearchOptions): SearchOutcome {
+  const outcome = runSearchCore(registry, opts);
+  recordActivity({
+    tool: "search",
+    library: opts.libraries?.length === 1 ? resolveLibrary(registry, opts.libraries[0])?.name : undefined,
+    query: outcome.query,
+    outcome: outcome.groups.length > 0 ? "matched" : outcome.searched === 0 ? "not-cached" : "no-match",
+  });
+  return outcome;
 }
 
 /** 0 when the search returned at least one section, 1 when it did not. */

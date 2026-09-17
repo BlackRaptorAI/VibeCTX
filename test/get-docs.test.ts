@@ -9,6 +9,7 @@ import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
 import { derivedAllowedHosts } from "../src/link-policy.js";
 import { documentHash, readIndex, resetSearchIndexMemo, searchIndexPath } from "../src/search-index.js";
+import { readActivityEntries } from "../src/activity-log.js";
 
 let dir: string;
 
@@ -1443,6 +1444,83 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     stubFetch({});
     const out = await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched", maxTokens: 10 });
     expect(out).toMatch(/No sections in react docs match "zzz-unmatched"/);
+  });
+});
+
+describe("get_docs activity log (A20/PAR-729, D-51)", () => {
+  const REACT_URL = "https://react.dev/llms-full.txt";
+  const registry: Registry = {
+    entries: new Map([
+      ["react", { name: "react", urls: [REACT_URL], aliases: ["reactjs"] }],
+      ["hono", { name: "hono", urls: ["https://hono.dev/llms.txt"] }],
+    ]),
+  };
+
+  it("a matched call writes exactly one entry: canonical library, topic, url, matching contentHash, fresh, outcome matched", async () => {
+    const content = "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.";
+    writeCache("react", REACT_URL, content);
+    stubFetch({});
+    await getDocsToolText(registry, { library: "reactjs", topic: "useEffect cleanup" });
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "get_docs",
+      library: "react", // canonical name, not the alias requested
+      query: "useEffect cleanup",
+      url: REACT_URL,
+      contentHash: documentHash(content),
+      fresh: true,
+      outcome: "matched",
+    });
+    expect(entries[0].timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("a topic that matches nothing logs no-match; no topic (table of contents) logs matched", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+    stubFetch({});
+    await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched" });
+    expect(readActivityEntries()[0].outcome).toBe("no-match");
+    await getDocsToolText(registry, { library: "react" });
+    const second = readActivityEntries()[1];
+    expect(second.outcome).toBe("matched");
+    expect(second.query).toBeUndefined();
+  });
+
+  it("nothing cached and nothing fetchable logs not-cached; offline + unknown library logs unresolved", async () => {
+    const reg: Registry = { entries: new Map([["ghost", { name: "ghost", urls: ["https://ghost.example/llms.txt"] }]]) };
+    stubFetch({});
+    await getDocsToolText(reg, { library: "ghost", topic: "x" });
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "get_docs", library: "ghost", outcome: "not-cached" });
+    await getDocsToolText(registry, { library: "nope", offline: true });
+    expect(readActivityEntries()[1]).toMatchObject({ tool: "get_docs", library: "nope", outcome: "unresolved" });
+  });
+
+  it("an unresolvable unknown library (network, not offline) also logs unresolved, by the requested name", async () => {
+    stubFetch({});
+    await getDocsToolText(registry, { library: "totally-nonexistent-zzz" });
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "get_docs", library: "totally-nonexistent-zzz", outcome: "unresolved" });
+  });
+
+  it("D-51: the document's own text never reaches activity.json, only its hash and URL", async () => {
+    const marker = "UNIQUE-MARKER-the-actual-document-body-must-never-be-logged-42";
+    writeCache("react", REACT_URL, `# React\n\n## useEffect cleanup\n\n${marker}`);
+    stubFetch({});
+    await getDocsToolText(registry, { library: "react", topic: "useEffect cleanup" });
+    const raw = readFileSync(join(dir, "activity.json"), "utf8");
+    expect(raw).not.toContain(marker);
+    expect(raw).toContain(documentHash(`# React\n\n## useEffect cleanup\n\n${marker}`));
+  });
+
+  it("VIBECTX_NO_LOG=1 suppresses logging entirely — no file is even created", async () => {
+    process.env.VIBECTX_NO_LOG = "1";
+    try {
+      writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+      stubFetch({});
+      await getDocsToolText(registry, { library: "react", topic: "useEffect cleanup" });
+      expect(existsSync(join(dir, "activity.json"))).toBe(false);
+    } finally {
+      delete process.env.VIBECTX_NO_LOG;
+    }
   });
 });
 
