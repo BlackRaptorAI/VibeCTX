@@ -303,7 +303,16 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // rendered response) and server.ts -> package-names.ts (MAX_VERSION_LENGTH, to bound the
 // version schema param) — on top of whatever this constant already was from origin/main at
 // merge time (PAR-776/778's own edges); see git history for the running total.
-const MEASURED_EDGE_COUNT = 127;
+// A19/PAR-728: +6 — a new file, doctor-store.ts, persists doctor's verdict; verified against
+// `graph.edgeList`, not merely to make the test pass. Three edges OUT of it (doctor-store.ts ->
+// atomic-store.js for writeAtomic/newerSchemaVersion, -> cache.js for cacheRoot, -> text.js for
+// clipText) and three edges IN (doctor.ts -> doctor-store.js to persist a run's verdicts,
+// list-libraries.ts and get-docs.ts -> doctor-store.js to read them back for the `[doctor: ...]`
+// note and stamp respectively). retrieval.ts's new `import type { SourceKind }` is a
+// whole-statement type import (excluded, same rule as warm.ts's own type-only import above),
+// and doctor.ts's `type EvictionSummary` addition rides an EXISTING runtime import statement
+// into a module (cache-evict.js) doctor.ts already had a live edge to, so neither adds one.
+const MEASURED_EDGE_COUNT = 133;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

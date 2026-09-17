@@ -2,9 +2,10 @@ import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry
 import type { ConfigScope } from "./config.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
-import { lastEvictionSummary, formatBytes } from "./cache-evict.js";
+import { lastEvictionSummary, formatBytes, type EvictionSummary } from "./cache-evict.js";
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
 import { mapLimit } from "./concurrency.js";
+import { saveDoctorVerdicts } from "./doctor-store.js";
 
 /**
  * `vibectx doctor` — proves retrieval works per library by running each entry's
@@ -82,6 +83,12 @@ export interface DoctorReport {
   total: number;
   /** Appended in 0.2.0 (PAR-657); absent on a report built before it. */
   configIssues?: ConfigIssue[];
+  /** A19/PAR-728, CR-20260907-par-652-governance (doctor-json-eviction) — the same summary
+   *  `formatDoctorTable` has always rendered in its text output, now also on the JSON report;
+   *  a new optional key needs no schemaVersion bump (see DOCTOR_SCHEMA_VERSION above). Present
+   *  only when THIS run's cache writes actually evicted something (`lastEvictionSummary()`),
+   *  matching the same condition the text table already used before this. */
+  eviction?: EvictionSummary;
 }
 
 export interface DoctorOptions {
@@ -220,13 +227,24 @@ export async function runDoctor(registry: Registry, opts: DoctorOptions = {}): P
     entries = [one];
   }
   const libraries = await mapLimit(entries, DOCTOR_CONCURRENCY, (e) => checkLibrary(e, opts.offline === true));
+  const generatedAt = new Date().toISOString();
+  // A19/PAR-728 — best effort (D-13): the report above is already complete regardless of
+  // whether this succeeds, so a write failure here is silently swallowed, not surfaced as a
+  // doctor failure. `saveDoctorVerdicts` itself never throws; this guards a future change to it.
+  try {
+    saveDoctorVerdicts(libraries.map((l) => ({ name: l.library, kind: l.kind, healthy: l.healthy, reasons: l.reasons, checkedAt: generatedAt })));
+  } catch {
+    // best effort — see above.
+  }
+  const eviction = lastEvictionSummary();
   return {
     schemaVersion: DOCTOR_SCHEMA_VERSION,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
     libraries,
     healthy: libraries.filter((l) => l.healthy).length,
     total: libraries.length,
     configIssues: configIssues(registry),
+    ...(eviction !== undefined && eviction.evicted.length > 0 ? { eviction } : {}),
   };
 }
 
@@ -301,7 +319,11 @@ export function formatDoctorTable(report: DoctorReport): string {
   // PAR-652 item 7a: doctor's job is to say why retrieval is not what you expected, and
   // "the document was evicted under the size cap" is one of the answers. Reported only when
   // this run actually evicted something, so a healthy cache says nothing about it.
-  const eviction = lastEvictionSummary();
+  // A19/PAR-728: reads `report.eviction` (computed once, in `runDoctor`) rather than calling
+  // `lastEvictionSummary()` again here — a second read of that process-wide singleton could in
+  // principle disagree with what the JSON report already stated, and there is no reason for
+  // the text table and the JSON output to ever see two different answers to the same question.
+  const eviction = report.eviction;
   if (eviction !== undefined && eviction.evicted.length > 0) {
     // D-71 (PAR-749, code-reviewer round 2, S1) — `e.library` is `libDirName`'s on-disk
     // directory name, hash-suffixed since D-71 for collision resistance; the suffix is load-

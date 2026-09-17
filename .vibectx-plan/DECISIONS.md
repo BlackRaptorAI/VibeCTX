@@ -788,3 +788,50 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `package.json`, `package-lock.json`, `README.md`, `CONTRIBUTING.md` (PAR-778).
 
 ---
+
+## D-78 — decided 2026-09-17, executing A19 / PAR-728
+
+- **D-78** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
+  `doctor.json`) so `list_libraries` and `get_docs` can surface it without re-running a probe on
+  every call, and `DoctorReport` gains an optional `eviction` key with no schema bump.**
+  **Premise check against the tree first:** A19's own problem statement ("the classification
+  appears in neither `list_libraries` nor any `get_docs` response") was partly stale —
+  `list_libraries` already showed `[${kind}]` per row, derived directly from the cached document
+  via `classifySourceKind` (PAR-707), independent of any doctor run. What was genuinely missing,
+  and is the actual PAR-704 gap this item closes, is a PROBE verdict: whether a real topic query
+  against the entry actually answered, which only `doctor` computes and — before this — never
+  persists, so a library can be cleanly cached, `[index-only]`, and still fail every real query
+  with no warning anywhere outside a manual `vibectx doctor` run.
+  **Persistence, not re-probing:** doctor's verdict requires running probe queries through
+  `getDocsDetailed`, which can touch the network — not something `list_libraries` (documented as
+  network-free) or `get_docs` (a per-call budget, not a batch job) can afford to redo on every
+  call. `runDoctor` now writes each `LibraryReport`'s `{kind, healthy, reasons}` to a new store
+  (`src/doctor-store.ts`), mirroring `resolved-store.ts`'s exact K1 (every field re-validated on
+  read, a malformed record dropped whole rather than partially trusted)/K2 (a file with a newer
+  schemaVersion is left alone)/atomic-write shape; `list-libraries.ts` and `get-docs.ts` read it
+  back cheaply. The verdict is therefore only as fresh as the last `doctor` run — stated in the
+  store module's own doc comment, the same staleness the README already accepts for `doctor`
+  results in general.
+  **Where it surfaces, and how:** `list_libraries` gets a new `[doctor: <first reason>]` bracket,
+  appended after the existing `[resolved]` tag, present only when a persisted verdict for that
+  entry is unhealthy — absent (not "healthy") when doctor has never checked it, so the note never
+  overclaims the way the existing `[unknown]` kind already declines to. `get_docs`'s stamp
+  (`StampFacts`/`sourceStampLine`, A17/PAR-726) gains an optional `doctorKind`, set to the source
+  kind doctor found ONLY when unhealthy, rendered as `· doctor check failed (<kind>)` and
+  dropped together with `version`/`redirectedFrom` in `fitStampLine`'s existing "no invented
+  priority between independently-added optional fields" degrade step — the same idiom `version`
+  (D-76) and `redirectedFrom` (D-74) already established, reused rather than a new mechanism
+  invented for a third field.
+  **`DoctorReport.eviction` (CR-20260907-par-652-governance, `doctor-json-eviction`):** the
+  cache-eviction summary `formatDoctorTable` has always rendered in its TEXT output
+  (`lastEvictionSummary()`, PAR-652 item 7a) now also appears on the JSON report, as a plain new
+  optional key — no schemaVersion bump, per `DOCTOR_SCHEMA_VERSION`'s own documented rule that a
+  new key may be appended without one. Computed once in `runDoctor` and stored on the report;
+  `formatDoctorTable` was changed to read `report.eviction` rather than calling
+  `lastEvictionSummary()` a second time itself, so the text table and the JSON output can never
+  state two different answers to the same question from two separate reads of that process-wide
+  singleton.
+  Ref: `src/doctor-store.ts` (new), `src/doctor.ts`, `src/list-libraries.ts`, `src/get-docs.ts`,
+  `src/retrieval.ts` (A19 / PAR-728).
+
+---

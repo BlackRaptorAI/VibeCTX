@@ -28,6 +28,7 @@ import {
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { clipText } from "./text.js";
 import { recordActivity, type ActivityOutcome } from "./activity-log.js";
+import { readDoctorVerdicts } from "./doctor-store.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
  *  the runnable code blocks inside them. */
@@ -384,6 +385,11 @@ export async function getDocsDetailed(
   // human or a model reading the response needs to know the document's real origin is.
   // `redirectedFrom` carries the candidate too, only when it differs, so the line states BOTH
   // when they diverge rather than silently substituting one for the other.
+  // A19/PAR-728 — doctor's LAST verdict for this entry (PAR-704: a source can be cleanly
+  // cached and still fail every probe), read once here rather than re-probed on this call.
+  // Set only when unhealthy, same rule `list-libraries.ts`'s `[doctor: ...]` note applies.
+  const doctorVerdict = readDoctorVerdicts().get(entry.name);
+  const doctorKind = doctorVerdict && !doctorVerdict.healthy ? doctorVerdict.kind : undefined;
   const stampFacts = {
     url: doc.finalUrl,
     redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined,
@@ -391,6 +397,7 @@ export async function getDocsDetailed(
     stale: doc.stale,
     curated,
     version: matchedVersion,
+    doctorKind,
   };
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
