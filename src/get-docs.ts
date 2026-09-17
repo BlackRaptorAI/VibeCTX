@@ -22,8 +22,9 @@ import {
   MAX_FOLLOWED_BYTES,
   type SplitSection,
 } from "./retrieval.js";
-import { indexCachedDocument } from "./search-index.js";
+import { indexCachedDocument, documentHash } from "./search-index.js";
 import { clipText } from "./text.js";
+import { recordActivity, type ActivityOutcome } from "./activity-log.js";
 
 /** D-26: what a topic search returns — whole matching sections (the default), or just
  *  the runnable code blocks inside them. */
@@ -49,6 +50,9 @@ export interface GetDocsOutcome {
    *  cached. `fetchedAt`/`curated` added at A17/PAR-726 alongside the rendered stamp, so a
    *  structured consumer (doctor) reads the same facts the text states without parsing it. */
   source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean };
+  /** `documentHash` (search-index.ts) of the primary document's content — set exactly when
+   *  `source` is (A20/PAR-729, D-51: what the activity log records instead of the text). */
+  contentHash?: string;
   /** looksLikeIndex(primary document). */
   isIndex: boolean;
   /** Sections — or, in snippets mode, code blocks — that matched the topic across the
@@ -119,12 +123,29 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs, resolution
   return (await getDocsDetailed(entry, args, resolutionNote)).text;
 }
 
+/** A20/PAR-729, D-51: `not-cached` when nothing was fetched or cached; `no-match` when a
+ *  topic was given and nothing in the document matched it; `matched` otherwise (including
+ *  the no-topic table-of-contents path — a document WAS successfully served, even though
+ *  nothing was topic-matched to produce it). */
+function getDocsOutcome(topic: string | undefined, outcome: GetDocsOutcome): ActivityOutcome {
+  if (!outcome.source) return "not-cached";
+  if (topic !== undefined && outcome.matched === 0) return "no-match";
+  return "matched";
+}
+
 /** The MCP `get_docs` tool body: resolve `library` (canonical name or alias) and run
  *  getDocs. An unknown name is resolved implicitly through resolve_library (PAR-655) —
  *  npm / PyPI metadata → llms.txt → GitHub README — and, when that works, the entry
  *  joins the live registry so the next call is a plain hit; when it does not, the
  *  could-not-resolve line is returned. Offline, an unknown name gets the unknown-library
- *  text without touching the network. */
+ *  text without touching the network.
+ *
+ *  A20/PAR-729 (D-51): every call writes exactly one activity-log entry, whichever branch
+ *  it takes — including the two that never reach a document at all (unknown offline,
+ *  unresolvable) — because those are consultations too: an agent asked for a library and
+ *  this is what actually happened. `library` is the requested name, cleaned by the log's
+ *  own field bound, in those two branches (nothing canonical exists yet to record instead);
+ *  the canonical `entry.name` once one does. */
 export async function getDocsToolText(
   registry: Registry,
   args: GetDocsArgs & { library: string },
@@ -133,9 +154,15 @@ export async function getDocsToolText(
   let entry = lookupLibrary(registry, library);
   let resolutionNote: string | undefined;
   if (!entry) {
-    if (rest.offline) return unknownLibraryMessage(registry, library);
+    if (rest.offline) {
+      recordActivity({ tool: "get_docs", library, query: rest.topic, outcome: "unresolved" });
+      return unknownLibraryMessage(registry, library);
+    }
     const out = await resolvePackage(library);
-    if (!out.ok || !out.entry) return out.text;
+    if (!out.ok || !out.entry) {
+      recordActivity({ tool: "get_docs", library, query: rest.topic, outcome: "unresolved" });
+      return out.text;
+    }
     // S2: a resolved entry never replaces a curated one; if a curated entry owns the name
     // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
     entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
@@ -144,13 +171,27 @@ export async function getDocsToolText(
   // A17 (PAR-726): resolutionNote used to be prepended here, entirely outside getDocsDetailed's
   // own budget accounting — exactly A6's original mistake, repeated. It is now passed down and
   // priced as part of the header alongside the standing stamp, so on every path `clipToBudget`
-  // actually applies to (no-topic, and topic-given success/snippets), `provenance + body`
+  // actually applies to (no-topic, and topic-given success/snippets), `resolutionNote + body`
   // together never exceed `maxTokens*4`, not merely `body` alone. `noMatch` stays the one
   // pre-existing, DELIBERATE exception to that cap (A6's own "short, fixed-shape diagnostic"
   // design, unchanged here) — `resolutionNote` is bounded before it reaches that path too
   // (code-reviewer round 1, S1: `MAX_RESOLUTION_NOTE_CHARS`), so "exempt from the hard cap"
   // no longer also means "unbounded".
-  return getDocs(entry, rest, resolutionNote);
+  //
+  // A20/PAR-729: `getDocsDetailed` directly, not the `getDocs` text-only wrapper — the
+  // structured outcome is what the activity-log entry is built from; `detailed.text` already
+  // carries `resolutionNote` baked into its own priced header, so nothing is prepended here.
+  const detailed = await getDocsDetailed(entry, rest, resolutionNote);
+  recordActivity({
+    tool: "get_docs",
+    library: entry.name,
+    query: rest.topic,
+    url: detailed.source?.url,
+    contentHash: detailed.contentHash,
+    fresh: detailed.source ? !detailed.source.stale : undefined,
+    outcome: getDocsOutcome(rest.topic, detailed),
+  });
+  return detailed.text;
 }
 
 /** R3: one line the agent sees before docs that were resolved on this very call — where
@@ -223,6 +264,9 @@ export async function getDocsDetailed(
     };
   }
   const source = { url: doc.url, stale: doc.stale, fetchedAt: doc.fetchedAt, curated };
+  // A20/PAR-729: the same hash the search index already computes to detect a changed
+  // document (D-33) is what the activity log records in place of the text itself.
+  const contentHash = documentHash(doc.content);
   // D-34 (PAR-659): every writer of a PRIMARY cached document keeps the cross-library search
   // index current — a document get_docs just fetched is one `search` would otherwise have to
   // tokenize on its own. Only the primary document: followed index pages are per-query and
@@ -312,6 +356,7 @@ export async function getDocsDetailed(
     return {
       text: clipToBudget(`${header}${head}`, budgetChars),
       source,
+      contentHash,
       isIndex,
       matched: 0,
       returnedFromFollowed: 0,
@@ -442,6 +487,7 @@ export async function getDocsDetailed(
     text: `${resolutionPrefix}${prefix}${docStamp}\nNo ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${clipText(entry.name, MAX_STAMP_FIELD_CHARS)} docs.${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
+    contentHash,
     source,
     isIndex,
     matched: 0,
@@ -477,6 +523,7 @@ export async function getDocsDetailed(
     return {
       text: clipToBudget(`${header}${assembleSnippets(snippets, budget, header.length)}`, budgetChars),
       source,
+      contentHash,
       isIndex,
       matched: snippets.length,
       returnedFromFollowed: fromFollowed(
@@ -493,6 +540,7 @@ export async function getDocsDetailed(
   }
   return {
     text: clipToBudget(`${header}${assemble(ranked, budget, header.length)}`, budgetChars),
+    contentHash,
     source,
     isIndex,
     matched: ranked.length,

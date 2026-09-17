@@ -4,11 +4,12 @@ import { runDoctor, formatDoctorTable, doctorExitCode } from "./doctor.js";
 import { resolveToolText, type Ecosystem } from "./resolve.js";
 import { runWarm, formatWarmTable, warmExitCode } from "./warm.js";
 import { formatSearchResults, runSearch, searchExitCode, MAX_QUERY_CHARS, MAX_TOKENS_BUDGET, type SearchOutcome } from "./search.js";
+import { readActivityLog, formatActivityLogTable } from "./activity-log.js";
 
 /**
- * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm` and `search`;
- * anything else falls through to the MCP stdio server in index.ts. Kept transport- and
- * process-free so the dispatcher is unit-testable.
+ * Subcommand dispatch for the `vibectx` binary: `doctor`, `resolve`, `warm`, `search` and
+ * `log`; anything else falls through to the MCP stdio server in index.ts. Kept transport-
+ * and process-free so the dispatcher is unit-testable.
  */
 
 export interface DoctorCliArgs {
@@ -44,6 +45,13 @@ export interface SearchCliArgs {
   clipped?: true;
 }
 
+/** A20/PAR-729: `vibectx log` reads `<cacheRoot>/activity.json` directly — it takes no
+ *  `--config` because it names no registry entry and resolves nothing; the log records
+ *  what other commands already resolved. */
+export interface LogCliArgs {
+  json: boolean;
+}
+
 export interface CliIo {
   stdout(s: string): void;
   stderr(s: string): void;
@@ -52,6 +60,7 @@ export interface CliIo {
 export const DOCTOR_USAGE = "usage: vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]";
 export const RESOLVE_USAGE = "usage: vibectx resolve <package> [--npm | --pypi] [--config <path>]";
 export const WARM_USAGE = "usage: vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]";
+export const LOG_USAGE = "usage: vibectx log [--json]";
 export const SEARCH_USAGE =
   "usage: vibectx search <query> [--library <name>]… [--max-tokens <n>] [--json] [--config <path>]";
 
@@ -201,6 +210,17 @@ export function parseSearchArgs(args: string[]): SearchCliArgs {
   if (parsed.query.length > MAX_QUERY_CHARS) {
     parsed.query = parsed.query.slice(0, MAX_QUERY_CHARS);
     parsed.clipped = true;
+  }
+  return parsed;
+}
+
+/** Parse the arguments after `log` (A20/PAR-729): the one flag, `--json`. */
+export function parseLogArgs(args: string[]): LogCliArgs {
+  const parsed: LogCliArgs = { json: false };
+  for (const arg of args) {
+    if (arg === "--json") parsed.json = true;
+    else if (arg.startsWith("-")) throw new Error(`Unknown option "${arg}"`);
+    else throw new Error(`Unexpected argument "${arg}"`);
   }
   return parsed;
 }
@@ -370,11 +390,28 @@ export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
   return searchExitCode(outcome);
 }
 
-const SUBCOMMANDS = new Set(["doctor", "resolve", "warm", "search"]);
+/** Run `vibectx log`; prints the activity log (or `--json`) on stdout. Exit 0 always — a log
+ *  with zero or many entries is equally healthy; `2` only on a usage error. No registry and
+ *  no `--config`: the log names no entries to resolve, it reads back what other commands
+ *  already resolved (A20/PAR-729). */
+export async function runLogCli(args: string[], io: CliIo): Promise<number> {
+  let parsed: LogCliArgs;
+  try {
+    parsed = parseLogArgs(args);
+  } catch (e) {
+    io.stderr(`${message(e)}\n${LOG_USAGE}\n`);
+    return 2;
+  }
+  const report = readActivityLog();
+  io.stdout(parsed.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatActivityLogTable(report.entries)}\n`);
+  return 0;
+}
+
+const SUBCOMMANDS = new Set(["doctor", "resolve", "warm", "search", "log"]);
 
 /** Options whose VALUE must be skipped when looking for the subcommand token, so a library,
- *  package, directory or config path named "doctor" / "resolve" / "warm" / "search" is not
- *  mistaken for one. */
+ *  package, directory or config path named "doctor" / "resolve" / "warm" / "search" / "log"
+ *  is not mistaken for one. */
 const OPTIONS_WITH_VALUES = new Set(["--config", "--library", "--max-tokens"]);
 
 /** Index of the first subcommand token in argv, skipping option VALUES; -1 when absent. The
@@ -407,6 +444,8 @@ export async function dispatchCli(argv: string[], io: CliIo): Promise<number | u
       return runResolveCli(rest, io);
     case "search":
       return runSearchCli(rest, io);
+    case "log":
+      return runLogCli(rest, io);
     default:
       return runWarmCli(rest, io);
   }

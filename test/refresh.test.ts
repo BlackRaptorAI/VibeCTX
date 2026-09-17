@@ -8,6 +8,7 @@ import { refreshToolText, resetFullRefreshWindow } from "../src/refresh.js";
 import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
 import { runSearch } from "../src/search.js";
 import { MAX_FULL_REFRESHES_PER_HOUR } from "../src/limits.js";
+import { readActivityEntries } from "../src/activity-log.js";
 
 let dir: string;
 
@@ -354,6 +355,13 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(readCache("react", REACT_URL, 168)?.content).toBe("# React"); // byte-identical to before
       // FIXED: nothing about the primary changed, so the followed page survives.
       expect(readCache("react", FOLLOWED_URL, 168)?.content).toBe("# Streaming");
+      // code-reviewer, A20/PAR-729 round 2: the regression guard the round-1 fix's own crux
+      // was missing — a 304 is genuinely CURRENT (its TTL was just refreshed), not stale, so
+      // `fresh` must stay true here. `isDocUnchanged(doc)` (true for both 304 AND a stale
+      // fallback) must NOT be what `stale` is derived from, or this would silently read false.
+      const entries = readActivityEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].fresh).toBe(true);
     });
 
     it("a genuine content change (a real 200, not a 304) still drops the followed-page cache", async () => {
@@ -427,6 +435,12 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(out).toMatch(/^hono: re-resolved via npm/);
       expect(readCache("hono", HONO_PRIMARY, 168)?.content).toBe("# Hono unchanged");
       expect(readCache("hono", followed, 168)?.content).toBe("# Followed page"); // survives
+      // code-reviewer, A20/PAR-729 round 2: the resolved-entry twin of the direct-fetch guard
+      // above — `out.stale` must NOT be derived from `isDocUnchanged`/`out.unchanged` (which is
+      // true here too, for the 304), or a genuinely current re-resolution would log fresh: false.
+      const entries = readActivityEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].fresh).toBe(true);
     });
 
     /**
@@ -463,5 +477,115 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       expect(readCache("hono", HONO_PRIMARY, 168)?.content).toBe("# Hono old"); // unchanged, served from cache
       expect(readCache("hono", followed, 168)?.content).toBe("# Followed page"); // survives
     });
+  });
+});
+
+describe("refreshToolText activity log (A20/PAR-729, D-51)", () => {
+  it("code-reviewer B1: a re-resolution of a RESOLVED entry that falls back to stale cache (network unreachable) also logs fresh: FALSE — the same fix applies on the resolved-entry branch, not only the direct-fetch one", async () => {
+    const HONO_PRIMARY = "https://hono.dev/llms-full.txt";
+    const resolvedHono = {
+      name: "hono",
+      urls: ["https://hono.dev/llms.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    writeCache("hono", HONO_PRIMARY, "# Hono old");
+    const fetchSpy = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u === "https://registry.npmjs.org/hono/latest") {
+        return new Response(JSON.stringify({ homepage: "https://hono.dev" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 }); // every candidate unreachable
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await refreshToolText(reg, "hono");
+
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "hono",
+      url: HONO_PRIMARY,
+      contentHash: documentHash("# Hono old"),
+      fresh: false,
+      outcome: "matched",
+    });
+  });
+
+  it("a successful single-library refresh logs one entry: canonical library, its url, contentHash, fresh: true, matched", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    stubFetch({ [REACT_URL]: "# React new" });
+    await refreshToolText(registry, "reactjs");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "react",
+      url: REACT_URL,
+      contentHash: documentHash("# React new"),
+      fresh: true,
+      outcome: "matched",
+    });
+  });
+
+  it("code-reviewer B1: a refresh that falls back to a STALE cache (every candidate unreachable, prior cache exists) logs matched with fresh: FALSE — not the unconditional true forceRefresh used to imply", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    stubFetch({}); // every candidate 404s; getLibraryDoc falls back to serving the stale cache
+    await refreshToolText(registry, "reactjs");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "react",
+      url: REACT_URL,
+      contentHash: documentHash("# React old"),
+      fresh: false,
+      outcome: "matched",
+    });
+  });
+
+  it("a single-library refresh that fails to fetch anything logs not-cached, with no url", async () => {
+    stubFetch({}); // both 404
+    await refreshToolText(registry, "react");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "refresh", library: "react", outcome: "not-cached" });
+    expect(entries[0].url).toBeUndefined();
+  });
+
+  it("an unknown library name logs unresolved, by the requested name, and fetches nothing", async () => {
+    const spy = stubFetch({});
+    await refreshToolText(registry, "nope");
+    expect(spy).not.toHaveBeenCalled();
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "refresh", library: "nope", outcome: "unresolved" });
+  });
+
+  it("a full (no-argument) refresh logs ONE entry for the whole call, with no single library or url, matched when at least one target succeeded", async () => {
+    stubFetch({ [REACT_URL]: "# React new" }); // hono 404s
+    await refreshToolText(registry);
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ tool: "refresh", outcome: "matched" });
+    expect(entries[0].library).toBeUndefined();
+    expect(entries[0].url).toBeUndefined();
+  });
+
+  it("a full refresh where every target fails logs not-cached", async () => {
+    stubFetch({}); // both 404
+    await refreshToolText(registry);
+    expect(readActivityEntries()[0]).toMatchObject({ tool: "refresh", outcome: "not-cached" });
+  });
+
+  it("a rate-limited full refresh logs not-cached without fetching or resolving anything", async () => {
+    stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+    for (let i = 0; i < MAX_FULL_REFRESHES_PER_HOUR; i++) await refreshToolText(registry);
+    const spy = stubFetch({ [REACT_URL]: "# React new", [HONO_URL]: "# Hono new" });
+    await refreshToolText(registry);
+    expect(spy).not.toHaveBeenCalled();
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(MAX_FULL_REFRESHES_PER_HOUR + 1);
+    expect(entries.at(-1)).toMatchObject({ tool: "refresh", outcome: "not-cached" });
+    expect(entries.at(-1)?.library).toBeUndefined();
   });
 });
