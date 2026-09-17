@@ -46,13 +46,10 @@ cannot be deprecated or superseded. **This repository is the only current source
 
 ### Node versions
 
-`package.json` declares `engines: >=18`, which covers building and running the server. **Running
-the test suite needs Node ≥ 20.19** — `vitest`'s `vite` dependency declares
-`^20.19.0 || >=22.12.0`, so on Node 18 a fresh clone installs and then `npm test` will not run.
-CI builds and tests on **Node 22**, which is the version this is actually proven on.
-
-That mismatch between the declared floor and the testable floor is a known open item, not a
-surprise to report.
+`package.json` declares `engines: >=20.19.0`. The floor is set by the test toolchain —
+`vitest`'s `vite` dependency declares `^20.19.0 || >=22.12.0` — not by the server, which builds
+and runs on less. CI builds and tests on **Node 22**, which is the version this is actually
+proven on.
 
 ## Build, test, lint
 
