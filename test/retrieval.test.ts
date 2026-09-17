@@ -396,7 +396,7 @@ describe("rankSections — performance bound (D-24)", () => {
     return lines.join("\n");
   }
 
-  it("ranks a 5 MB corpus with a 4-term query well inside the budget, and stays linear in size", () => {
+  it("ranks a 5 MB corpus with a 4-term query well inside the budget, and a 16 MB corpus inside its own absolute ceiling (growth is MEASURED and printed, not asserted as linear)", () => {
     // this test is timed on purpose, so an explicit per-test timeout (rather than vitest's
     // default 5000 ms testTimeout) is the hang-detector budget, not a performance assertion —
     // round-4 review measured this test taking 4121-4958 ms under 4x-core CPU load (11/11
@@ -427,9 +427,23 @@ describe("rankSections — performance bound (D-24)", () => {
     // F-2 / PAR-733: the ratio assertion that stood here (`expect(largeMs / smallMs)
     // .toBeLessThan(10)`) is deleted outright, per CONTRIBUTING.md:75-77 — "No assertion may
     // compare two wall-clock measurements... print a [MEASURED] line and assert an absolute
-    // ceiling instead". `:451`'s absolute ceiling and the [MEASURED] print two lines below
-    // (which still reports the ratio as a NUMBER, not a threshold) already satisfy that rule;
-    // this was the exact violating shape sitting one line past its own prescribed replacement.
+    // ceiling instead". The `expect(largeMs).toBeLessThan(10_000)` ceiling below and the
+    // [MEASURED] print immediately above it (which still reports the ratio as a NUMBER, not a
+    // threshold) already satisfy that rule; this was the exact violating shape sitting one line
+    // past its own prescribed replacement.
+    //
+    // KNOWN GAP, not closed here: an O(n)->O(n^2) regression multiplies the large/small ratio
+    // ~4x->~16x independent of the per-op constant, which is exactly what the deleted assertion
+    // caught; the surviving absolute ceiling only catches it once the constant is large enough
+    // to push largeMs itself past 10_000 ms (idle largeMs is ~300-350 ms here, per the recorded
+    // margin figures below, so there is real headroom for a quadratic regression to hide in).
+    // CONTRIBUTING.md:78-79's prescribed alternative for exactly this ("spy on real call
+    // counts... rather than asserting on elapsed time") is available — rankSections calls
+    // tokenize a number of times that scales deterministically, not by the clock, with section
+    // count — but adding that coverage means a new test (this file has no tokenize mock today,
+    // and adding one file-wide is not a small change), which moves this item's done-when rule 5
+    // baseline (1271/40) and is out of the "exactly as written" scope this dispatch authorized.
+    // Reported to be filed as a follow-up, not closed quietly.
     // Corpus sizing (4000/16000 sections) is unchanged — that choice predates and is independent
     // of the deleted assertion, made to keep both timings large enough that scheduler jitter is
     // a small fraction of either one (a prior 1000/4000 sizing produced timings too small for

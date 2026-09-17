@@ -198,12 +198,24 @@ describe("startServer + autowarm over an in-memory transport", () => {
       // unmeasured Promise.race with no [MEASURED] print and no per-test timeout of its own,
       // so under load it could die inside vitest's implicit 5000 ms default with a generic
       // "Test timed out" message rather than this test's own, more informative one — unmeasured
-      // risk, never exercised under load (not a confirmed flake, unlike Target 1). Fixed by:
+      // risk, never exercised under load before this item (not a confirmed flake, unlike
+      // Target 1). Fixed by:
       // (a) an explicit per-test timeout below, well over vitest's 5000 ms default, so the test
       //     fails at ITS OWN boundary with ITS OWN message instead of vitest's generic one;
       // (b) a [MEASURED] print of the real elapsed time on every run, pass or fail;
       // (c) a failure message that says plainly this is a liveness timeout, not a proof the call
       //     would never have completed — it only proves it did not complete within the budget.
+      //
+      // MEASURED margin, this item, against the retained 1000 ms bound: 1.3-2.9 ms over 5 runs
+      // isolated to this one file under ~6-process CPU oversubscription (~345x-770x margin),
+      // 0.5-1.0 ms over 3 runs of the FULL 40-file suite (its own genuine parallelism, no extra
+      // load) — faster under full-suite contention than isolated, because list_libraries does
+      // no I/O and no tokenization (unlike Target 1's warm search): its cost is one JS
+      // event-loop tick, not CPU-bound work that scales with core contention. ~1000x margin is
+      // the honest figure at both load levels measured; kept as a 1000 ms stand-in for
+      // "forever" rather than tightened, because tightening a liveness boundary that already has
+      // three orders of magnitude of margin buys nothing and only risks the exact anti-pattern
+      // this item exists to stop repeating.
       const listStart = performance.now();
       const LIST_LIBRARIES_LIVENESS_MS = 1000;
       let list: string;

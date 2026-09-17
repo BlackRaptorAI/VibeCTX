@@ -7,11 +7,15 @@ import { join } from "node:path";
  * PAR-659 · D-37 — performance is MEASURED, not asserted.
  *
  * Two claims are made about `search` and both are proved here rather than described:
- *   1. a warm search over ≥ 10 indexed documents totalling ≥ 5 MB answers in under 300 ms
- *      (the number in the issue), and the measurement is PRINTED so a reader of the run sees
- *      the figure rather than a green tick;
+ *   1. a warm search over ≥ 10 indexed documents totalling ≥ 5 MB answers quickly, and the
+ *      measurement is PRINTED so a reader of the run sees the figure rather than a green tick —
+ *      D-37 requires the time to be REPORTED, not bounded (F-2 / PAR-733: a `< 300 ms`
+ *      assertion stood here and flaked under genuinely parallel full-suite execution; removed
+ *      outright, not widened — see the comment at the deletion site below);
  *   2. the index is actually USED — a warm search tokenizes no document at all, while the same
- *      search with the index deleted tokenizes the whole corpus.
+ *      search with the index deleted tokenizes the whole corpus. This IS still asserted,
+ *      deterministically (`warm.fromIndex` / `warm.tokenized` below), and is what a reader
+ *      should trust the warm path on — never the printed timing figure.
  *
  * Claim 2 is proved by instrumenting the tokenizer itself, not by trusting a counter `search`
  * keeps about its own behaviour: `../src/tokenize.js` is mocked with a wrapper that delegates
@@ -20,9 +24,9 @@ import { join } from "node:path";
  * re-splitting a cached document is exactly the price D-33 charges for keeping no text in the
  * index.)
  *
- * The timing is machine-dependent by nature. It is reported with the machine's own numbers and
- * asserted against 300 ms; a failure here is a real regression on THIS machine, and the printed
- * figure is what a reader should carry forward, never the threshold.
+ * The timing is machine-dependent by nature and reported with the machine's own numbers — no
+ * assertion is made against it. A reader watching for a real regression on their own machine
+ * should watch the printed figure, never a green tick, because nothing here fails on one.
  */
 
 const tokenizeCalls = vi.hoisted(() => ({ count: 0, chars: 0 }));
@@ -117,7 +121,7 @@ describe("D-37 · search performance over a ≥ 5 MB corpus (PAR-659)", () => {
   );
 
   it(
-    "a COLD search indexes the corpus (the price paid once) and a WARM search answers in under 300 ms",
+    "a COLD search indexes the corpus (the price paid once) and a WARM search hits the index, not the tokenizer (timing MEASURED, not bounded)",
     () => {
       tokenizeCalls.count = 0;
       tokenizeCalls.chars = 0;
@@ -156,9 +160,9 @@ describe("D-37 · search performance over a ≥ 5 MB corpus (PAR-659)", () => {
       // not a regression). REMOVED, not widened: D-37 requires the time to be REPORTED, not
       // bounded — the `[D-37 MEASURED]` print above already satisfies it, and the property a
       // reader actually needs guaranteed — "the index is used, deterministically" — is asserted
-      // two lines above this comment (`warm.fromIndex`/`warm.tokenized`, D-37's other half),
-      // never by this line. No threshold was raised; this one was deleted outright and nothing
-      // replaces it, because D-37 does not ask for a replacement.
+      // by the `warm.fromIndex`/`warm.tokenized` checks above (D-37's other half), never by
+      // this line. No threshold was raised; this one was deleted outright and nothing replaces
+      // it, because D-37 does not ask for a replacement.
     },
     120_000,
   );
@@ -199,10 +203,11 @@ describe("D-37 · search performance over a ≥ 5 MB corpus (PAR-659)", () => {
  * which every token is globally unique is the opposite extreme and is measured here rather
  * than left to be discovered.
  *
- * No 300 ms assertion is made on this shape, because it is not the shape D-37 sets the budget
- * over and pretending otherwise would either overstate the guarantee or invite quietly
- * loosening the real one. What IS asserted is what must hold whatever the corpus: the answer
- * is correct, the file stays inside its bound, and nothing fails.
+ * No timing assertion is made on this shape — F-2 / PAR-733 removed the one timing bound this
+ * file carried outright (see the describe block above), so there is no risk of this shape's
+ * different cost profile pressuring it wider; the shape is measured and printed, same as the
+ * realistic one. What IS asserted is what must hold whatever the corpus: the answer is
+ * correct, the file stays inside its bound, and nothing fails.
  */
 describe("D-37 · what the index costs is VOCABULARY, measured (PAR-659)", () => {
   it("a corpus of globally unique tokens: the index is larger than the documents, and the search still answers", () => {
