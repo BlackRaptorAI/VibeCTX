@@ -144,7 +144,7 @@ describe("fetchLinkedPage redirect enforcement (SSRF guard, post-redirect)", () 
       vi.fn(async () => responseAt("https://docs.example.com/v2/guide.md", "# Moved guide")),
     );
     const result = await fetchLinkedPage("lib", link, source);
-    expect(result).toEqual({ status: "ok", page: { content: "# Moved guide", url: link } });
+    expect(result).toMatchObject({ status: "ok", page: { content: "# Moved guide", url: link } });
     expect(readCache("lib", link, 999)?.content).toBe("# Moved guide");
   });
 
@@ -206,7 +206,7 @@ describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {
     expect(await fetchLinkedPage("lib", link, source)).toEqual({ status: "refused" }); // no policy → 0.1.3 behaviour
     expect(spy).not.toHaveBeenCalled();
     const result = await fetchLinkedPage("lib", link, source, 168, false, policy);
-    expect(result).toEqual({ status: "ok", page: { content: "# API v1", url: link } });
+    expect(result).toMatchObject({ status: "ok", page: { content: "# API v1", url: link } });
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -229,7 +229,7 @@ describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {
     const link = "https://docs.example.com/guide.md";
     vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://sub.example.org/guide.md", "# Moved to sub")));
     const result = await fetchLinkedPage("lib", link, source, 168, false, policy);
-    expect(result).toEqual({ status: "ok", page: { content: "# Moved to sub", url: link } });
+    expect(result).toMatchObject({ status: "ok", page: { content: "# Moved to sub", url: link } });
     expect(readCache("lib", link, 999)?.content).toBe("# Moved to sub");
   });
 
@@ -254,7 +254,7 @@ describe("fetchLinkedPage with an allowed-host policy (PAR-655)", () => {
     const link = "https://docs.example.com/guide.md";
     // Pass case: the redirect lands on a host the policy allows (origin equality would refuse this).
     vi.stubGlobal("fetch", vi.fn(async () => responseAt("https://api.example.com/guide.md", "# On api")));
-    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toMatchObject({
       status: "ok",
       page: { content: "# On api", url: link },
     });
@@ -332,7 +332,7 @@ describe("offline option (cache-only; PAR-707 doctor --offline)", () => {
     vi.stubGlobal("fetch", spy);
     writeCache("off-lib", source, "# Cached");
     const doc = await getLibraryDoc({ name: "off-lib", urls: [source] }, { offline: true });
-    expect(doc).toEqual({ content: "# Cached", url: source });
+    expect(doc).toMatchObject({ content: "# Cached", url: source, stale: false });
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -358,9 +358,9 @@ describe("offline option (cache-only; PAR-707 doctor --offline)", () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);
     writeCache("off-lib", link, "# Guide");
-    expect(await fetchLinkedPage("off-lib", link, source, 168, true)).toEqual({
+    expect(await fetchLinkedPage("off-lib", link, source, 168, true)).toMatchObject({
       status: "ok",
-      page: { content: "# Guide", url: link },
+      page: { content: "# Guide", url: link, stale: false },
     });
     const stale = await fetchLinkedPage("off-lib", link, source, 0, true);
     expect(stale.status).toBe("ok");
@@ -377,6 +377,59 @@ describe("offline option (cache-only; PAR-707 doctor --offline)", () => {
     const result = await fetchLinkedPage("off-lib", "https://evil.example.net/x.md", source, 168, true);
     expect(result).toEqual({ status: "refused" });
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("DocResult.fetchedAt / .stale (A17/PAR-726): every return path states when the document was fetched and whether it is past TTL, not just the staleNote prose", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const link = "https://docs.example.com/guide.md";
+
+  it("getLibraryDoc, fresh cache hit: fetchedAt is the cache meta's own value, stale is false", async () => {
+    writeCache("fresh-lib", source, "# Fresh");
+    const before = readCache("fresh-lib", source, 999)!.meta.fetchedAt;
+    const doc = await getLibraryDoc({ name: "fresh-lib", urls: [source] });
+    expect(doc).toMatchObject({ fetchedAt: before, stale: false });
+    expect(doc?.staleNote).toBeUndefined();
+  });
+
+  it("getLibraryDoc, fresh network fetch: fetchedAt is exactly what writeCache persisted, not a second, separately-taken timestamp", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt(source, "# New")));
+    const doc = await getLibraryDoc({ name: "new-lib", urls: [source] });
+    const persisted = readCache("new-lib", source, 999)!.meta.fetchedAt;
+    expect(doc).toMatchObject({ fetchedAt: persisted, stale: false });
+  });
+
+  it("getLibraryDoc, 304 revalidation: fetchedAt is the touched (refreshed) value, not the pre-revalidation one", async () => {
+    writeCache("touch-lib", source, "# Cached", '"etag1"');
+    const before = readCache("touch-lib", source, 999)!.meta.fetchedAt;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 304 })));
+    await new Promise((r) => setTimeout(r, 5));
+    const doc = await getLibraryDoc({ name: "touch-lib", urls: [source], ttlHours: 0 });
+    expect(doc?.stale).toBe(false);
+    expect(doc?.fetchedAt).not.toBe(before);
+    expect(doc?.fetchedAt).toBe(readCache("touch-lib", source, 999)!.meta.fetchedAt);
+  });
+
+  it("getLibraryDoc, stale fallback (network down): fetchedAt is the stale cache's own meta value, stale is true", async () => {
+    writeCache("stale-lib", source, "# Old");
+    const before = readCache("stale-lib", source, 999)!.meta.fetchedAt;
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const doc = await getLibraryDoc({ name: "stale-lib", urls: [source], ttlHours: 0 });
+    expect(doc).toMatchObject({ fetchedAt: before, stale: true });
+    expect(doc?.staleNote).toMatch(/^STALE:/);
+  });
+
+  it("fetchLinkedPage: the same four cases carry the same fetchedAt/stale contract as getLibraryDoc", async () => {
+    writeCache("page-lib", link, "# Guide");
+    const before = readCache("page-lib", link, 999)!.meta.fetchedAt;
+    const fresh = await fetchLinkedPage("page-lib", link, source, 999);
+    if (fresh.status === "ok") expect(fresh.page).toMatchObject({ fetchedAt: before, stale: false });
+    else expect.unreachable();
+
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const stale = await fetchLinkedPage("page-lib", link, source, 0);
+    if (stale.status === "ok") expect(stale.page).toMatchObject({ fetchedAt: before, stale: true });
+    else expect.unreachable();
   });
 });
 
@@ -436,14 +489,15 @@ describe("etag revalidation", () => {
     writeCache("linked-lib", link, "# Cached guide", '"etag-1"');
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 304 })));
     const revalidated = await fetchLinkedPage("linked-lib", link, source, 0);
-    expect(revalidated).toEqual({ status: "ok", page: { content: "# Cached guide", url: link, notModified: true } });
+    expect(revalidated).toMatchObject({ status: "ok", page: { content: "# Cached guide", url: link, stale: false, notModified: true } });
 
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => new Response("# New guide", { status: 200, headers: { "content-type": "text/plain" } })),
     );
     const fresh = await fetchLinkedPage("linked-lib", link, source, 0);
-    expect(fresh).toEqual({ status: "ok", page: { content: "# New guide", url: link } }); // notModified absent, not false
+    expect(fresh).toMatchObject({ status: "ok", page: { content: "# New guide", url: link, stale: false } });
+    if (fresh.status === "ok") expect(fresh.page.notModified).toBeUndefined(); // absent, not false
   });
 });
 
@@ -536,7 +590,7 @@ describe("hop-by-hop redirects (S1): every Location is checked BEFORE it is requ
       "https://sub.example.org/v2/guide.md": () => redirect("../v3/guide.md"),
       "https://sub.example.org/v3/guide.md": "# Guide v3",
     });
-    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toEqual({ status: "ok", page: { content: "# Guide v3", url: link } });
+    expect(await fetchLinkedPage("lib", link, source, 168, false, policy)).toMatchObject({ status: "ok", page: { content: "# Guide v3", url: link } });
     expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([link, "https://sub.example.org/v2/guide.md", "https://sub.example.org/v3/guide.md"]);
     expect(readCache("lib", link, 999)?.content).toBe("# Guide v3");
   });
