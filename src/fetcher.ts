@@ -9,13 +9,13 @@ export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 export interface DocResult {
   content: string;
   /** The CANDIDATE URL this document was requested under — one of `entry.urls`, or the link
-   *  extracted from an index page. Stays the cache/search-index key throughout (D-1, PAR-776):
+   *  extracted from an index page. Stays the cache/search-index key throughout (D-74, PAR-776):
    *  `writeCache`/`readCache` are keyed by this value, and `search-index.ts`'s hash+url gate
    *  correlates against it, so it must never be silently replaced by `finalUrl` below — doing
    *  so would make every redirected document's index entry permanently "not this URL" and
    *  force a full re-tokenization on every search, forever. */
   url: string;
-  /** PAR-776 (D-1) — the URL this content was ACTUALLY served from: `url` above unless a
+  /** PAR-776 (D-74) — the URL this content was ACTUALLY served from: `url` above unless a
    *  redirect moved the fetch elsewhere, in which case this is where it landed. `get-docs.ts`
    *  uses THIS, not `url`, to resolve the document's own relative links and to decide which
    *  hosts its followed links may reach — a primary document that redirects cross-host used to
@@ -81,7 +81,7 @@ export interface FetchOutcome {
   status: "ok" | "not-modified" | "miss" | "refused" | "too-large";
   body?: string;
   etag?: string;
-  /** PAR-776 (D-1) — the URL this request actually landed on after following redirects
+  /** PAR-776 (D-74) — the URL this request actually landed on after following redirects
    *  (`final` below), present whenever a response was actually obtained (`ok` and
    *  `not-modified` — a 304 still follows redirects to reach whichever server answered it).
    *  Equal to the requested `url` when nothing redirected. Absent on `refused`/`too-large`/
@@ -103,11 +103,18 @@ export interface FetchOptions {
   publicFinalUrl?: boolean;
 }
 
-/** https on a host `isForbiddenHost` does not name; false for anything unparseable. */
+/** https, no userinfo, on a host `isForbiddenHost` does not name; false for anything
+ *  unparseable. The userinfo check (security-architect, PAR-776 round 1, N-3) matches every
+ *  other URL-trust gate in this codebase (`link-policy.ts`'s `sanitizeRemoteUrl`,
+ *  `validateLibraryUrl`, `isAllowedLink`) — this was the one gate in the redirect path that
+ *  didn't, so a hop or final URL carrying `user:pass@` (the redirecting server's own, not the
+ *  caller's) was accepted, then persisted (`cache.ts`'s `finalUrl`) and rendered into the
+ *  response. Not a credential-theft primitive either way — this process never had a credential
+ *  of its own to leak — but there's no reason this one check should be the odd one out. */
 export function isPublicHttpsUrl(url: string): boolean {
   try {
     const u = new URL(url);
-    return u.protocol === "https:" && !isForbiddenHost(u.hostname);
+    return u.protocol === "https:" && u.username === "" && u.password === "" && !isForbiddenHost(u.hostname);
   } catch {
     return false;
   }
@@ -316,7 +323,7 @@ export async function getLibraryDoc(
   if (!opts.forceRefresh) {
     for (const url of entry.urls) {
       const hit = readCache(entry.name, url, ttl);
-      // PAR-776 (D-1): `hit.meta.finalUrl` is the redirect target this same document last
+      // PAR-776 (D-74): `hit.meta.finalUrl` is the redirect target this same document last
       // landed on, PERSISTED from whichever fetch first observed it — a fresh cache hit makes
       // no network call at all, so this is the only way it can still be reported here.
       if (hit && !hit.stale) return { content: hit.content, url, finalUrl: hit.meta.finalUrl ?? url, fetchedAt: hit.meta.fetchedAt, stale: false };

@@ -1255,7 +1255,7 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
     expect(rendered.length).toBe(300);
   });
 
-  describe("PAR-776 (D-1) — redirectedFrom", () => {
+  describe("PAR-776 (D-74) — redirectedFrom", () => {
     it("is omitted entirely when absent — byte-identical to the pre-776 line", () => {
       expect(sourceStampLine({ ...base, stale: false, curated: true })).toBe(
         "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated",
@@ -1284,7 +1284,7 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
   });
 });
 
-describe("fitStampLine (PAR-776, D-1): degrades by dropping whole fields, redirectedFrom first", () => {
+describe("fitStampLine (PAR-776, D-74): degrades by dropping whole fields, redirectedFrom first", () => {
   const facts = {
     url: "https://example.com/llms.txt",
     redirectedFrom: "https://old.example.com/llms.txt",

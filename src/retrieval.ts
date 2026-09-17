@@ -317,11 +317,11 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  .vibectx-plan/DECISIONS.md. */
 export interface StampFacts {
   /** The URL the content actually came from — the FINAL URL after any redirect, not
-   *  necessarily the candidate URL the caller started from (PAR-776, D-1: before this, a
+   *  necessarily the candidate URL the caller started from (PAR-776, D-74: before this, a
    *  redirected primary document's stamp named the ORIGINAL candidate, so a human or a model
    *  reading it could not tell the document had moved hosts at all). */
   url: string;
-  /** PAR-776 (D-1) — present only when a redirect moved the fetch away from the candidate URL
+  /** PAR-776 (D-74) — present only when a redirect moved the fetch away from the candidate URL
    *  that was actually requested; `url` above is already the one it landed on. Purely
    *  additional provenance ("asked for X, served from Y") — never load-bearing for relative-
    *  link resolution or the host-policy check, both of which already use the final URL

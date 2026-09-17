@@ -50,7 +50,7 @@ export interface GetDocsOutcome {
    *  cached. `fetchedAt`/`curated` added at A17/PAR-726 alongside the rendered stamp, so a
    *  structured consumer (doctor) reads the same facts the text states without parsing it.
    *  `url` stays the CANDIDATE URL `doctor.ts` looks the cache up by — never `finalUrl` — so
-   *  it must not be repointed at the post-redirect URL; `finalUrl` (PAR-776, D-1) is added
+   *  it must not be repointed at the post-redirect URL; `finalUrl` (PAR-776, D-74) is added
    *  alongside it, present only when a redirect actually moved the fetch somewhere else. */
   source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean; finalUrl?: string };
   /** `documentHash` (search-index.ts) of the primary document's content — set exactly when
@@ -266,7 +266,7 @@ export async function getDocsDetailed(
       dropped: noDropped,
     };
   }
-  // PAR-776 (D-1) — `source.url` stays the CANDIDATE `doc.url`, unconditionally: `doctor.ts`
+  // PAR-776 (D-74) — `source.url` stays the CANDIDATE `doc.url`, unconditionally: `doctor.ts`
   // reads it straight into `readCache(entry.name, source.url, ttlHours)`, which requires the
   // exact candidate the cache is keyed by, never the post-redirect `finalUrl`. `finalUrl` is
   // added alongside it, only when it actually differs, so a structured consumer can learn the
@@ -281,7 +281,7 @@ export async function getDocsDetailed(
   // tokenize on its own. Only the primary document: followed index pages are per-query and
   // would make the index unbounded. Memoized by content hash inside the hook, so the ordinary
   // cache-hit call does no file work at all, and best effort throughout (D-13). Keyed by the
-  // CANDIDATE `doc.url`, matching `search.ts`'s own `primaryCached` (D-1, PAR-776): the search
+  // CANDIDATE `doc.url`, matching `search.ts`'s own `primaryCached` (D-74, PAR-776): the search
   // index's hash+url gate correlates against `entry.urls`, never a post-redirect URL.
   indexCachedDocument(entry.name, doc.url, doc.content);
   const isIndex = looksLikeIndex(doc.content);
@@ -303,7 +303,7 @@ export async function getDocsDetailed(
   // to a shorter COMPLETE line rather than leaving it to the final `clipToBudget` backstop to
   // cut a field in half (measured pre-fix: `maxTokens: 14` rendered `fetched 2026-09-1` — a
   // real, well-formed, WRONG date).
-  // PAR-776 (D-1): the RENDERED "Source:" line names the URL the content actually came from
+  // PAR-776 (D-74): the RENDERED "Source:" line names the URL the content actually came from
   // (`doc.finalUrl`), not the candidate that was requested — unlike the structured `source`
   // above, this is what a human or a model reading the response needs to know the document's
   // real origin is. `redirectedFrom` carries the candidate too, only when it differs, so the
@@ -397,7 +397,7 @@ export async function getDocsDetailed(
   const tooLarge: string[] = [];
   let skippedOutsideOrigin = 0;
   if (isIndex) {
-    // PAR-776 (D-1) — `doc.finalUrl`, not `doc.url`, resolves relative links and gates the
+    // PAR-776 (D-74) — `doc.finalUrl`, not `doc.url`, resolves relative links and gates the
     // host policy: a relative link in the document text resolves against the URL it was
     // ACTUALLY served from, not the candidate that was requested before any redirect. A
     // primary document that redirects cross-host (docs.anthropic.com → platform.claude.com,
@@ -443,7 +443,7 @@ export async function getDocsDetailed(
   const notes: string[] = [];
   if (followed.length) notes.push(`Followed index links: ${followed.join(", ")}`);
   if (skippedOutsideOrigin > 0) {
-    // PAR-776 (D-1): the document's OWN host, for this note, is the one it was actually
+    // PAR-776 (D-74): the document's OWN host, for this note, is the one it was actually
     // served from — matching the `isAllowedLink` check just above that produced this count.
     const hosts = [new URL(doc.finalUrl).hostname, ...(entry.allowedHosts ?? [])];
     notes.push(`Skipped ${skippedOutsideOrigin} index links outside allowed hosts (${hosts.join(", ")})`);

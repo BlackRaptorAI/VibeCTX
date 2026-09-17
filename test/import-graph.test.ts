@@ -294,7 +294,7 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // real regression -- 0 edges with 34 nodes is the vacuous "resolver silently drops everything"
 // failure mode this whole non-vacuity block exists to catch, and a floor of merely "greater
 // than zero" would not.
-const MEASURED_EDGE_COUNT = 124;
+const MEASURED_EDGE_COUNT = 126;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

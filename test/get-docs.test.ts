@@ -976,7 +976,7 @@ describe("getDocs index following", () => {
     expect(await getDocs(withHosts, { topic: "request hostname" })).toContain("redirected body");
   });
 
-  it("PAR-776 (D-1): a primary document that redirects cross-host resolves its OWN relative links against the final host, not the candidate host", async () => {
+  it("PAR-776 (D-74): a primary document that redirects cross-host resolves its OWN relative links against the final host, not the candidate host", async () => {
     // Nothing seeded — the primary document itself must go over the network so it can
     // redirect. No allowedHosts entry names docs.fastify.dev: the only way the followed
     // link can be allowed is the same-origin-as-source rule matching against doc.finalUrl.

@@ -433,7 +433,7 @@ describe("DocResult.fetchedAt / .stale (A17/PAR-726): every return path states w
   });
 });
 
-describe("PAR-776 (D-1) — DocResult.finalUrl", () => {
+describe("PAR-776 (D-74) — DocResult.finalUrl", () => {
   const source = "https://docs.example.com/llms.txt";
   const link = "https://docs.example.com/guide.md";
 
@@ -705,5 +705,18 @@ describe("hop-by-hop redirects (S1): every Location is checked BEFORE it is requ
       expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta }), host).toBeUndefined();
       expect(spy, host).toHaveBeenCalledTimes(1);
     }
+  });
+
+  /** security-architect, PAR-776 round 1, N-3: `isPublicHttpsUrl` is the redirect path's own
+   *  gate (`hopAllowed`), and was the one URL-trust check in this codebase that didn't reject
+   *  userinfo — unlike `sanitizeRemoteUrl`, `validateLibraryUrl` and `isAllowedLink`. Matters
+   *  more since PAR-776: a redirect target carrying `user:pass@` used to be accepted, then
+   *  PERSISTED (`cache.ts`'s `finalUrl`) and RENDERED (the `Source:` stamp) — not just used and
+   *  discarded the way it was before `finalUrl` existed. */
+  it("(security-architect, PAR-776 round 1, N-3) a redirect target carrying userinfo is refused, not silently accepted", async () => {
+    const primary = "https://evil-pkg.example.com/llms.txt";
+    const spy = stubOrigin({ [primary]: () => redirect("https://user:pass@docs.example.com/x") });
+    expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta })).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

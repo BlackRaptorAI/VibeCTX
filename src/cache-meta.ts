@@ -1,5 +1,6 @@
 import { lstatSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { sanitizeRemoteUrl } from "./link-policy.js";
 
 /**
  * D-71 (PAR-749) — the ONE shared answer to "does this file belong to this key?". Every
@@ -36,7 +37,7 @@ export interface CacheMeta {
   url: string;
   fetchedAt: string; // ISO
   etag?: string;
-  /** PAR-776 (D-1) — the URL the content actually came from, when a redirect moved it away
+  /** PAR-776 (D-74) — the URL the content actually came from, when a redirect moved it away
    *  from `url` (the candidate URL this entry is keyed and requested by). Absent when there
    *  was no redirect, or when the writer never observed one (a cache-only path with nothing to
    *  report). `url` above stays the CANDIDATE throughout — the lookup key `readCache`/
@@ -44,8 +45,14 @@ export interface CacheMeta {
    *  overloaded to mean "wherever this ended up"; this field exists precisely so callers that
    *  need to resolve relative links or apply the host policy against the document's real
    *  origin (`get-docs.ts`) have a persisted answer on a CACHE HIT, not only on the live fetch
-   *  that first observed it. Never gates anything on read — a stale or missing `finalUrl` costs
-   *  a caller its redirect-aware behaviour, never a wrong document served. */
+   *  that first observed it. UNLIKE `url`, this DOES gate something on read: `get-docs.ts` uses
+   *  it as the same-origin base for `isAllowedLink`'s host-policy check (`link-policy.ts`'s
+   *  same-origin rule grants a document's own host unconditionally), so a `.meta.json` this
+   *  process cannot trust must never hand a caller an attacker-chosen host to trust as that
+   *  origin — see `toCacheMeta`'s validation below (code-reviewer, PAR-776 round 1, B1: a value
+   *  merely shaped like a URL is not enough here, unlike `url` itself, which is never used this
+   *  way). A stale or missing `finalUrl` still costs a caller only its redirect-aware behaviour,
+   *  never a wrong document served — that guarantee is unchanged. */
   finalUrl?: string;
 }
 
@@ -148,13 +155,23 @@ export function validEtag(value: string | undefined): value is string {
  *              back as `If-None-Match`), not part of the entry's identity — but a shape check
  *              is not optional here (see `ETAG_SHAPE`'s comment for the stale-forever failure
  *              mode a merely-length-bounded etag still allows).
- *   finalUrl   (PAR-776) the same shape `url` requires — a parseable URL string, ≤ 2048
- *              characters — when present. Dropped alone, not the whole record, for the same
- *              reason `etag` is: it is provenance about where the fetch landed, not part of
- *              this entry's identity (`url`, the CANDIDATE, is what `readCache`/`touchCache`
- *              verify against). A wrong or hostile `finalUrl` costs a caller its redirect-aware
- *              relative-link/host-policy behaviour for this one read, never a wrong document
- *              served — that guarantee still rests entirely on `url`.
+ *   finalUrl   (PAR-776) STRICTER than `url` above, deliberately: `sanitizeRemoteUrl`
+ *              (`link-policy.ts`) — https only, no userinfo, ≤ 2048 characters, and the host
+ *              must clear `isForbiddenHost` — rather than the merely-parseable `validMetaUrl`
+ *              bound `url` gets. Not a stricter check for its own sake: `get-docs.ts` uses
+ *              `finalUrl` as the same-origin base for `isAllowedLink`'s host-policy check, which
+ *              grants a document's own host unconditionally (`link-policy.ts`), so accepting a
+ *              value merely shaped like a URL here would let a hand-edited or corrupted
+ *              `.meta.json` hand a caller an attacker-chosen "trusted" origin — a live fetch's
+ *              redirect can never legitimately produce a `finalUrl` this check would reject
+ *              (`fetcher.ts`'s `hopAllowed` enforces exactly this same rule, unconditionally, on
+ *              every redirect hop and the final URL, even for an `allowInternalHosts` candidate —
+ *              see D-74 in `.vibectx-plan/DECISIONS.md`). Dropped alone, not the whole record,
+ *              for the same reason `etag` is: it is provenance about where the fetch landed, not
+ *              part of this entry's identity (`url`, the CANDIDATE, is what `readCache`/
+ *              `touchCache` verify against) — a missing or rejected `finalUrl` costs a caller
+ *              its redirect-aware relative-link/host-policy behaviour for this one read, never a
+ *              wrong document served (code-reviewer, PAR-776 round 1, B1).
  */
 export function toCacheMeta(raw: unknown): CacheMeta | undefined {
   if (!isRecord(raw)) return undefined;
@@ -164,7 +181,10 @@ export function toCacheMeta(raw: unknown): CacheMeta | undefined {
   }
   const meta: CacheMeta = { url: raw.url, fetchedAt: raw.fetchedAt };
   if (typeof raw.etag === "string" && validEtag(raw.etag)) meta.etag = raw.etag;
-  if (typeof raw.finalUrl === "string" && validMetaUrl(raw.finalUrl)) meta.finalUrl = raw.finalUrl;
+  if (typeof raw.finalUrl === "string") {
+    const clean = sanitizeRemoteUrl(raw.finalUrl);
+    if (clean !== undefined) meta.finalUrl = clean;
+  }
   return meta;
 }
 

@@ -47,7 +47,7 @@ describe("D-71 (PAR-749, Root 1) — libDirName is injective", () => {
   });
 });
 
-describe("PAR-776 (D-1) — toCacheMeta's finalUrl", () => {
+describe("PAR-776 (D-74) — toCacheMeta's finalUrl", () => {
   const url = "https://react.dev/llms.txt";
   const fetchedAt = "2026-01-01T00:00:00.000Z";
 
@@ -66,6 +66,26 @@ describe("PAR-776 (D-1) — toCacheMeta's finalUrl", () => {
     expect(toCacheMeta({ url, fetchedAt, finalUrl: 12345 })!.finalUrl).toBeUndefined();
     // None of these malformed finalUrl values invalidate the record as a whole.
     expect(toCacheMeta({ url, fetchedAt, finalUrl: "not a url" })!.url).toBe(url);
+  });
+
+  /** Code-reviewer, PAR-776 round 1, B1 / security-architect, PAR-776 round 1, B-1: `finalUrl`
+   *  is used as the same-origin base for `get-docs.ts`'s host-policy check — `link-policy.ts`'s
+   *  `isAllowedLink` grants a document's own host unconditionally — so a value merely SHAPED
+   *  like a URL is not enough, unlike `url` itself. These are the exact rejections that make it
+   *  `sanitizeRemoteUrl`, not `validMetaUrl`: a hand-edited or corrupted `.meta.json` handing a
+   *  caller a hostile "trusted" origin. */
+  it("(code-reviewer/security-architect, PAR-776 round 1, B1/B-1) rejects http, userinfo, and forbidden-host finalUrl values a hostile or corrupted .meta.json could carry", () => {
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "http://docs.react.dev/llms.txt" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "https://user:pass@docs.react.dev/llms.txt" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "https://127.0.0.1/llms.txt" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "https://localhost/llms.txt" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "file:///etc/passwd" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "javascript:alert(1)" })!.finalUrl).toBeUndefined();
+  });
+
+  it("normalises finalUrl the same way sanitizeRemoteUrl does (e.g. strips a fragment) rather than storing the raw string verbatim", () => {
+    const meta = toCacheMeta({ url, fetchedAt, finalUrl: "https://docs.react.dev/llms.txt#section" })!;
+    expect(meta.finalUrl).toBe("https://docs.react.dev/llms.txt");
   });
 });
 
