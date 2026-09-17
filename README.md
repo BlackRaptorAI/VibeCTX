@@ -235,9 +235,12 @@ out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a 
 matches you get, in full:
 
 ```
-Source: <url> · fetched <ISO timestamp> · fresh|stale · curated|resolved
+Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved
 No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
+
+`<url>` is the URL the document was actually served from; the `(redirected from <url>)`
+clause appears only when a redirect moved it away from the one that was requested.
 
 ## Don't know which library? `search`
 

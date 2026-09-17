@@ -577,3 +577,39 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `src/fetcher.ts`, `src/cache.ts` (A17 / PAR-726).
 
 ---
+
+## D-74 — decided 2026-09-17, executing PAR-776
+
+- **D-74** 2026-09-17 — **A redirected primary document's `url` stays the CANDIDATE
+  throughout; the URL it actually landed on is carried in a new, parallel `finalUrl` field
+  rather than repointing what `url` means.** `DocResult.url` was, before this item, read two
+  different ways by different callers without either being wrong on its own terms: `search.ts`'s
+  `primaryCached()` and the on-disk search index's hash+url gate iterate `entry.urls` (the
+  candidates) to correlate a cached document with its index entry, and `doctor.ts` calls
+  `readCache(entry.name, source.url, ttlHours)` directly — both need the exact candidate, never
+  wherever a redirect moved the content. `get-docs.ts`, meanwhile, needs the URL the content was
+  ACTUALLY served from to resolve the document's own relative links and to run the host-policy
+  check, and used `doc.url` for that too — so a primary document that redirected cross-host had
+  its links resolved and checked against the wrong host. Repointing `url` to mean "wherever this
+  ended up" would have fixed `get-docs.ts` and broken the other two.
+  **What shipped instead:** a new field, `finalUrl`, threaded through `DocResult`, `FetchOutcome`,
+  `CacheMeta` (persisted, so a later cache hit with no network call still knows it), and
+  `GetDocsOutcome.source` (added only when it differs from the candidate). `get-docs.ts`'s link
+  extraction, ranking, host-policy check and followed-link fetch now use `finalUrl`;
+  `indexCachedDocument` and `source.url` deliberately still use the candidate `url`, unchanged,
+  matching `search.ts`'s and `doctor.ts`'s existing contract. The rendered `Source:` stamp
+  (`retrieval.ts`'s `sourceStampLine`) names the final URL and states `(redirected from
+  <candidate>)` when they differ.
+  **A read-side trust gap this decision does NOT license:** a persisted `finalUrl` is
+  attacker-reachable the same way `url` always was (a hand-edited or corrupted `.meta.json`), and
+  is used as the same-origin base for the host-policy check on read — so it is validated on read
+  with the same `sanitizeRemoteUrl` rule (https, no userinfo, non-forbidden host, ≤2048 chars)
+  the write side already guarantees via `hopAllowed` on every redirect hop, not the looser
+  `validMetaUrl` bound `url` itself uses (which deliberately allows an internal host under
+  `allowInternalHosts`, D-47 — `finalUrl` never should, since no redirect hop is ever allowed to
+  land on one regardless of that flag).
+  Ref: `src/cache-meta.ts` (`CacheMeta.finalUrl`, `toCacheMeta`), `src/cache.ts`
+  (`writeCache`/`touchCache`), `src/fetcher.ts` (`DocResult.finalUrl`, `FetchOutcome.finalUrl`),
+  `src/get-docs.ts`, `src/retrieval.ts` (`StampFacts.redirectedFrom`) (PAR-776).
+
+---

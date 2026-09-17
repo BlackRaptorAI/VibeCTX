@@ -316,8 +316,23 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  Recorded as a deliberate, flagged gap rather than invented or silently dropped; see D-73 in
  *  .vibectx-plan/DECISIONS.md. */
 export interface StampFacts {
-  /** PAR-811: rendered with its query string (and fragment) stripped — see `stripStampQuery`. */
+  /** The URL the content actually came from — the FINAL URL after any redirect, not
+   *  necessarily the candidate URL the caller started from (PAR-776, D-74: before this, a
+   *  redirected primary document's stamp named the ORIGINAL candidate, so a human or a model
+   *  reading it could not tell the document had moved hosts at all). Rendered with its query
+   *  string (and fragment) stripped — see `stripStampQuery` (PAR-811). */
   url: string;
+  /** PAR-776 (D-74) — present only when a redirect moved the fetch away from the candidate URL
+   *  that was actually requested; `url` above is already the one it landed on. Purely
+   *  additional provenance ("asked for X, served from Y") — never load-bearing for relative-
+   *  link resolution or the host-policy check, both of which already use the final URL
+   *  directly (`fetcher.ts`'s `DocResult.finalUrl`) rather than parsing this stamp. Cleaned and
+   *  clipped the same way `url` is (S-1's lesson applies here too: a second attacker-influenced
+   *  URL landing in this line unclipped would be the same forgery route, just in a new field)
+   *  — and query-stripped the same way too (PAR-811 merge): the ORIGINAL candidate URL is just
+   *  as capable of carrying a `?token=…` as the final one is, so this field would otherwise
+   *  have reopened the exact leak PAR-811 closed, just moved into the parenthetical. */
+  redirectedFrom?: string;
   /** ISO, from the document's own cache meta — ambient `Date.now()` for this MUST NOT be
    *  substituted; see fetcher.ts's DocResult / cache.ts's writeCache/touchCache. Bounded and
    *  charset-restricted by `cache-meta.ts`'s `ISO_INSTANT` validation on every read path, so
@@ -331,7 +346,8 @@ export interface StampFacts {
 }
 
 /** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
- *  so a caller that used to clip separately sees no change in outcome, only in ownership. */
+ *  so a caller that used to clip separately sees no change in outcome, only in ownership. Also
+ *  the bound `redirectedFrom` uses (PAR-776): the same field, appearing under a different name. */
 const MAX_STAMP_URL_CHARS = 300;
 
 /**
@@ -380,22 +396,31 @@ function stripStampQuery(url: string): string {
 }
 
 export function sourceStampLine(f: StampFacts): string {
-  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+  const redirect = f.redirectedFrom !== undefined ? ` (redirected from ${clipText(stripStampQuery(f.redirectedFrom), MAX_STAMP_URL_CHARS)})` : "";
+  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
- *  `maxChars` — dropping whole trailing fields (curated/resolved, then fresh/stale, then
- *  fetched-at) rather than leaving that to a caller's own final length-based backstop clip to
- *  cut mid-field (code-reviewer, A17 round 1, B2). A mid-field cut is not merely ugly: `·
- *  fetched 2026-09-1` — the true fetch date sliced at its 9th character — is a plausible,
- *  well-formed, WRONG date presented as fact, which is worse than the missing stamp A17 exists
- *  to fix. At the extreme (`maxChars` too small even for `Source: <url>`), this returns that
- *  shortest variant anyway and leaves it to the caller's own backstop — unchanged from
- *  get_docs' pre-A17 behaviour for an oversized `Source:` line alone, already accepted and
- *  pinned by test. */
+ *  `maxChars` — dropping whole trailing fields (PAR-776's `redirectedFrom` annotation first,
+ *  then curated/resolved, then fresh/stale, then fetched-at) rather than leaving that to a
+ *  caller's own final length-based backstop clip to cut mid-field (code-reviewer, A17 round 1,
+ *  B2). A mid-field cut is not merely ugly: `· fetched 2026-09-1` — the true fetch date sliced
+ *  at its 9th character — is a plausible, well-formed, WRONG date presented as fact, which is
+ *  worse than the missing stamp A17 exists to fix. `redirectedFrom` is dropped FIRST, ahead of
+ *  every field that predates it: it is the newest, most optional fact this line states, and
+ *  the URL it carries is never the only place that URL is known (the caller already had it as
+ *  the candidate URL going in) — unlike `url`, `fetchedAt`, `stale` and `curated`, which this
+ *  line is the sole rendered statement of. At the extreme (`maxChars` too small even for
+ *  `Source: <url>`), this returns that shortest variant anyway and leaves it to the caller's
+ *  own backstop — unchanged from get_docs' pre-A17 behaviour for an oversized `Source:` line
+ *  alone, already accepted and pinned by test. */
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
+  if (f.redirectedFrom !== undefined) {
+    const withoutRedirect = sourceStampLine({ ...f, redirectedFrom: undefined });
+    if (withoutRedirect.length <= maxChars) return withoutRedirect;
+  }
   const url = clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS);
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;
   if (withoutCurated.length <= maxChars) return withoutCurated;
