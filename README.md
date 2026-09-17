@@ -26,9 +26,9 @@ copy, clearly flagged as stale, instead of a failure.
 ## Install
 
 VibeCTX runs from a local clone. You need git and Node — `package.json` declares
-**Node ≥ 18**, and CI builds and tests on **Node 22**, which is the version this is actually
-proven on. Running the test suite needs Node ≥ 20.19 regardless (vitest's `vite` dependency
-declares `^20.19.0 || >=22.12.0`); building and running the server does not.
+**Node ≥ 20.19** (vitest's `vite` dependency requires `^20.19.0 || >=22.12.0` to run the test
+suite; the floor is set there rather than for the server itself, which needs less), and CI
+builds and tests on **Node 22**, which is the version this is actually proven on.
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
@@ -233,9 +233,12 @@ out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a 
 matches you get, in full:
 
 ```
-Source: <url> · fetched <ISO timestamp> · fresh|stale · curated|resolved
+Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved
 No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
+
+`<url>` is the URL the document was actually served from; the `(redirected from <url>)`
+clause appears only when a redirect moved it away from the one that was requested.
 
 ## Don't know which library? `search`
 

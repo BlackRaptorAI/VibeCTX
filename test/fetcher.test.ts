@@ -434,6 +434,75 @@ describe("DocResult.fetchedAt / .stale (A17/PAR-726): every return path states w
   });
 });
 
+describe("PAR-776 (D-74) — DocResult.finalUrl", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const link = "https://docs.example.com/guide.md";
+
+  it("getLibraryDoc, fresh network fetch with no redirect: finalUrl equals the candidate url", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt(source, "# Doc")));
+    const doc = await getLibraryDoc({ name: "no-redirect-lib", urls: [source] });
+    expect(doc).toMatchObject({ url: source, finalUrl: source });
+  });
+
+  it("getLibraryDoc, fresh network fetch that redirects: finalUrl is the redirect target, url stays the candidate", async () => {
+    const final = "https://final.example.com/llms.txt";
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt(final, "# Doc")));
+    const doc = await getLibraryDoc({ name: "redirect-lib", urls: [source] });
+    expect(doc).toMatchObject({ url: source, finalUrl: final });
+    // Persisted, not just returned live — the whole point is a later cache-hit still knows it.
+    expect(readCache("redirect-lib", source, 999)?.meta.finalUrl).toBe(final);
+  });
+
+  it("getLibraryDoc, fresh cache hit (no network call at all): finalUrl comes from the persisted meta, not just the candidate url", async () => {
+    const final = "https://final.example.com/llms.txt";
+    writeCache("cached-redirect-lib", source, "# Doc", undefined, final);
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    const doc = await getLibraryDoc({ name: "cached-redirect-lib", urls: [source] });
+    expect(spy).not.toHaveBeenCalled();
+    expect(doc).toMatchObject({ url: source, finalUrl: final });
+  });
+
+  it("getLibraryDoc, 304 revalidation that still redirects: finalUrl is (re)computed from the redirect actually followed, not left stale", async () => {
+    // A real revalidation re-requests the CANDIDATE url every time, so a site that keeps
+    // redirecting keeps redirecting on revalidation too — the hop loop lands on `final`
+    // before the 304 is ever seen, exactly as it did on the original fetch.
+    const final = "https://final.example.com/llms.txt";
+    writeCache("touch-redirect-lib", source, "# Doc", '"etag1"', final);
+    const fetchSpy = vi.fn(async (input: unknown) => {
+      if (String(input) === source) return new Response(null, { status: 301, headers: { location: final } });
+      return new Response(null, { status: 304 });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const doc = await getLibraryDoc({ name: "touch-redirect-lib", urls: [source], ttlHours: 0 });
+    expect(doc).toMatchObject({ finalUrl: final });
+    expect(readCache("touch-redirect-lib", source, 999)?.meta.finalUrl).toBe(final);
+  });
+
+  it("getLibraryDoc, stale fallback (network down): finalUrl comes from the stale cache's own meta", async () => {
+    const final = "https://final.example.com/llms.txt";
+    writeCache("stale-redirect-lib", source, "# Doc", undefined, final);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const doc = await getLibraryDoc({ name: "stale-redirect-lib", urls: [source], ttlHours: 0 });
+    expect(doc).toMatchObject({ stale: true, finalUrl: final });
+  });
+
+  it("fetchLinkedPage: a redirecting followed link reports its own finalUrl the same way", async () => {
+    // Same-origin as `source` (the same-origin rule always allows it) — a cross-host redirect
+    // additionally needing an allowed-host policy match is covered in the host-policy suite.
+    const final = "https://docs.example.com/redirected-guide.md";
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt(final, "# Guide")));
+    const result = await fetchLinkedPage("page-redirect-lib", link, source, 999);
+    expect(result).toMatchObject({ status: "ok", page: { url: link, finalUrl: final } });
+  });
+
+  it("fetchLinkedPage: no redirect — finalUrl equals the link url", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => responseAt(link, "# Guide")));
+    const result = await fetchLinkedPage("page-no-redirect-lib", link, source, 999);
+    expect(result).toMatchObject({ status: "ok", page: { url: link, finalUrl: link } });
+  });
+});
+
 describe("etag revalidation", () => {
   const entry = {
     name: "revalidate-lib",
@@ -637,6 +706,19 @@ describe("hop-by-hop redirects (S1): every Location is checked BEFORE it is requ
       expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta }), host).toBeUndefined();
       expect(spy, host).toHaveBeenCalledTimes(1);
     }
+  });
+
+  /** security-architect, PAR-776 round 1, N-3: `isPublicHttpsUrl` is the redirect path's own
+   *  gate (`hopAllowed`), and was the one URL-trust check in this codebase that didn't reject
+   *  userinfo — unlike `sanitizeRemoteUrl`, `validateLibraryUrl` and `isAllowedLink`. Matters
+   *  more since PAR-776: a redirect target carrying `user:pass@` used to be accepted, then
+   *  PERSISTED (`cache.ts`'s `finalUrl`) and RENDERED (the `Source:` stamp) — not just used and
+   *  discarded the way it was before `finalUrl` existed. */
+  it("(security-architect, PAR-776 round 1, N-3) a redirect target carrying userinfo is refused, not silently accepted", async () => {
+    const primary = "https://evil-pkg.example.com/llms.txt";
+    const spy = stubOrigin({ [primary]: () => redirect("https://user:pass@docs.example.com/x") });
+    expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta })).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 

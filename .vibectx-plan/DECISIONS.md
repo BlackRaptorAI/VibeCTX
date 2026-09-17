@@ -76,7 +76,7 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 | **D-47** | A library `urls` entry must clear the same host policy a followed link clears. Internal, loopback and non-routable hosts are reachable only through an explicit per-entry `allowInternalHosts: true`. | A1 / PAR-714 |
 | **D-48** | One exported control and bidi character class is the contract for every render path. Adding a character to it is a D-30 amendment; a local variant is a defect. | A7 / PAR-720 |
 | **D-49** | The URL trust decision lives in `src/link-policy.ts`, the one file that owns host policy, and every caller — config included — calls it rather than re-implementing a subset. | A14, folded into A1 |
-| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. **Executed 2026-09-17 — see D-74.** | A11 / PAR-724 |
+| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. **Executed 2026-09-17 — see D-76.** | A11 / PAR-724 |
 | **D-51** | VibeCTX records its own activity, locally, bounded and content-free, readable through the same `--json` envelope as every other command. It never records what was *said*, only what was *looked at*. | A20 / PAR-729 |
 | **D-52** | Agent packs are consumed as Claude Code plugins from the `blackraptor` marketplace, never vendored into the repository. Verdict enforcement lives in the pack's `Stop` hook, not in VibeCTX's CI. Supersedes D-44. | governance |
 | **D-53** | The operating pack version for 0.2.0 is **2.1.0**. Gate verdicts follow the 2.0.0 schema (integer confidence, required `standards`, string `evidence`, no `N/A`); the 13 pre-existing Change Records predate it and are re-emitted rather than hand-patched. | governance |
@@ -575,15 +575,15 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `StampFacts`/`sourceStampLine`, not a rework of this item's plumbing.
   Ref: `src/retrieval.ts` (`sourceStampLine`), `src/get-docs.ts`, `src/search.ts`,
   `src/fetcher.ts`, `src/cache.ts` (A17 / PAR-726).
-  **Superseded 2026-09-17 by D-74**, which closes this gap exactly the way predicted above —
+  **Superseded 2026-09-17 by D-76**, which closes this gap exactly the way predicted above —
   `StampFacts` gained an optional `version` field, `sourceStampLine`/`fitStampLine` extended,
   nothing about A17's own plumbing reworked.
 
 ---
 
-## D-74 — decided 2026-09-17, executing A11 / PAR-724
+## D-76 — decided 2026-09-17, executing A11 / PAR-724
 
-- **D-74** 2026-09-17 — **D-50 executed: documentation is version-matched where a manifest
+- **D-76** 2026-09-17 — **D-50 executed: documentation is version-matched where a manifest
   names an unambiguous exact pin, and the fallback to latest is always stated, never silent.**
   Checked against the tree before starting: no version field existed anywhere (`ProjectDependency`,
   `LibraryEntry`, `ResolveOutcome`, `StampFacts`) — D-73's premise (that A11 had already landed
@@ -683,9 +683,9 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-75 — decided 2026-09-17, executing A16 / PAR-725
+## D-77 — decided 2026-09-17, executing A16 / PAR-725
 
-- **D-75** 2026-09-17 — **A name that does not exist in npm or PyPI is now a structurally
+- **D-77** 2026-09-17 — **A name that does not exist in npm or PyPI is now a structurally
   distinct signal from a name that exists but has no reachable documentation.** Before this,
   `resolve.ts` already queried both registries and already produced two different free-text
   attempt strings for the two cases internally, but neither the `ResolveOutcome` type nor the
@@ -726,8 +726,65 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
   **Round 1 review, one should-fix applied:** npm's `security-holder` placeholder (a real,
   registered record — a taken-down name parked on npm's own security-holder account, not a
-  genuine 404) is no longer counted toward the "does not exist" claim — see D-74's own round-1
+  genuine 404) is no longer counted toward the "does not exist" claim — see D-76's own round-1
   addendum for the full history; this line exists here because it is squarely an A16 claim-
   discipline concern, not an A11 fetch-path one.
+
+---
+
+## D-74 — decided 2026-09-17, executing PAR-776
+
+- **D-74** 2026-09-17 — **A redirected primary document's `url` stays the CANDIDATE
+  throughout; the URL it actually landed on is carried in a new, parallel `finalUrl` field
+  rather than repointing what `url` means.** `DocResult.url` was, before this item, read two
+  different ways by different callers without either being wrong on its own terms: `search.ts`'s
+  `primaryCached()` and the on-disk search index's hash+url gate iterate `entry.urls` (the
+  candidates) to correlate a cached document with its index entry, and `doctor.ts` calls
+  `readCache(entry.name, source.url, ttlHours)` directly — both need the exact candidate, never
+  wherever a redirect moved the content. `get-docs.ts`, meanwhile, needs the URL the content was
+  ACTUALLY served from to resolve the document's own relative links and to run the host-policy
+  check, and used `doc.url` for that too — so a primary document that redirected cross-host had
+  its links resolved and checked against the wrong host. Repointing `url` to mean "wherever this
+  ended up" would have fixed `get-docs.ts` and broken the other two.
+  **What shipped instead:** a new field, `finalUrl`, threaded through `DocResult`, `FetchOutcome`,
+  `CacheMeta` (persisted, so a later cache hit with no network call still knows it), and
+  `GetDocsOutcome.source` (added only when it differs from the candidate). `get-docs.ts`'s link
+  extraction, ranking, host-policy check and followed-link fetch now use `finalUrl`;
+  `indexCachedDocument` and `source.url` deliberately still use the candidate `url`, unchanged,
+  matching `search.ts`'s and `doctor.ts`'s existing contract. The rendered `Source:` stamp
+  (`retrieval.ts`'s `sourceStampLine`) names the final URL and states `(redirected from
+  <candidate>)` when they differ.
+  **A read-side trust gap this decision does NOT license:** a persisted `finalUrl` is
+  attacker-reachable the same way `url` always was (a hand-edited or corrupted `.meta.json`), and
+  is used as the same-origin base for the host-policy check on read — so it is validated on read
+  with the same `sanitizeRemoteUrl` rule (https, no userinfo, non-forbidden host, ≤2048 chars)
+  the write side already guarantees via `hopAllowed` on every redirect hop, not the looser
+  `validMetaUrl` bound `url` itself uses (which deliberately allows an internal host under
+  `allowInternalHosts`, D-47 — `finalUrl` never should, since no redirect hop is ever allowed to
+  land on one regardless of that flag).
+  Ref: `src/cache-meta.ts` (`CacheMeta.finalUrl`, `toCacheMeta`), `src/cache.ts`
+  (`writeCache`/`touchCache`), `src/fetcher.ts` (`DocResult.finalUrl`, `FetchOutcome.finalUrl`),
+  `src/get-docs.ts`, `src/retrieval.ts` (`StampFacts.redirectedFrom`) (PAR-776).
+
+---
+
+## D-75 — decided 2026-09-17, executing PAR-778
+
+- **D-75** 2026-09-17 — **`package.json`'s `engines.node` floor is `>=20.19.0`, exactly matching
+  the version `vitest`'s `vite` dependency requires (`^20.19.0 || >=22.12.0`) at its low end,
+  not the fuller range.** The declared floor (`>=18` before this) covered building and running
+  the server but not the test toolchain, so a fresh clone on Node 18 installed successfully and
+  then failed `npm test` with no warning at install time (`engine-strict` is off, MEASURED —
+  npm reports `EBADENGINE` but does not refuse the install). CI already runs Node 22, which
+  satisfies both ends of `vite`'s range regardless of which floor `engines` states.
+  **Known, accepted gap:** `>=20.19.0` alone does not reject Node 22.0.0–22.11.x, which passes
+  the `engines` check but still fails on `vite`'s actual requirement (the gap between
+  `20.19.0` and `22.12.0`'s lower bound in a plain `>=` comparison). The fully accurate value
+  would be the disjunctive range itself (`"^20.19.0 || >=22.12.0"`); PAR-778's Done-when
+  specified the simpler `>=20.19.0` exactly, and that is what shipped — the simpler promise,
+  not a tighter enforcement gate. `engines` remains advisory either way (`engine-strict` is not
+  set), so neither form actually blocks an install; the value it did have was accuracy of the
+  documented claim, which this closes for the common case.
+  Ref: `package.json`, `package-lock.json`, `README.md`, `CONTRIBUTING.md` (PAR-778).
 
 ---

@@ -88,8 +88,13 @@ export function normaliseAllowedHost(raw: unknown): string {
  * This is the sole gate between a committed `vibectx.config.json` and the fetch
  * `startAutowarm` makes at server startup with no user action. The opt-in reaches only THIS
  * entry's own primary fetch: it is not threaded into `isAllowedLink`, so an internal entry's
- * followed index links are still refused. Throws with a message that starts with `urls:` so
- * config errors read naturally; returns nothing on success.
+ * followed index links are still refused. It does NOT widen where that primary fetch's
+ * REDIRECTS may land, either (`fetcher.ts`'s `hopAllowed` requires `isPublicHttpsUrl` — public,
+ * https, no userinfo — on every hop unconditionally, `allowInternalHosts` or not); an internal
+ * entry whose document happens to redirect OUT to a public host (PAR-776, D-74) gets that
+ * public host as its followable origin, same as any other primary would, since `finalUrl` is
+ * never internal here. Throws with a message that starts with `urls:` so config errors read
+ * naturally; returns nothing on success.
  */
 export function validateLibraryUrl(raw: unknown, opts?: { allowInternalHosts?: boolean }): void {
   const shown = typeof raw === "string" ? raw : JSON.stringify(raw);

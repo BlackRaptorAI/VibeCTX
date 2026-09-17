@@ -61,8 +61,13 @@ export interface GetDocsOutcome {
   text: string;
   /** The primary document that was served; undefined when nothing was fetched and nothing
    *  cached. `fetchedAt`/`curated` added at A17/PAR-726 alongside the rendered stamp, so a
-   *  structured consumer (doctor) reads the same facts the text states without parsing it. */
-  source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean; version?: string };
+   *  structured consumer (doctor) reads the same facts the text states without parsing it.
+   *  `url` stays the CANDIDATE URL `doctor.ts` looks the cache up by — never `finalUrl` — so
+   *  it must not be repointed at the post-redirect URL; `finalUrl` (PAR-776, D-74) is added
+   *  alongside it, present only when a redirect actually moved the fetch somewhere else.
+   *  `version` (A11/PAR-724) is the version this document was matched to, set only on a
+   *  genuine version-specific match. */
+  source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean; finalUrl?: string; version?: string };
   /** `documentHash` (search-index.ts) of the primary document's content — set exactly when
    *  `source` is (A20/PAR-729, D-51: what the activity log records instead of the text). */
   contentHash?: string;
@@ -326,7 +331,20 @@ export async function getDocsDetailed(
   // and reused by `source` (the structured outcome) and `stampFacts` (the rendered line) so the
   // two can never disagree.
   const matchedVersion = versionContext?.matched ? versionContext.requested : undefined;
-  const source = { url: doc.url, stale: doc.stale, fetchedAt: doc.fetchedAt, curated, version: matchedVersion };
+  // PAR-776 (D-74) — `source.url` stays the CANDIDATE `doc.url`, unconditionally: `doctor.ts`
+  // reads it straight into `readCache(entry.name, source.url, ttlHours)`, which requires the
+  // exact candidate the cache is keyed by, never the post-redirect `finalUrl`. `finalUrl` is
+  // added alongside it, only when it actually differs, so a structured consumer can learn the
+  // same redirect fact the rendered stamp below states, without parsing prose for it — the
+  // same design A17/PAR-726 already established for `stale`/`fetchedAt`/`curated`.
+  const source = {
+    url: doc.url,
+    stale: doc.stale,
+    fetchedAt: doc.fetchedAt,
+    curated,
+    version: matchedVersion,
+    ...(doc.finalUrl !== doc.url ? { finalUrl: doc.finalUrl } : {}),
+  };
   // A20/PAR-729: the same hash the search index already computes to detect a changed
   // document (D-33) is what the activity log records in place of the text itself.
   const contentHash = documentHash(doc.content);
@@ -334,7 +352,9 @@ export async function getDocsDetailed(
   // index current — a document get_docs just fetched is one `search` would otherwise have to
   // tokenize on its own. Only the primary document: followed index pages are per-query and
   // would make the index unbounded. Memoized by content hash inside the hook, so the ordinary
-  // cache-hit call does no file work at all, and best effort throughout (D-13).
+  // cache-hit call does no file work at all, and best effort throughout (D-13). Keyed by the
+  // CANDIDATE `doc.url`, matching `search.ts`'s own `primaryCached` (D-74, PAR-776): the search
+  // index's hash+url gate correlates against `entry.urls`, never a post-redirect URL.
   indexCachedDocument(entry.name, doc.url, doc.content);
   const isIndex = looksLikeIndex(doc.content);
   const budget = args.maxTokens ?? DEFAULT_BUDGET_TOKENS;
@@ -359,7 +379,19 @@ export async function getDocsDetailed(
   const versionBanner = rawVersionBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length - prefix.length) ? rawVersionBanner : "";
   // A18 (PAR-727): built once, reused by both the standing `docStamp` below and `thinMatch`'s
   // own re-fitted stamp further down — the same facts, just re-degraded around less room.
-  const stampFacts = { url: doc.url, fetchedAt: doc.fetchedAt, stale: doc.stale, curated, version: matchedVersion };
+  // PAR-776 (D-74): `url` here is the URL the content actually came from (`doc.finalUrl`), not
+  // the candidate that was requested — unlike the structured `source` above, this is what a
+  // human or a model reading the response needs to know the document's real origin is.
+  // `redirectedFrom` carries the candidate too, only when it differs, so the line states BOTH
+  // when they diverge rather than silently substituting one for the other.
+  const stampFacts = {
+    url: doc.finalUrl,
+    redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined,
+    fetchedAt: doc.fetchedAt,
+    stale: doc.stale,
+    curated,
+    version: matchedVersion,
+  };
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
   // resolution note, the stale prefix and the version banner already spent, so a small budget
@@ -390,7 +422,8 @@ export async function getDocsDetailed(
     // claim here was ALSO wrong, off by roughly a factor of 2, caught the same way as F6):
     // the TOC content itself never exceeds `tocBudget` (half of `budgetChars`), full stop —
     // that part IS an exact guarantee. It is NOT a guarantee that the document head is ever
-    // non-empty: `doc.url` is itself unbounded, so the fixed overhead around the TOC
+    // non-empty: `doc.finalUrl` (PAR-776 — what the stamp renders; see below) is itself
+    // unbounded, so the fixed overhead around the TOC
     // (`Source:` line, label, separator — NOT charged against `tocBudget`) can still exceed
     // what's left once the TOC saturates its own half-share. When it saturates (a heading at
     // or past `tocBudget`), head is non-empty only once `budgetChars` clears roughly TWICE
@@ -401,7 +434,7 @@ export async function getDocsDetailed(
     // `budgetChars >= 65`, which is what "overhead plus one character" would predict. Below
     // that boundary, the final `clipToBudget` backstop is what keeps the response in budget,
     // same as every other path — it does not keep the head non-empty. No universal formula is
-    // asserted here for that reason: the fixed overhead varies with `doc.url`'s own length, so
+    // asserted here for that reason: the fixed overhead varies with `doc.finalUrl`'s own length, so
     // the real boundary is per-document and pinned by test at a real url, not claimed as a
     // constant.
     const tocBudget = Math.floor(budgetChars / 2);
@@ -451,20 +484,29 @@ export async function getDocsDetailed(
   const tooLarge: string[] = [];
   let skippedOutsideOrigin = 0;
   if (isIndex) {
-    const limit = followLimit(extractLinks(doc.content, doc.url).length);
+    // PAR-776 (D-74) — `doc.finalUrl`, not `doc.url`, resolves relative links and gates the
+    // host policy: a relative link in the document text resolves against the URL it was
+    // ACTUALLY served from, not the candidate that was requested before any redirect. A
+    // primary document that redirects cross-host (docs.anthropic.com → platform.claude.com,
+    // D-04) used to resolve its own relative links against the ORIGINAL host — wrong, since
+    // nothing was ever served from there — which could refuse a link that is genuinely
+    // same-origin with the document as fetched, or (not excluded either) admit one that only
+    // LOOKS same-origin against the wrong base. `doc.finalUrl` equals `doc.url` when nothing
+    // redirected, so this is a no-op change for the common case.
+    const limit = followLimit(extractLinks(doc.content, doc.finalUrl).length);
     // Rank every matching link, drop guard-refused ones (counted for the note),
     // THEN take the budget — so cross-origin links never crowd out followable ones.
     // fetchLinkedPage re-checks the guard; this is the visible layer, that one is the safety layer.
-    const candidates = rankLinks(doc.content, topic, doc.url, Number.POSITIVE_INFINITY);
+    const candidates = rankLinks(doc.content, topic, doc.finalUrl, Number.POSITIVE_INFINITY);
     const allowed = candidates.filter((link) => {
-      const ok = isAllowedLink(link.url, doc.url, entry);
+      const ok = isAllowedLink(link.url, doc.finalUrl, entry);
       if (!ok) skippedOutsideOrigin += 1;
       return ok;
     });
     let followedBytes = 0;
     for (const link of allowed.slice(0, limit)) {
       if (followedBytes >= MAX_FOLLOWED_BYTES) break;
-      const result = await fetchLinkedPage(entry.name, link.url, doc.url, entry.ttlHours, args.offline, entry);
+      const result = await fetchLinkedPage(entry.name, link.url, doc.finalUrl, entry.ttlHours, args.offline, entry);
       switch (result.status) {
         case "ok":
           followedSections.push(...splitSections(`# ${link.title}\n\n${result.page.content}`));
@@ -488,7 +530,9 @@ export async function getDocsDetailed(
   const notes: string[] = [];
   if (followed.length) notes.push(`Followed index links: ${followed.join(", ")}`);
   if (skippedOutsideOrigin > 0) {
-    const hosts = [new URL(doc.url).hostname, ...(entry.allowedHosts ?? [])];
+    // PAR-776 (D-74): the document's OWN host, for this note, is the one it was actually
+    // served from — matching the `isAllowedLink` check just above that produced this count.
+    const hosts = [new URL(doc.finalUrl).hostname, ...(entry.allowedHosts ?? [])];
     notes.push(`Skipped ${skippedOutsideOrigin} index links outside allowed hosts (${hosts.join(", ")})`);
   }
   if (tooLarge.length) {
@@ -544,10 +588,12 @@ export async function getDocsDetailed(
   // ADVICE that tells the caller what to try next, which is the one thing worth keeping. The
   // genuinely unbounded PER-CALL field, `topic`, is clipped on its own instead (round 4,
   // code-reviewer S4 — earlier wording here claimed `topic` was the only unclipped field,
-  // which the `noMatch` template below directly contradicts). `doc.url` no longer appears in
-  // this template at all (A17/PAR-726 — see below) and, everywhere it DOES still appear
-  // (`docStamp`), is cleaned and clipped by `sourceStampLine`/`fitStampLine` (security-
-  // architect, A17 round 1, S-1). `entry.name` is clipped below too (round 2, SF-1) — it was
+  // which the `noMatch` template below directly contradicts). Neither `doc.url` nor (PAR-776)
+  // `doc.finalUrl` appears in this template at all (A17/PAR-726 — see below) and, everywhere
+  // either DOES still appear (`docStamp`), both are cleaned and clipped by
+  // `sourceStampLine`/`fitStampLine` (security-architect, A17 round 1, S-1 — extended to
+  // `redirectedFrom` by PAR-776, the same lesson applied to the newer field). `entry.name` is
+  // clipped below too (round 2, SF-1) — it was
   // bounded to 214 chars only on the resolve path (`npmNameError`/`pypiNameError`), not for a
   // config-defined entry, the same gap S-1 closed for `url`.
   const noMatch = (what: string, advice: string): GetDocsOutcome => ({
