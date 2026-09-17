@@ -9,7 +9,7 @@ import {
 } from "./limits.js";
 
 export { MAX_METADATA_FETCHES, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES, README_VARIANTS, MAX_URLS_PER_ENTRY, MAX_FETCHES_PER_RESOLUTION, MAX_RESOLUTIONS_PER_HOUR } from "./limits.js";
-import { fetchUrl, getLibraryDoc } from "./fetcher.js";
+import { fetchUrl, getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, normalisePyPiName, pypiNameError } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
@@ -102,6 +102,14 @@ export interface ResolveOutcome {
   /** True when the per-hour resolution cap refused this name before any fetch (L2) — so a
    *  caller running many names (`warm`) can tell "try later" from "not resolvable". */
   limited?: true;
+  /** PAR-744 (F-7) — true when `chosen`'s content is NOT new: either a 304 revalidation
+   *  (`doc.notModified`) or a stale-cache fallback because the network was unreachable
+   *  (`doc.staleNote`). `refresh.ts`'s resolved-entry branch uses this to decide whether a
+   *  re-resolution should drop the library's followed-page cache — the same distinction
+   *  `DocResult.notModified`/`staleNote` already give the direct-fetch path. Before this field
+   *  existed, `ResolveOutcome` carried no staleness signal at all, so every successful
+   *  re-resolution dropped followed pages unconditionally. */
+  unchanged?: true;
   /** The text the tool / CLI shows. */
   text: string;
 }
@@ -516,6 +524,7 @@ export async function resolvePackage(
       attempts,
       text: "",
     };
+    if (isDocUnchanged(doc)) out.unchanged = true;
     out.text = formatResolved(out);
     return out;
   }

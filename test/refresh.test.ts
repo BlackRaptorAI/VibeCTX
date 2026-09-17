@@ -329,17 +329,15 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     });
 
     /**
-     * Round 2 (test-auditor, F6) — a characterization test for the DISCLOSED (not fixed) 304
-     * case: `doc.staleNote === undefined` cannot distinguish a genuine fresh fetch from a 304
-     * revalidation whose content is byte-identical to what was already cached, so a refresh
-     * that changes NOTHING still drops the library's followed pages. Documented at length in
-     * both `src/cache.ts`'s `dropFollowedPageCache` doc comment and `src/refresh.ts`'s call
-     * site as a real, accepted cost (an offline read now reports the page unavailable rather
-     * than serving it flagged STALE) on what the same comments call the COMMON case for a
-     * scheduled full refresh. This test pins TODAY'S behaviour so the future item that adds a
-     * `fetcher.ts` `notModified` distinction has a tripwire showing exactly what changes.
+     * PAR-744 (F-7) — FIXES the DISCLOSED (round 2, test-auditor, F6) 304 case this test used
+     * to characterize: `doc.staleNote === undefined` alone could not distinguish a genuine
+     * fresh fetch from a 304 revalidation whose content is byte-identical to what was already
+     * cached, so a refresh that changed NOTHING still dropped the library's followed pages —
+     * the COMMON case for a scheduled full refresh against docs sites that mostly haven't
+     * changed. `fetcher.ts`'s `DocResult.notModified` now carries that distinction, and
+     * `refresh.ts`'s guard checks it alongside `staleNote`.
      */
-    it("characterization (disclosed, not a bug): a 304 revalidation — byte-identical content — still drops the followed-page cache", async () => {
+    it("a 304 revalidation — byte-identical content — does NOT drop the followed-page cache", async () => {
       writeCache("react", REACT_URL, "# React", '"etag-1"');
       writeCache("react", FOLLOWED_URL, "# Streaming");
       // Round 2 (test-auditor, F6a): the header check moved OUTSIDE the mock — fetchUrl wraps
@@ -351,13 +349,120 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       const out = await refreshToolText(registry, "reactjs");
 
       expect(fetchSpy.mock.calls[0][1]?.headers?.["if-none-match"]).toBe('"etag-1"'); // genuinely revalidated, not a cold fetch
-      expect(out).toBe(`react: refreshed from ${REACT_URL} (7 chars)`); // "# React" — unchanged
+      // security-architect round 1, L1: a 304 says so distinctly, not "refreshed" — the point
+      // of this item is that "unchanged" and "refreshed" are now different, visible outcomes.
+      expect(out).toBe(`react: unchanged (304 revalidated) from ${REACT_URL} (7 chars)`); // "# React" — unchanged
       expect(readCache("react", REACT_URL, 168)?.content).toBe("# React"); // byte-identical to before
-      // TODAY's behaviour, disclosed as a cost rather than fixed: the followed page is dropped
-      // even though nothing about the primary changed. If a future fetcher.ts change makes this
-      // assertion fail, that is the fix landing — update this test's expectation, don't just
-      // delete it (the same instruction test/retrieval.test.ts's own history follows for A6).
-      expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined();
+      // FIXED: nothing about the primary changed, so the followed page survives.
+      expect(readCache("react", FOLLOWED_URL, 168)?.content).toBe("# Streaming");
+    });
+
+    it("a genuine content change (a real 200, not a 304) still drops the followed-page cache", async () => {
+      // The sibling of the test above: proves the fix didn't just stop dropping ALWAYS.
+      writeCache("react", REACT_URL, "# React old", '"etag-1"');
+      writeCache("react", FOLLOWED_URL, "# Streaming");
+      stubFetch({ [REACT_URL]: "# React new" }); // a plain 200, no etag round-trip in play
+
+      const out = await refreshToolText(registry, "reactjs");
+
+      expect(out).toBe(`react: refreshed from ${REACT_URL} (11 chars)`);
+      expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new");
+      expect(readCache("react", FOLLOWED_URL, 168)).toBeUndefined(); // still dropped
+    });
+
+    /**
+     * PAR-744 (F-7) — the resolved-branch twin of the two tests above. Before this item,
+     * `ResolveOutcome` carried no staleness/notModified signal at all (disclosed at
+     * `refresh.ts:78-82`, round 1), so a re-resolution dropped followed pages unconditionally
+     * whenever it produced ANY document — including one that only reached a 304 or a stale
+     * cache fallback. `ResolveOutcome.unchanged` now carries the same distinction
+     * `DocResult.notModified`/`staleNote` give the direct-fetch path.
+     *
+     * Round 2 (code-reviewer, S1) — the ORIGINAL version of this test could pass for the wrong
+     * reason, in two independently MEASURED ways (mutation testing: patched, re-ran, restored):
+     * (1) an `expect` thrown INSIDE the stubbed `fetch` is swallowed by `fetchUrl`'s own
+     * try/catch into a plain network `miss` (`fetcher.ts`'s outer try/catch) rather than
+     * failing the test — the same lesson the 304 test above (F6a) already learned once; and
+     * (2) replacing the 304 with a 404 ALSO passed, because `getLibraryDoc`'s stale-cache
+     * fallback then sets `staleNote`, which sets `out.unchanged` through the OTHER half of
+     * `isDocUnchanged` — so the test asserted the right outcome without proving 304 was the
+     * reason. Both proofs are now OUTSIDE the mock, on the recorded call history, so a
+     * regression in either direction fails loudly instead of silently degrading to the sibling
+     * test below.
+     */
+    it("a re-resolution of a RESOLVED entry that only revalidates via 304 does NOT drop the followed-page cache", async () => {
+      // synthesizeCandidates (resolve.ts), homepage "https://hono.dev", no path, no repo:
+      // ["https://hono.dev/llms-full.txt", "https://hono.dev/llms.txt"] in that probe order —
+      // the primary this test revalidates is the FIRST of those, not HONO_URL (the second).
+      const HONO_PRIMARY = "https://hono.dev/llms-full.txt";
+      const resolvedHono = {
+        name: "hono",
+        urls: [HONO_URL],
+        resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+      };
+      const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+      writeCache("hono", HONO_PRIMARY, "# Hono unchanged", '"hono-etag-1"');
+      const followed = "https://hono.dev/followed.md";
+      writeCache("hono", followed, "# Followed page");
+      const fetchSpy = vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u === "https://registry.npmjs.org/hono/latest") {
+          return new Response(JSON.stringify({ homepage: "https://hono.dev" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (u === HONO_PRIMARY) return new Response(null, { status: 304 });
+        return new Response("not found", { status: 404 });
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const out = await refreshToolText(reg, "hono");
+
+      // The 304 path was genuinely taken — proved on the call history, where a throw can fail
+      // the test, not inside the mock, where it cannot (round 2, S1a).
+      const primaryCall = fetchSpy.mock.calls.find((c) => String(c[0]) === HONO_PRIMARY);
+      expect((primaryCall?.[1] as { headers?: Record<string, string> } | undefined)?.headers?.["if-none-match"]).toBe('"hono-etag-1"');
+      // The second candidate was never reached — proves the FIRST candidate's 304 is what
+      // produced the outcome, not a fall-through to a stale cache under a different URL
+      // (round 2, S1b: this is what a 404-instead-of-304 mutation would otherwise hide).
+      expect(fetchSpy.mock.calls.map((c) => String(c[0]))).not.toContain(HONO_URL);
+
+      expect(out).toMatch(/^hono: re-resolved via npm/);
+      expect(readCache("hono", HONO_PRIMARY, 168)?.content).toBe("# Hono unchanged");
+      expect(readCache("hono", followed, 168)?.content).toBe("# Followed page"); // survives
+    });
+
+    /**
+     * PAR-744 (F-7, code-reviewer round 1, S4) — the OTHER half of `isDocUnchanged` on the
+     * resolved-entry path: a re-resolution whose every candidate is unreachable, falling back
+     * to serving the existing stale cache (`doc.staleNote`), must ALSO keep followed pages —
+     * not just the 304 case above. Before this item this half was untested on the resolved
+     * branch (the 304 test above was the only thing exercising `out.unchanged` at all, and
+     * only by accident before round 2's fix).
+     */
+    it("a re-resolution of a RESOLVED entry that falls back to stale cache (network unreachable) does NOT drop the followed-page cache", async () => {
+      const HONO_PRIMARY = "https://hono.dev/llms-full.txt";
+      const resolvedHono = {
+        name: "hono",
+        urls: [HONO_URL],
+        resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+      };
+      const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+      writeCache("hono", HONO_PRIMARY, "# Hono old");
+      const followed = "https://hono.dev/followed.md";
+      writeCache("hono", followed, "# Followed page");
+      const fetchSpy = vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u === "https://registry.npmjs.org/hono/latest") {
+          return new Response(JSON.stringify({ homepage: "https://hono.dev" }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        return new Response("not found", { status: 404 }); // every candidate unreachable
+      });
+      vi.stubGlobal("fetch", fetchSpy);
+
+      const out = await refreshToolText(reg, "hono");
+
+      expect(out).toMatch(/^hono: re-resolved via npm/);
+      expect(readCache("hono", HONO_PRIMARY, 168)?.content).toBe("# Hono old"); // unchanged, served from cache
+      expect(readCache("hono", followed, 168)?.content).toBe("# Followed page"); // survives
     });
   });
 });

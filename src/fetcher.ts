@@ -9,8 +9,31 @@ export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 export interface DocResult {
   content: string;
   url: string;
+  /** PAR-744 (F-7) — true when this content is the SAME bytes already cached, confirmed by a
+   *  304 Not Modified revalidation rather than downloaded fresh. `refresh.ts` uses this
+   *  (alongside `staleNote`, see `isDocUnchanged` below) to decide whether a refresh actually
+   *  changed anything: a caller that drops a library's followed-page cache on every
+   *  "successful" refresh, without this distinction, drops it even when nothing changed (see
+   *  `dropFollowedPageCache`'s own doc comment in cache.ts). ETag-only (code-reviewer, round
+   *  1, S3): `fetchUrl` sends `if-none-match` and nothing else — no `if-modified-since` /
+   *  `last-modified` support exists anywhere in this codebase — so a docs site that serves no
+   *  `etag` can never produce a 304 here and still drops its followed pages on every refresh,
+   *  exactly as before this item. */
+  notModified?: true;
   /** Present when the network failed and cached content past its TTL was served. */
   staleNote?: string;
+}
+
+/** PAR-744 (F-7, code-reviewer round 1, N1) — the one predicate for "this `DocResult` is not
+ *  NEW content", used identically by both `refresh.ts` (guarding the direct-fetch drop) and
+ *  `resolve.ts` (deriving `ResolveOutcome.unchanged` for the resolved-entry drop), so the two
+ *  guards are structurally the same rule rather than two hand-written spellings that happen to
+ *  agree. True for a 304 revalidation (`notModified`) or a stale-cache fallback because the
+ *  network was unreachable (`staleNote`) — in both cases the primary document on disk was not
+ *  rewritten (see `dropFollowedPageCache`'s doc comment in cache.ts for why that is the
+ *  correct predicate, not "did the origin server confirm nothing changed"). */
+export function isDocUnchanged(doc: Pick<DocResult, "notModified" | "staleNote">): boolean {
+  return doc.notModified === true || doc.staleNote !== undefined;
 }
 
 const DEFAULT_TTL_HOURS = 168; // 7 days
@@ -276,7 +299,7 @@ export async function getLibraryDoc(
       });
       if (out.status === "not-modified" && cached) {
         touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
-        return { content: cached.content, url };
+        return { content: cached.content, url, notModified: true };
       }
       if (out.status === "ok" && out.body !== undefined) {
         writeCache(entry.name, url, out.body, out.etag);
@@ -343,7 +366,12 @@ export async function fetchLinkedPage(
   if (out.status === "too-large") return { status: "too-large" };
   if (out.status === "not-modified" && hit) {
     touchCache(library, url);
-    return { status: "ok", page: { content: hit.content, url } };
+    // PAR-744 (F-7, code-reviewer round 1, S5): no production caller reads this field today —
+    // `get-docs.ts`'s only consumer of a `LinkedPageResult` reads `.page.content`, never
+    // `.page.notModified`. Set anyway for `DocResult` symmetry with `getLibraryDoc`, so a
+    // future caller that DOES need "was this followed page actually re-fetched" does not have
+    // to add a fifth status variant to get it. Covered by `test/fetcher.test.ts`.
+    return { status: "ok", page: { content: hit.content, url, notModified: true } };
   }
   if (out.status === "ok" && out.body !== undefined) {
     writeCache(library, url, out.body, out.etag);
