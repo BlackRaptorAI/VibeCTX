@@ -789,9 +789,9 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-78 — decided 2026-09-17, executing A19 / PAR-728
+## D-79 — decided 2026-09-17, executing A19 / PAR-728
 
-- **D-78** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
+- **D-79** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
   `doctor.json`) so `list_libraries` and `get_docs` can surface it without re-running a probe on
   every call, and `DoctorReport` gains an optional `eviction` key with no schema bump.**
   **Premise check against the tree first:** A19's own problem statement ("the classification
@@ -833,5 +833,3 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   singleton.
   Ref: `src/doctor-store.ts` (new), `src/doctor.ts`, `src/list-libraries.ts`, `src/get-docs.ts`,
   `src/retrieval.ts` (A19 / PAR-728).
-
----
