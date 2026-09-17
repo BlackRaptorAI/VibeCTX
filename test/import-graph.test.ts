@@ -297,7 +297,12 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // real regression -- 0 edges with 34 nodes is the vacuous "resolver silently drops everything"
 // failure mode this whole non-vacuity block exists to catch, and a floor of merely "greater
 // than zero" would not.
-const MEASURED_EDGE_COUNT = 123;
+// A11/PAR-724 (security-architect round 1, S-1/S-2): +2, from 123 to 125 — two genuine new
+// dependencies, verified against `graph.edgeList` before updating this constant, not merely to
+// make the test pass: resolve.ts -> text.ts (clipText, to clean/clip `version` before it can
+// reach a rendered response) and server.ts -> package-names.ts (MAX_VERSION_LENGTH, to bound
+// the version schema param).
+const MEASURED_EDGE_COUNT = 125;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

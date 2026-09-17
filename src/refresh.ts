@@ -84,7 +84,7 @@ export async function refreshToolText(registry: Registry, library?: string, opts
         invalidateIndex(entry.name);
         const out = await resolvePackage(entry.name, { ecosystem: entry.resolved.source });
         if (out.ok && out.entry) {
-          if (!installResolvedEntry(registry, out.entry)) {
+          if (!installResolvedEntry(registry, out.persistedEntry ?? out.entry)) {
             results.push(
               `${entry.name}: not replaced — "${out.entry.name}" is a curated entry (default, config or alias); a resolved record cannot override it`,
             );

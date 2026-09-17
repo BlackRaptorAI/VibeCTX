@@ -637,6 +637,50 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `src/limits.ts`, `src/resolve.ts`, `src/retrieval.ts`, `src/project-deps.ts`,
   `src/get-docs.ts`, `src/warm.ts`, `src/server.ts` (A11 / PAR-724).
 
+  **Round 1 review (code-reviewer + security-architect), two blocking findings fixed before
+  merge:**
+  - **security-architect S-1/S-2 (BLOCKING):** `version` — an MCP tool argument or a
+    manifest-captured string, neither trusted — reached a URL template
+    (`versionReadmeCandidates`'s `raw.githubusercontent.com/<owner>/<repo>/refs/tags/<tag>/…`)
+    and a rendered response (`resolvePackage`'s attempt lines) with no shape check: a `version`
+    containing `../../../../evil/repo/HEAD` escaped the intended GitHub path via ordinary URL
+    dot-segment normalisation, and a `version` containing a newline could forge a fake second
+    response line, the exact A17/S-1 class one interpolation over. Fixed with one shared gate,
+    `VERSION_SHAPE` (`src/package-names.ts`, D-48: one definition, not a local variant per
+    module) — alnum-first, then alnum/`.`/`+`/`_`/`-` only, which makes both attacks
+    structurally impossible (no `/`, `\`, or control character can ever appear) rather than
+    merely encoded or cleaned away. A version failing the shape is refused for fetching but
+    still named, safely clipped, in a non-silent note. Belt-and-braces: `versionReadmeCandidates`
+    itself re-proves the built URL still starts with the intended prefix after a `new URL()`
+    round-trip, and the Poetry manifest branch (the one parser whose old range-character
+    denylist did not exclude `/`) now shares the same gate.
+  - **code-reviewer B1 (BLOCKING):** a version-pinned resolution replaced the library's live
+    registry entry AND `resolved.json` with the version-tag URL first in `urls`, so a LATER,
+    plain `get_docs("<lib>")` (no version) would resolve straight to it and silently serve the
+    pinned document — D-50's rule violated in the other direction ("asked for latest, got a
+    pin"). Fixed by splitting what serves THIS call from what gets installed/persisted:
+    `ResolveOutcome.entry` keeps the full candidate list (so the document this call just cached
+    is actually reachable); a new `ResolveOutcome.persistedEntry`, set only when it differs,
+    carries the unversioned candidates alone and is what every caller now installs
+    (`installResolvedEntry(registry, out.persistedEntry ?? out.entry)`) and what
+    `saveResolvedEntry` writes. Regression test: resolve a version, then call `get_docs` again
+    with no version in the same process — the second call must not carry the pinned document.
+  - **code-reviewer B2 (BLOCKING):** re-resolving an already-resolved entry for a version could
+    fail outright (network down, rate-limited) without ever checking anything, and the response
+    still said "No document found for version X" — an affirmative claim the run never earned.
+    Fixed with a distinct, honest note for that case ("Could not check version X — the
+    resolution limit was reached / the check failed; showing the previously cached document
+    instead"), and `offline` is now honoured on this branch too (should-fix #4, same round).
+  - **code-reviewer B3:** this entry originally claimed a regression test proved the
+    cache-isolation reasoning above before that test existed. It exists now
+    (`test/resolve.test.ts`, "cache isolation across pinned versions"); the claim is no longer
+    aspirational.
+  - **should-fix, applied:** the npm `security-holder` placeholder is no longer counted toward
+    A16's existence claim (it is a real, registered record, not a genuine 404); the thin-match
+    comment no longer claims a mitigation that cannot apply at that exact budget.
+  Ref (round 1 fixes): `src/package-names.ts`, `src/resolve.ts`, `src/get-docs.ts`,
+  `src/project-deps.ts`, `src/server.ts`.
+
 ---
 
 ## D-75 — decided 2026-09-17, executing A16 / PAR-725
@@ -679,5 +723,11 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   file instead, with a visible "newer schemaVersion" note — the honest failure mode.
   Ref: `src/fetcher.ts`, `src/resolve.ts`, `src/project-store.ts`, `src/warm.ts`,
   `src/server.ts` (A16 / PAR-725).
+
+  **Round 1 review, one should-fix applied:** npm's `security-holder` placeholder (a real,
+  registered record — a taken-down name parked on npm's own security-holder account, not a
+  genuine 404) is no longer counted toward the "does not exist" claim — see D-74's own round-1
+  addendum for the full history; this line exists here because it is squarely an A16 claim-
+  discipline concern, not an A11 fetch-path one.
 
 ---

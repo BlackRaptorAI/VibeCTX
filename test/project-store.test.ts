@@ -119,6 +119,12 @@ describe("project record store (<cacheRoot>/projects/<hash>.json, PAR-656)", () 
   });
 });
 
+describe("A16/PAR-725 (code-reviewer round 1, should-fix #6): the schema version bump is pinned by an exact value, not only by reference to itself", () => {
+  it("PROJECT_RECORD_SCHEMA_VERSION is 2 — every other assertion in this suite compares against the constant, which would not catch an accidental revert or an unintended bump", () => {
+    expect(PROJECT_RECORD_SCHEMA_VERSION).toBe(2);
+  });
+});
+
 describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHER one is protected", () => {
   it("lower: ignored on read, replaced on write, no note", () => {
     mkdirSync(join(dir, "projects"), { recursive: true });

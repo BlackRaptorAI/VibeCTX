@@ -238,7 +238,7 @@ async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts
   const out = await resolvePackage(dep.name, { ecosystem: dep.ecosystem, version: dep.version, now: opts.now, warn: opts.warn });
   if (out.ok && out.entry) {
     // S2: a resolved entry never displaces a curated one; the lookup above missed, so this installs.
-    installResolvedEntry(registry, out.entry);
+    installResolvedEntry(registry, out.persistedEntry ?? out.entry);
     // A11/PAR-724 (D-50): a version was requested but no versioned document was found — the
     // fallback-to-latest must be stated here too, not just in get_docs' own stamp, since this
     // row is the one place a `warm` run's own text ever reports it.

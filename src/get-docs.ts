@@ -176,23 +176,42 @@ export async function getDocsToolText(
     }
     // S2: a resolved entry never replaces a curated one; if a curated entry owns the name
     // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
-    entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
+    entry = installResolvedEntry(registry, out.persistedEntry ?? out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
     resolutionNote = provenanceLine(registry, library, out);
     if (version !== undefined) versionContext = { requested: version, matched: out.versionMatched === true };
   } else if (version !== undefined && entry.resolved !== undefined) {
-    // A11/PAR-724 — an already-resolved (non-curated) entry gets re-resolved for the pinned
-    // version, the same D-11-established pattern `warm.ts` already uses to re-resolve for a
-    // different ecosystem: this entry's own provenance came from `resolvePackage` in the first
-    // place, so it has an ecosystem + name to re-resolve against.
-    const out = await resolvePackage(library, { version, ecosystem: entry.resolved.source });
-    if (out.ok && out.entry) {
-      entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, entry.name) ?? out.entry);
-      versionContext = { requested: version, matched: out.versionMatched === true };
+    if (rest.offline) {
+      // A11/PAR-724 (code-reviewer round 1, #4) — `offline` means "never touch the network"
+      // on this branch too, exactly as the unknown-name branch above already honours it;
+      // re-resolving for a version is itself a network operation.
+      versionContext = {
+        requested: version,
+        matched: false,
+        note: `Version ${clipText(version, MAX_STAMP_FIELD_CHARS)} was requested, but this call is offline — version-matching needs the network. Showing the cached document instead.`,
+      };
     } else {
-      // The re-resolution itself failed outright (network down, rate-limited): degrade to the
-      // entry's existing cached document rather than losing the answer — still non-silent about
-      // the version having gone unmatched (D-50).
-      versionContext = { requested: version, matched: false };
+      // A11/PAR-724 — an already-resolved (non-curated) entry gets re-resolved for the pinned
+      // version, the same D-11-established pattern `warm.ts` already uses to re-resolve for a
+      // different ecosystem: this entry's own provenance came from `resolvePackage` in the
+      // first place, so it has an ecosystem + name to re-resolve against.
+      const out = await resolvePackage(library, { version, ecosystem: entry.resolved.source });
+      if (out.ok && out.entry) {
+        entry = installResolvedEntry(registry, out.persistedEntry ?? out.entry) ? out.entry : (resolveLibrary(registry, entry.name) ?? out.entry);
+        versionContext = { requested: version, matched: out.versionMatched === true };
+      } else {
+        // A11/PAR-724 (code-reviewer round 1, B2) — the re-resolution itself failed outright
+        // (network down, rate-limited): this is NOT "checked and found no versioned document"
+        // — nothing was actually checked. Rendering the ordinary fallback wording here would
+        // be an affirmative claim the run never earned, worse than the silent substitution
+        // D-50 forbids. A distinct, honest note instead: what happened, and that the cached
+        // document (if any) is what is being served.
+        const reason = out.limited ? "the resolution limit was reached" : "the check failed";
+        versionContext = {
+          requested: version,
+          matched: false,
+          note: `Could not check version ${clipText(version, MAX_STAMP_FIELD_CHARS)} — ${reason}; showing the previously cached document instead.`,
+        };
+      }
     }
   } else if (version !== undefined && entry.resolved === undefined) {
     // A11/PAR-724 — a curated (default-registry or config) entry's `urls` are hand-picked doc
@@ -592,11 +611,18 @@ export async function getDocsDetailed(
   // entirely, never rendered as a partial (mid-URL) fragment — the same lesson A17's B2 finding
   // established for the fetched-at date, applied here to the stamp as a whole. D-43's ordering
   // is now genuinely: note first, stamp only if there's room left for the WHOLE thing.
-  // A11/PAR-724: `versionBanner` is deliberately NOT included here, the same D-43 "answer
-  // outranks the accounting" call this closure already makes for `noteBlock` — the thin-match
-  // note is the one thing worth keeping at this budget; a version-fallback sentence competes
-  // with it for the same scarce room `thinMatchNote` itself needs. `matchedVersion` (when set)
-  // still survives inside `stamp` below, exactly as `docStamp` carries it everywhere else.
+  // A11/PAR-724 (code-reviewer round 1, should-fix #2): `versionBanner` is deliberately NOT
+  // included here, the same D-43 "answer outranks the accounting" call this closure already
+  // makes for `noteBlock` — the thin-match note is the one thing worth keeping at this budget;
+  // a version-fallback sentence competes with it for the same scarce room `thinMatchNote`
+  // itself needs. Accepted, narrow gap, stated plainly rather than left to look mitigated: a
+  // versioned request that fell back to latest and lands on THIS path reports the fallback
+  // nowhere — `versionBanner` is the only place that states it, and `stamp` below carries no
+  // version field either in that exact case (`stampFacts.version` is unset whenever
+  // `versionContext.matched` is false, which is the only time `versionBanner` would have been
+  // non-empty). The response is still honest (no false claim is made), just silent on this one
+  // fact at this one budget size — a smaller, accepted instance of the general "the cap always
+  // wins" rule this file lives by everywhere else.
   const thinMatch = (what: string, matchedCount: number): GetDocsOutcome => {
     const note = thinMatchNote(what, matchedCount);
     const stampRoom = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);

@@ -1,6 +1,6 @@
 import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { normalisePyPiName, npmNameError, pypiNameError } from "./package-names.js";
+import { normalisePyPiName, npmNameError, pypiNameError, VERSION_SHAPE } from "./package-names.js";
 import { cleanText } from "./text.js";
 
 // Re-exported so existing importers (test/project-deps.test.ts among them) keep pinning the
@@ -498,17 +498,18 @@ function unquoteTomlString(value: string): string | undefined {
   return undefined;
 }
 
-/** Any Poetry range-constraint character (`^1.2`, `~1.2`, `>=1.2`, `*`, a comma-separated
- *  multi-constraint) — its ABSENCE from a plain quoted string is what makes that string an
- *  exact pin rather than a range (A11/PAR-724). */
-const POETRY_RANGE_CHARS = /[\^~<>=*,!]/;
-
 /** A11/PAR-724 — the exact version pyproject.toml pins per dependency, from the same dependency
  *  tables `parsePyprojectDeps` reads: PEP 508 `==` pins (via `requirementVersion`) for
  *  `[project].dependencies` / optional-dependencies / dependency-groups, and a plain quoted
- *  string with no range-constraint character (`django = "4.2.3"`, not `django = "^4.2"`) for
- *  Poetry's own table syntax. First occurrence across all tables wins, matching
- *  `parsePyprojectDeps`'s own de-duplication order. */
+ *  string matching `VERSION_SHAPE` for Poetry's own table syntax. `VERSION_SHAPE`
+ *  (`package-names.ts`) is both the range check (`django = "4.2.3"`, not `django = "^4.2"` —
+ *  none of Poetry's range operators `^ ~ < > = * ,` are in its allowed alphabet) and the
+ *  security gate every version/ref is held to before it can reach a URL or a rendered response
+ *  (security-architect, A11/PAR-724 round 1, S-2): before this, the ONLY check here was a
+ *  range-operator denylist that did not exclude `/`, so a Poetry version string of
+ *  `"../../../../evil/repo/HEAD"` passed it and reached `resolvePackage`'s GitHub tag-URL
+ *  builder as a literal path segment. One shared shape check closes both gaps at once. First
+ *  occurrence across all tables wins, matching `parsePyprojectDeps`'s own de-duplication order. */
 export function parsePyprojectVersions(text: string): Map<string, string> {
   const out = new Map<string, string>();
   const addPep508 = (spec: string) => {
@@ -524,7 +525,7 @@ export function parsePyprojectVersions(text: string): Map<string, string> {
       if (inlineTableKeys(value).some((k) => POETRY_SOURCE_KEYS.has(k))) continue; // R2: local / VCS source
       const name = requirementName(key);
       const str = unquoteTomlString(value);
-      if (name && str !== undefined && str.length > 0 && !POETRY_RANGE_CHARS.test(str) && !out.has(name)) out.set(name, str);
+      if (name && str !== undefined && VERSION_SHAPE.test(str) && !out.has(name)) out.set(name, str);
     }
   }
   return out;
@@ -706,8 +707,11 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
   const readRels = new Set<string>();
   const note = (s: string) => notes.push(cleanText(s));
 
-  // A11/PAR-724 — `versions` is keyed by the RAW name as it appeared in the manifest (before
-  // PyPI's PEP 503 fold), matching what each parser's own version map returns.
+  // A11/PAR-724 — `versions` is keyed by whatever `names` itself holds: the raw package.json
+  // key for npm, but the PEP 503-FOLDED name for PyPI (both `parseRequirementsTxt` and
+  // `parsePyprojectVersions` build their maps from `requirementName`'s own folded output, the
+  // same value `names` carries) — so the lookup below always agrees with what `names` holds,
+  // per ecosystem, rather than needing its own fold.
   const addAll = (names: string[], ecosystem: DependencyEcosystem, source: string, versions?: Map<string, string>) => {
     let invalid = 0;
     for (const raw of names) {

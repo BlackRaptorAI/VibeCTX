@@ -9,6 +9,7 @@ import { listLibrariesText } from "./list-libraries.js";
 import { doctorToolText } from "./doctor.js";
 import { resolveToolText } from "./resolve.js";
 import { warmToolText } from "./warm.js";
+import { MAX_VERSION_LENGTH } from "./package-names.js";
 import { shouldAutowarm, startAutowarm, type AutowarmSummary } from "./autowarm.js";
 import { sweepCacheTempFiles } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
@@ -60,7 +61,14 @@ export function buildServer(registry: Registry): McpServer {
           .enum(["sections", "snippets"])
           .optional()
           .describe('"sections" (default) for prose, "snippets" for code blocks only. Needs a topic.'),
-        version: z.string().optional().describe("Match documentation to this exact version (e.g. the version your manifest pins) — falls back to the latest available document if none is found, and says so"),
+        // A11/PAR-724 (security-architect S-1) — bounded here as defense-in-depth; the real
+        // shape gate (VERSION_SHAPE, package-names.ts) lives inside resolvePackage itself,
+        // since `warm` also feeds a version in from a manifest file, bypassing this schema.
+        version: z
+          .string()
+          .max(MAX_VERSION_LENGTH)
+          .optional()
+          .describe("Match documentation to this exact version (e.g. the version your manifest pins) — falls back to the latest available document if none is found, and says so"),
       },
     },
     async ({ library, topic, maxTokens, mode, version }) =>

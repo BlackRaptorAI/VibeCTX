@@ -617,10 +617,11 @@ describe("S1 — no super-linear parsing: 1 MiB pathological lines finish inside
       new Set([
         "\\r\\n?", // fixed width
         "\\\\\\n\\s*", // anchored on a literal backslash-newline
-        // A11/PAR-724: three more, all a single character class (no nested quantifier, no
+        // A11/PAR-724: two more, both a single character class (no nested quantifier, no
         // alternation) applied linearly, the same class this tripwire already accepts —
+        // POETRY_RANGE_CHARS was removed (security-architect S-2): the Poetry version branch
+        // now shares VERSION_SHAPE (imported from package-names.ts, so no new literal here).
         "^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$", // EXACT_SEMVER — anchored, one optional group
-        "[\\^~<>=*,!]", // POETRY_RANGE_CHARS — a bare character class, no quantifier at all
         "^[A-Za-z0-9][A-Za-z0-9.+!_-]*$", // the exact-version-token shape in requirementVersion
       ]),
     );

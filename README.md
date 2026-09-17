@@ -627,10 +627,12 @@ variants), then — only if none of those served — the other ecosystem's candi
 stops as soon as one document is usable (in practice the worst case is 18, since an
 ecosystem held back as README-only has no llms.txt probes). A version-pinned resolution
 adds one more metadata fetch and up to 8 more README probes (2 tag spellings × 4
-filenames), raising the ceiling to **43 requests**. Metadata responses over 8 MiB are
-treated as absent; documents keep the normal 25 MiB cap. A process starts at most **100
-resolutions per hour**; beyond that, unknown names get a "resolution limit reached" line
-until the window slides (pin the library in config if you hit it).
+filenames) for the preferred ecosystem only — the version-tag candidates are never tried
+against a fallback ecosystem — raising the ceiling to **43 requests** and the reachable
+worst case to 35 (2 + 1 + 20 + 12). Metadata responses over 8 MiB are treated as absent;
+documents keep the normal 25 MiB cap. A process starts at most **100 resolutions per
+hour**; beyond that, unknown names get a "resolution limit reached" line until the window
+slides (pin the library in config if you hit it).
 
 **Where it persists.** Successful resolutions are written to `resolved.json` in the
 cache directory (`~/.vibectx/`, or `VIBECTX_CACHE_DIR`) via a temp file and rename —
