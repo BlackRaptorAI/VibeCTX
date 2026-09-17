@@ -32,11 +32,21 @@ export const TEMP_FILE_PATTERN = /\.\d+\.(\d+)\.tmp$/;
 export const SWEEP_MIN_AGE_MS = 60_000;
 
 /** Write `path` via a temp file in the same directory and an atomic rename. The temp file is
- *  removed if the write fails. */
-export function writeAtomic(path: string, data: string): void {
+ *  removed if the write fails.
+ *
+ *  `opts.mode` (PAR-791): the permission bits the TEMP file is created with — omitted, the
+ *  default `writeFileSync` behaviour is unchanged (0o666 minus umask), exactly as every
+ *  caller before this option existed. A caller that passes one (`activity-log.ts` passes
+ *  `0o600`) gets it self-healing across every future write: `renameSync` replaces whatever
+ *  permissions `path` already had with the temp file's, so an existing world-readable file
+ *  from before the caller started passing `mode` is corrected on its very next write, not
+ *  merely held steady. Only affects file CREATION (POSIX `open()`'s mode is ignored when the
+ *  path already exists) — moot here, since `tempPathFor` names each temp file uniquely
+ *  (`<pid>.<ms>`), so it is always newly created. */
+export function writeAtomic(path: string, data: string, opts: { mode?: number } = {}): void {
   const tmp = tempPathFor(path);
   try {
-    writeFileSync(tmp, data, "utf8");
+    writeFileSync(tmp, data, { encoding: "utf8", mode: opts.mode });
     renameSync(tmp, path);
   } catch (e) {
     rmSync(tmp, { force: true });
