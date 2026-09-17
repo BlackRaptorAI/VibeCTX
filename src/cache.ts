@@ -4,135 +4,25 @@ import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
 import { MAX_CONFIG_VALUE_CHARS, MAX_DISPLAY_PATH_CHARS } from "./config.js";
 import { clipText } from "./text.js";
-// Carried forward, not fixed here (F5, security-architect A4 round 2) — outside A4's
-// authorised scope (`src/cache.ts` + tests): `cache-evict.ts`'s `resolveRecency` reads the
-// same `.meta.json` files with a laxer check than `toCacheMeta` below (`typeof === "string"`
-// plus `Number.isFinite`, no shape or length bound), and its comments at `cache-evict.ts:23`
-// and `:272` still assert the N-6 behaviour A4 superseded ("an unparsable fetchedAt reads as
-// stale") — now false for `readCache`. LATENT, not live: `EvictedDocument.fetchedAt`
-// (`cache-evict.ts:396`) is populated but rendered nowhere today (`doctor.ts:317-320` prints
-// only `library`/`document`); it becomes live the moment a future change renders it.
 import { noteCacheWrite } from "./cache-evict.js";
+import {
+  type CacheMeta,
+  toCacheMeta,
+  readMetaFile,
+  urlSlug,
+  libDirName,
+  metaMatchesSlug,
+  validEtag,
+  MAX_META_FILE_BYTES,
+} from "./cache-meta.js";
 
-export interface CacheMeta {
-  url: string;
-  fetchedAt: string; // ISO
-  etag?: string;
-}
-
-function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-/** The same strict UTC-instant SHAPE `project-store.ts` and `search-index.ts` use for their
- *  own `warmedAt` / `fetchedAt` — `Date.parse` alone takes a string carrying a bidi override
- *  (e.g. U+202E), and this file's `fetchedAt` is rendered verbatim in the list_libraries
- *  footer and in every get_docs `STALE:` note.
- *
- *  NOT byte-identical to those two, and that gap is itself a finding, not a design choice:
- *  the fractional-seconds group here is bounded to 9 digits (nanosecond precision — already
- *  past anything real `toISOString` produces), because `Number.isFinite(Date.parse(…))` is
- *  not a backstop against length — MEASURED, `Date.parse("2020-01-01T00:00:00." + "1".repeat(10_000) + "Z")`
- *  returns a finite timestamp. `project-store.ts:194` and `search-index.ts:197` still carry
- *  the unbounded `(\.\d+)?` (code-reviewer, A4 round 2, S2) — `project-store.ts`'s `warmedAt`
- *  is the more exposed of the two, since it renders through `cleanText`
- *  (`project-deps.ts:119-121`), which strips control/bidi but does not clip length. Carried
- *  forward as a follow-up item, not fixed here: those two files are outside A4's authorised
- *  scope (`src/cache.ts` + tests). */
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
-
-/** Longest `url` this file will hold — generous, not load-bearing (see `validMetaUrl`). */
-const MAX_META_URL = 2048;
-/** Longest `etag` — an HTTP validator token, not free text; well past anything real. */
-const MAX_META_ETAG = 512;
-/** Round 2 (security-architect, R3) — longest `.meta.json` file `dropFollowedPageCache` will
- *  read before parsing it. A real one is a URL, an ISO instant and an optional etag; this is
- *  generous headroom over `MAX_META_URL` + `MAX_META_ETAG` plus JSON overhead, not a measured
- *  figure. */
-const MAX_META_FILE_BYTES = 4096;
-/** Deliberately a STRICT SUBSET of RFC 9110 §5.5's field-value grammar (`field-vchar = VCHAR
- *  / obs-text`, `obs-text = %x80-FF`, leading/trailing whitespace excluded) — printable ASCII
- *  only, no HTAB, no high-byte `obs-text`, no leading or trailing space (security-architect,
- *  A4 round 2: confirmed against the RFC text). Neither exclusion is exploitable — a
- *  nonconforming server's etag is dropped, costing one extra full refetch, never a wrong
- *  answer — and every etag actually seen in this codebase (`test/fetcher.test.ts:391-422`:
- *  `"abc123"`, `"v1"`, `"v2"`) is well inside it.
- *
- *  A hostile `etag` outside this set makes `fetch` throw at header construction the moment it
- *  is next sent as `If-None-Match` (`fetcher.ts:131`) — `fetchUrl`'s try/catch turns that into
- *  a `miss`, but the SAME corrupt etag is re-read from this file on every following attempt
- *  (including `vibectx refresh`'s `forceRefresh`, which still reads the cached etag first), so
- *  tolerating the throw is not tolerating its consequence: the entry pins stale forever and is
- *  misreported as "all candidate URLs unreachable" — MEASURED against a real local server
- *  (code-reviewer, A4 round 2, S1). Validating the shape here, once, is cheaper than that
- *  failure mode. `+` rather than `*`: an etag is either absent or a real token, never present
- *  as an empty string, so the length check below has no empty-string case left to catch. */
-const ETAG_SHAPE = /^[\x21-\x7e]+$/;
-
-function validMetaUrl(value: unknown): value is string {
-  if (typeof value !== "string" || value.length === 0 || value.length > MAX_META_URL) return false;
-  try {
-    new URL(value);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Shared by `toCacheMeta` (read) and `writeCache` (write) — one rule, checked on both sides
- *  of the file, so `toCacheMeta`'s claim that it "only asks whether the file is what
- *  `writeCache` would have produced" is actually true rather than aspirational (write-side
- *  asymmetry, security-architect, A4 round 2). Before this, `writeCache` stored whatever
- *  `res.headers.get("etag")` returned verbatim: never the newline case (an HTTP response
- *  header value cannot itself carry one), but a nonconforming server's high-byte `obs-text` or
- *  an oversized value would still have reached disk, bloated the size cap, and been silently
- *  dropped again on the very next read. */
-function validEtag(value: string | undefined): value is string {
-  return value !== undefined && value.length <= MAX_META_ETAG && ETAG_SHAPE.test(value);
-}
-
-/**
- * Validate one persisted `.meta.json` (A4, PAR-717) — every other store re-validates every
- * field on read because the cache directory is a trust boundary (`resolved-store.ts`,
- * `project-store.ts`, `search-index.ts`); this was the one that did not. ANY failure drops
- * the whole record, so `readCache` reports the entry uncached exactly as a missing file
- * would, rather than serving a document under a meta this process cannot trust:
- *
- *   url        a parseable URL string, ≤ 2048 characters. Not held to the fetch-time host
- *              policy (`sanitizeRemoteUrl`'s forbidden-host check) — an entry cached under
- *              `allowInternalHosts: true` (D-47) legitimately has an internal-host URL here,
- *              and that trust decision was already made when the document was written; this
- *              function only asks whether the file is what `writeCache` would have produced.
- *   fetchedAt  a strict ISO-8601 UTC instant — the one field this file renders verbatim
- *   etag       ≤ 512 characters and HTTP field-value characters only (see `ETAG_SHAPE`) when
- *              present. Dropped alone, not the whole record: it is a revalidation hint (sent
- *              back as `If-None-Match`), not part of the entry's identity — but a shape check
- *              is not optional here (see `ETAG_SHAPE`'s comment for the stale-forever failure
- *              mode a merely-length-bounded etag still allows).
- */
-export function toCacheMeta(raw: unknown): CacheMeta | undefined {
-  if (!isRecord(raw)) return undefined;
-  if (!validMetaUrl(raw.url)) return undefined;
-  if (typeof raw.fetchedAt !== "string" || !ISO_INSTANT.test(raw.fetchedAt) || !Number.isFinite(Date.parse(raw.fetchedAt))) {
-    return undefined;
-  }
-  const meta: CacheMeta = { url: raw.url, fetchedAt: raw.fetchedAt };
-  if (typeof raw.etag === "string" && validEtag(raw.etag)) meta.etag = raw.etag;
-  return meta;
-}
-
-/** Parse and validate one `.meta.json`; `undefined` for anything unreadable, truncated,
- *  invalid JSON, wrong-shaped, or carrying a hostile `fetchedAt` (A4's four corruption
- *  classes) — never throws. */
-function readCacheMeta(metaPath: string): CacheMeta | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(metaPath, "utf8"));
-  } catch {
-    return undefined;
-  }
-  return toCacheMeta(parsed);
-}
+// D-71 (PAR-749) moved the shared validator, the collision-resistant `urlSlug`/`libDirName`
+// transforms and the meta/slug provenance check into `./cache-meta.ts` — the one module both this file
+// and `cache-evict.ts` import it from, so neither has to import the other for it. Re-exported
+// here for existing callers (`toCacheMeta`, `CacheMeta`, `urlSlug` are part of this module's
+// public surface and other files/tests import them from `cache.js`).
+export type { CacheMeta };
+export { toCacheMeta, urlSlug, libDirName };
 
 export interface CacheHit {
   content: string;
@@ -312,18 +202,18 @@ export function cacheRoot(opts: CacheRootOptions = {}): string {
  *  value rather than one `cacheRoot()` call proving a root a second, later call re-resolves.
  *  `cacheRoot()` is memoised (`resolvedDefaultRoot`) so the two calls agree in practice, but
  *  that agreement is an invariant of `cacheRoot()`'s implementation, not a property this
- *  function's callers should have to depend on. */
+ *  function's callers should have to depend on.
+ *
+ *  D-71 (PAR-749): the directory name itself is `libDirName(library)` — folded AND hash-
+ *  suffixed, so two library names that fold to the same characters (`foo.bar` / `foo_bar`) no
+ *  longer share a directory. */
 function libDirIn(root: string, library: string): string {
   // One directory per library; page files keyed by a slug of their URL.
-  return join(root, library.replace(/[^a-z0-9_-]/gi, "_"));
+  return join(root, libDirName(library));
 }
 
 function libDir(library: string): string {
   return libDirIn(cacheRoot(), library);
-}
-
-export function urlSlug(url: string): string {
-  return url.replace(/[^a-z0-9]/gi, "_").slice(0, 120);
 }
 
 export function readCache(
@@ -332,19 +222,29 @@ export function readCache(
   ttlHours: number,
 ): CacheHit | undefined {
   const dir = libDir(library);
-  const contentPath = join(dir, `${urlSlug(url)}.md`);
-  const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
+  const slug = urlSlug(url);
+  const contentPath = join(dir, `${slug}.md`);
+  const metaPath = join(dir, `${slug}.meta.json`);
   // Kept even though both branches below also guard their own read (N1, code-reviewer):
   // without this pair, an ordinary miss (no file at all — the overwhelming common case)
   // would fall through into the same try/catch as real corruption, which is still correct
   // but loses the distinction a future diagnostic would want to draw between "nothing here"
   // and "something here this process cannot trust".
   if (!existsSync(contentPath) || !existsSync(metaPath)) return undefined;
-  const meta = readCacheMeta(metaPath);
+  const meta = readMetaFile(metaPath);
   // A4 supersedes N-6: a bad `fetchedAt` used to read as stale-but-served (ageMs went NaN,
   // and `!(NaN < x)` is true). It now drops the whole meta, so the entry reads as uncached —
   // Gate 3's rule for all four corruption classes, not just this one field.
   if (!meta) return undefined;
+  // D-71 (PAR-749, Root 1) — the read-side verification `readCache` never did: a folded slug
+  // is a lookup key, not proof of identity, and before this a collision (or a foreign file
+  // planted under a name-shaped slug) served ONE document's content under ANOTHER's name,
+  // silently, with a meta that passed every A4 check. `urlSlug` is now collision-RESISTANT
+  // (D-71 — see its own comment for what that does and doesn't guarantee), which already makes
+  // an accidental fold collision astronomically unlikely; THIS check is what actually makes
+  // serving the wrong document impossible regardless: a meta whose own `url` does not match
+  // the URL actually requested is not this entry, whatever its file name says.
+  if (meta.url !== url) return undefined;
   let content: string;
   try {
     content = readFileSync(contentPath, "utf8");
@@ -379,10 +279,14 @@ export function touchCache(library: string, url: string): void {
   const dir = libDir(library);
   const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
   if (!existsSync(metaPath)) return;
-  const meta = readCacheMeta(metaPath);
+  const meta = readMetaFile(metaPath);
   // Best effort (D-13): a meta this process cannot trust has nothing to refresh. The next
   // `readCache` reports the entry uncached and the next fetch writes a fresh, valid meta.
   if (!meta) return;
+  // D-71 (PAR-749, Root 1) — same verification as `readCache`: a meta whose own `url` does
+  // not match the URL this call was asked to refresh is not this entry, whatever the file
+  // name says. Refreshing it anyway would extend the TTL of a mismatched record.
+  if (meta.url !== url) return;
   meta.fetchedAt = new Date().toISOString();
   writeAtomic(metaPath, JSON.stringify(meta, null, 2));
 }
@@ -408,8 +312,9 @@ export function writeCache(
 ): void {
   const dir = libDir(library);
   mkdirSync(dir, { recursive: true });
-  const contentPath = join(dir, `${urlSlug(url)}.md`);
-  const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
+  const slug = urlSlug(url);
+  const contentPath = join(dir, `${slug}.md`);
+  const metaPath = join(dir, `${slug}.meta.json`);
   // validEtag, not a bare passthrough (write-side asymmetry, security-architect A4 round 2):
   // `etag` here is `res.headers.get("etag")`, already normalised by the Fetch spec so it can
   // never carry a newline — but a nonconforming server's high-byte obs-text or an oversized
@@ -502,7 +407,7 @@ export function writeCache(
  * `<slug>.meta.json` pairs, its slug not one of `keepUrls`', AND (round 2, security-architect,
  * C2) its `.meta.json` half must exist, be no larger than `MAX_META_FILE_BYTES` (R3 — the same
  * `Stats` the existence check already paid for), pass the SAME validation `readCache` requires
- * (`readCacheMeta`/`toCacheMeta`, A4's four corruption classes), AND (round 4, code-reviewer,
+ * (`readMetaFile`/`toCacheMeta`, A4's four corruption classes), AND (round 4, code-reviewer,
  * SF-C — closing security-architect's N1 in full, not just its empty-slug instance) have a
  * `url` field that `urlSlug` maps back to the SAME slug the filename carries — the actual
  * proof that this is the file `writeCache` produced for that URL, not merely A file that
@@ -512,19 +417,22 @@ export function writeCache(
  * apply here: `TEMP_FILE_PATTERN` matches neither suffix). This bounds a `VIBECTX_CACHE_DIR`
  * aimed at a real directory this tool does not otherwise own: only files this tool itself
  * wrote — proven, not merely name-shaped — are deleted. `library` itself is also refused when
- * empty, above, since `libDirIn(root, "")` would otherwise collapse the scan to `root` itself.
+ * empty, above: `libDirName("")` is no longer able to collapse the scan to `root` (D-71 gave
+ * it a non-empty hash suffix regardless of input), but the guard is kept as the documented
+ * contract rather than an implementation accident.
  *
- * NOT INJECTIVE, disclosed rather than fixed here (round 2, security-architect, second-order
- * note; round 3, test-auditor, characterization test added — see `test/cache.test.ts`):
- * `libDirIn`'s `library → directory` mapping folds distinct valid names that differ only in a
- * character this regex maps to `_` (e.g. an npm name `foo.bar` and `foo_bar`) onto the SAME
- * directory. Before this function existed that sharing was benign (distinct URL slugs, distinct
- * files); now, refreshing one such library can delete the other's cached primary, because the
- * other's candidate URLs are not in `keepUrls` — and the SF-C proof above cannot help here,
- * because the deleted pair genuinely IS one this tool wrote, just for the OTHER library sharing
- * the directory. Pre-existing in `libDir`, newly destructive because of this function — a
- * follow-up item should make the mapping injective (append a short hash of the raw name) rather
- * than papering over it here.
+ * COLLISION-RESISTANT since D-71 (PAR-749) — previously the finding recorded here, now fixed
+ * rather than merely disclosed: `libDirIn`'s `library → directory` mapping used to fold
+ * distinct valid names that differ only in a character its regex maps to `_` (e.g. an npm name
+ * `foo.bar` and `foo_bar`) onto the SAME directory, EVERY time, so refreshing one could delete
+ * the other's cached primary — the SF-C proof above could not catch it, because the deleted
+ * pair genuinely WAS one this tool wrote, just for the other library sharing the folded name.
+ * `libDirName` now appends a hash of the full library name to the fold, so two distinct names
+ * sharing a fold no longer collide in the ordinary case (see `shortHash`'s comment in
+ * `cache-meta.ts` for the precise, non-absolute guarantee — a deliberately forced collision on
+ * this dimension has no second check to fall back on, unlike the URL dimension's `meta.url`
+ * comparison; see `libDirName`'s own comment) — see `test/cache.test.ts`'s "no longer collide"
+ * case, which replaced the old characterization test of this same finding.
  */
 export function dropFollowedPageCache(
   library: string,
@@ -579,19 +487,20 @@ export function dropFollowedPageCache(
     // is either not this tool's or already unparseable; skip the read+parse either way rather
     // than paying for a `JSON.parse` a directory of many planted files could otherwise force.
     if (metaStat.size > MAX_META_FILE_BYTES) continue;
-    const meta = readCacheMeta(metaPath);
+    const meta = readMetaFile(metaPath);
     if (meta === undefined) continue; // C2: unproven — leave it for eviction
     // Round 4 (code-reviewer, SF-C; closes security-architect's N1 in full, not just the
     // empty-slug instance): a real, parseable pair is STILL not proof this tool wrote it under
     // THIS name — nothing before this line checks that the meta's own `url` is the one that
     // produced `slug`. A directory entry named, say, `my-notes.md` / `my-notes.meta.json`
-    // carrying any OTHER valid `CacheMeta` passed every check above and was deleted. `urlSlug`
-    // is the same function `writeCache` used to NAME the file in the first place, so requiring
-    // `urlSlug(meta.url) === slug` is not a new rule — it is the one this function already
-    // claimed to enforce, actually checked. Validated safe for every legitimate pair (including
-    // one whose URL is long enough to hit `urlSlug`'s 120-char truncation): `urlSlug` is a pure
-    // function of the URL alone, so a slug `writeCache` produced from a URL always round-trips.
-    if (urlSlug(meta.url) !== slug) continue;
+    // carrying any OTHER valid `CacheMeta` passed every check above and was deleted.
+    // `metaMatchesSlug` (D-71, `./cache-meta.js`) is the same `urlSlug` round-trip `writeCache`
+    // used to NAME the file in the first place, so requiring it is not a new rule
+    // — it is the one this function already claimed to enforce, actually checked. Validated
+    // safe for every legitimate pair (including one whose URL is long enough to hit `urlSlug`'s
+    // 120-char truncation): `urlSlug` is a pure function of the URL alone, so a slug
+    // `writeCache` produced from a URL always round-trips.
+    if (!metaMatchesSlug(meta, slug)) continue;
     try {
       rmSync(contentPath, { force: true });
       rmSync(metaPath, { force: true });

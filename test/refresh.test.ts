@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readCache, writeCache } from "../src/cache.js";
+import { readCache, writeCache, urlSlug, libDirName } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { refreshToolText, resetFullRefreshWindow } from "../src/refresh.js";
 import { documentHash, indexCachedDocument, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
@@ -180,7 +180,7 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
 
   it("A4: a corrupt .meta.json on the entry being refreshed no longer crashes refresh (audit finding 4.5: refresh.ts:51 was unguarded and untested)", async () => {
     writeCache("react", REACT_URL, "# React old");
-    const metaPath = join(dir, "react", `${REACT_URL.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    const metaPath = join(dir, libDirName("react"), `${urlSlug(REACT_URL)}.meta.json`);
     writeFileSync(metaPath, "{ not json", "utf8");
     stubFetch({ [REACT_URL]: "# React new" });
     await expect(refreshToolText(registry, "reactjs")).resolves.toBe(`react: refreshed from ${REACT_URL} (11 chars)`);
@@ -199,7 +199,7 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
       resetSearchIndexMemo(); // a fresh process: the memo must not short-circuit this session's own add()
       // "react" is processed before "hono" (Map insertion order): react's writeCache must
       // succeed and land in the index even though hono's writeCache throws immediately after.
-      const honoDir = join(dir, "hono");
+      const honoDir = join(dir, libDirName("hono"));
       mkdirSync(honoDir, { recursive: true });
       chmodSync(honoDir, 0o555); // read + execute, no write: writeCache's writeFileSync throws EACCES
       try {

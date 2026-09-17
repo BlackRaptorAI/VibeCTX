@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeCache, readCache, urlSlug } from "../src/cache.js";
+import { writeCache, readCache, urlSlug, libDirName } from "../src/cache.js";
 import {
   cacheCapBytes,
   cacheEvictionStats,
@@ -36,8 +36,8 @@ afterEach(() => {
 });
 
 const url = (n: string) => `https://example.com/${n}.md`;
-const contentPath = (library: string, n: string) => join(dir, library, `${urlSlug(url(n))}.md`);
-const metaPath = (library: string, n: string) => join(dir, library, `${urlSlug(url(n))}.meta.json`);
+const contentPath = (library: string, n: string) => join(dir, libDirName(library), `${urlSlug(url(n))}.md`);
+const metaPath = (library: string, n: string) => join(dir, libDirName(library), `${urlSlug(url(n))}.meta.json`);
 
 /** Put a document in the cache and back-date its `fetchedAt` to a known instant. */
 function seed(library: string, n: string, bytes: number, fetchedAt: string): void {
@@ -170,7 +170,7 @@ describe("eviction", () => {
     // meta only after `writeCache` has returned, i.e. after the sweep).
     seed("react", "old", 4000, "2020-01-01T00:00:00.000Z");
     resetCacheEvictionState(); // "old" now belongs to a previous run
-    mkdirSync(join(dir, "react"), { recursive: true });
+    mkdirSync(join(dir, libDirName("react")), { recursive: true });
     writeFileSync(contentPath("react", "fresh"), "x".repeat(4000), "utf8");
     writeFileSync(metaPath("react", "fresh"), JSON.stringify({ url: url("fresh"), fetchedAt: "1999-01-01T00:00:00.000Z" }), "utf8");
     process.env.VIBECTX_CACHE_MAX_MB = String(5000 / (1024 * 1024));
@@ -237,7 +237,7 @@ describe("eviction", () => {
       resetCacheEvictionState();
       process.env.VIBECTX_CACHE_MAX_MB = String(1000 / (1024 * 1024));
       const summary = enforceCacheSizeCap(dir, { warn: () => {} })!;
-      expect(summary.evicted.map((e) => e.library)).toEqual(["react"]);
+      expect(summary.evicted.map((e) => e.library)).toEqual([libDirName("react")]);
       expect(existsSync(join(outside, `${urlSlug(url("victim"))}.md`))).toBe(true);
     } finally {
       rmSync(outside, { recursive: true, force: true });
@@ -369,7 +369,7 @@ describe("the sweep is bounded — writeCache does not stat the world on every w
     writeCache("zod", url("new"), "x".repeat(4000)); // first write of this run ⇒ sweeps
 
     const summary = lastEvictionSummary()!;
-    expect(summary.evicted.map((e) => e.library)).toEqual(["react"]);
+    expect(summary.evicted.map((e) => e.library)).toEqual([libDirName("react")]);
     expect(existsSync(contentPath("react", "old"))).toBe(false);
     expect(existsSync(contentPath("zod", "new"))).toBe(true); // the document just written survives
   });
@@ -396,7 +396,10 @@ describe("doctor reports what was evicted", () => {
     const text = formatDoctorTable(report);
     expect(text).toContain("cache: evicted 1 least-recently-fetched document(s)");
     expect(text).toContain("VIBECTX_CACHE_MAX_MB");
+    // D-71 (PAR-749, code-reviewer round 2, S1): doctor strips the on-disk directory's hash
+    // suffix for display, so the table still reads "react/<slug>", not "react_<hash>/<slug>".
     expect(text).toContain(`react/${urlSlug(url("old"))}`);
+    expect(text).not.toContain(libDirName("react"));
   });
 });
 
