@@ -139,8 +139,21 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  *  `project-store.ts`'s own `validIsoInstant` (not imported from there: that copy is
  *  private, and duplicating four lines here is cheaper than exporting a cross-module
  *  dependency for them — see D-48's own precedent for a SHARED primitive, which this is
- *  not: the rule itself, not a compiled RegExp singleton, is what must stay in one piece). */
-const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
+ *  not: the rule itself, not a compiled RegExp singleton, is what must stay in one piece).
+ *
+ *  Deliberately NOT byte-identical to `project-store.ts`'s copy: the fractional-seconds
+ *  group is bounded to 9 digits here (nanosecond precision — already past anything real
+ *  `toISOString` produces), matching `cache-meta.ts`'s `ISO_INSTANT`, not `project-store.ts`'s
+ *  or `search-index.ts`'s. `Number.isFinite(Date.parse(…))` is not a length backstop —
+ *  MEASURED (`cache-meta.ts`'s own comment): `Date.parse("2020-01-01T00:00:00." +
+ *  "1".repeat(10_000) + "Z")` returns a finite timestamp. Left unbounded, a planted entry's
+ *  `timestamp` would be the one field nothing else here clips, and `formatActivityLogTable`
+ *  pads every OTHER row's cell to the widest column — turning one hostile entry into an
+ *  unbounded amount of table output on every `vibectx log`, and, worse, a value this size
+ *  written back to disk on every subsequent `recordActivity` call, since a valid row is
+ *  never dropped once accepted. `cache-meta.ts`'s own comment names `project-store.ts` and
+ *  `search-index.ts` as carrying the unbounded form still; this file must not become a third. */
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/;
 function validIsoInstant(value: unknown): value is string {
   return typeof value === "string" && ISO_INSTANT.test(value) && Number.isFinite(Date.parse(value));
 }
@@ -274,7 +287,13 @@ export function readActivityLog(): ActivityLogReport {
  *  came back through validation. */
 export function formatActivityLogTable(entries: ActivityEntry[]): string {
   const header = ["timestamp", "tool", "library", "outcome", "detail"];
-  const rows = entries.map((e) => [e.timestamp, e.tool, e.library ?? "—", e.outcome, e.query ?? e.url ?? "—"].map(cleanText));
+  // `timestamp` is clipped here too, not only validated on read (belt-and-braces, matching
+  // `delete normalised.ecosystem` in registry.ts's own precedent for a field already
+  // guarded upstream): it is the one field `toActivityEntry` accepts by SHAPE rather than
+  // by an explicit length bound, and this table must hold for any `ActivityEntry` it is
+  // handed, not only one that came back through validation — an unclipped timestamp would
+  // otherwise widen every OTHER row's cell to match it (`padEnd` below).
+  const rows = entries.map((e) => [clipText(e.timestamp, 40), e.tool, e.library ?? "—", e.outcome, e.query ?? e.url ?? "—"].map(cleanText));
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i].length)));
   const render = (cells: string[]) => cells.map((c, i) => (i === cells.length - 1 ? c : c.padEnd(widths[i]))).join("  ");
   return [render(header), ...rows.map(render), "", `${entries.length} entr${entries.length === 1 ? "y" : "ies"}`].join("\n");

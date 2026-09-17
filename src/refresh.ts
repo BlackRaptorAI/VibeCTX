@@ -27,10 +27,12 @@ export function resetFullRefreshWindow(): void {
  *
  *  A20/PAR-729 (D-51): one activity-log entry per CALL — not per target — matching the
  *  Done-when's own wording. A single-library refresh's entry carries that library's own
- *  `url`/`contentHash` and `fresh: true` (every document here was just force-refetched); a
- *  full (no-argument) refresh's entry carries neither `library` nor `url` — no ONE document
- *  is "the" one a caller can cite, the same reasoning `search`'s multi-library case applies
- *  (see search.ts's `runSearch`). `outcome` is `matched` when at least one target actually
+ *  `url`/`contentHash` and `fresh` (code-reviewer round 1, B1: NOT unconditionally true —
+ *  `forceRefresh: true` can still fall back to a stale cached copy when the network is down,
+ *  so `fresh` reflects `single.stale`, tracked per branch below); a full (no-argument)
+ *  refresh's entry carries neither `library` nor `url` — no ONE document is "the" one a
+ *  caller can cite, the same reasoning `search`'s multi-library case applies (see
+ *  search.ts's `runSearch`). `outcome` is `matched` when at least one target actually
  *  refreshed, `not-cached` otherwise (including the rate-limited and unresolved-name cases). */
 export async function refreshToolText(registry: Registry, library?: string, opts: { now?: () => Date } = {}): Promise<string> {
   let targets: LibraryEntry[];
@@ -51,7 +53,7 @@ export async function refreshToolText(registry: Registry, library?: string, opts
   }
   const results: string[] = [];
   let succeeded = 0;
-  let single: { url?: string; contentHash?: string } | undefined;
+  let single: { url?: string; contentHash?: string; stale?: boolean } | undefined;
   // R2 (A3, PAR-716): ONE session for the whole loop, not one read-then-write per library —
   // the same fix `warm` and `autowarm` already have (search-index.ts:495-508). Scoped to the
   // direct-fetch path below; a RESOLVED entry's indexing is `resolvePackage`'s own single-
@@ -99,7 +101,7 @@ export async function refreshToolText(registry: Registry, library?: string, opts
           // freshly fetched one, and the activity log records what is now known-current, not
           // whether bytes moved on the wire.
           succeeded += 1;
-          single = { url: out.chosen, contentHash: out.contentHash };
+          single = { url: out.chosen, contentHash: out.contentHash, stale: out.stale };
           results.push(
             `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${out.chosen} (${(out.chars ?? 0).toLocaleString()} chars)`,
           );
@@ -132,7 +134,7 @@ export async function refreshToolText(registry: Registry, library?: string, opts
         // A20/PAR-729: "matched" either way — see the same note on the resolved-entry branch
         // above.
         succeeded += 1;
-        single = { url: doc.url, contentHash: documentHash(doc.content) };
+        single = { url: doc.url, contentHash: documentHash(doc.content), stale: doc.staleNote !== undefined };
       }
       results.push(
         doc
@@ -160,7 +162,10 @@ export async function refreshToolText(registry: Registry, library?: string, opts
     library: library !== undefined ? targets[0].name : undefined,
     url: library !== undefined ? single?.url : undefined,
     contentHash: library !== undefined ? single?.contentHash : undefined,
-    fresh: library !== undefined && succeeded > 0 ? true : undefined,
+    // code-reviewer, A20/PAR-729 round 1, B1: NOT unconditionally true on success —
+    // `forceRefresh: true` can still fall back to a stale cached copy when the network is
+    // down (both branches above track it in `single.stale`, from `out.stale` / `doc.staleNote`).
+    fresh: library !== undefined && single ? !single.stale : undefined,
     outcome: succeeded > 0 ? "matched" : "not-cached",
   });
   return results.join("\n");

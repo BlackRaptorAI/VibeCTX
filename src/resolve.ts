@@ -110,6 +110,17 @@ export interface ResolveOutcome {
    *  existed, `ResolveOutcome` carried no staleness signal at all, so every successful
    *  re-resolution dropped followed pages unconditionally. */
   unchanged?: true;
+  /** True when `chosen`'s content is the STALE fallback — the network was unreachable on every
+   *  candidate and `getLibraryDoc` re-served a past-TTL cached copy (`doc.staleNote`). Deliberately
+   *  NARROWER than `unchanged` above: `unchanged` also covers a 304 revalidation, which is
+   *  content that is current (its TTL was just refreshed by `touchCache`), not stale — conflating
+   *  the two here would report a stale fallback as `fresh` (code-reviewer, A20/PAR-729 round 1,
+   *  B1: `resolveToolText`'s activity-log entry logged `fresh: true` unconditionally whenever
+   *  `chosen` was set, on the mistaken assumption that `forceRefresh: true` guarantees a current
+   *  document — it does not; `fetcher.ts`'s own stale-fallback branch is reachable through this
+   *  exact `getLibraryDoc(entry, { forceRefresh: true })` call, on a re-resolution whose network
+   *  is down). */
+  stale?: true;
   /** The text the tool / CLI shows. */
   text: string;
 }
@@ -525,6 +536,7 @@ export async function resolvePackage(
       text: "",
     };
     if (isDocUnchanged(doc)) out.unchanged = true;
+    if (doc.staleNote !== undefined) out.stale = true;
     out.text = formatResolved(out);
     return out;
   }
@@ -570,7 +582,10 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
     library: out.entry?.name ?? name,
     url: out.chosen,
     contentHash: out.contentHash,
-    fresh: out.chosen ? true : undefined, // a resolution's document is always freshly fetched (forceRefresh: true)
+    // code-reviewer, A20/PAR-729 round 1, B1: NOT unconditionally true — `forceRefresh: true`
+    // does not guarantee a current document; `out.stale` says whether the network was down and
+    // `getLibraryDoc` fell back to a past-TTL cached copy (see `ResolveOutcome.stale`'s comment).
+    fresh: out.chosen ? !out.stale : undefined,
     outcome: out.ok ? "matched" : "unresolved",
   });
   return out.text;

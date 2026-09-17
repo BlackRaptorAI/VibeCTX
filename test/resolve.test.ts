@@ -24,7 +24,7 @@ import {
 import { writeFileSync, readFileSync } from "node:fs";
 import { RESOLVED_SCHEMA_VERSION, readResolvedEntries } from "../src/resolved-store.js";
 import { documentHash, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
-import { readCache, libDirName } from "../src/cache.js";
+import { readCache, writeCache, libDirName } from "../src/cache.js";
 import { readActivityEntries } from "../src/activity-log.js";
 import type { Registry } from "../src/registry.js";
 
@@ -742,6 +742,28 @@ describe("resolveToolText activity log (A20/PAR-729, D-51)", () => {
       url: "https://raw.githubusercontent.com/JacksonTian/httpx/HEAD/README.md",
       contentHash: documentHash(readme),
       fresh: true,
+      outcome: "matched",
+    });
+  });
+
+  it("code-reviewer B1: a re-resolution that falls back to stale cache (network unreachable) logs fresh: FALSE, not the unconditional true forceRefresh used to imply", async () => {
+    const HONO_PRIMARY = "https://hono.dev/llms-full.txt";
+    const resolvedHono = {
+      name: "hono",
+      urls: ["https://hono.dev/llms.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: NPM_HONO },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    writeCache("hono", HONO_PRIMARY, "# Hono old");
+    stubFetch({ [NPM_HONO]: { homepage: "https://hono.dev" } }); // metadata OK; every document candidate 404s
+    await resolveToolText(reg, "hono");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "resolve_library",
+      library: "hono",
+      url: HONO_PRIMARY,
+      fresh: false,
       outcome: "matched",
     });
   });

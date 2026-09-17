@@ -140,6 +140,21 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
       expect(toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.123Z" })).toBeDefined();
     });
 
+    it("security-architect B1: an unbounded fractional-seconds timestamp is REJECTED, not merely validated by Date.parse — the one field nothing else here length-bounds", () => {
+      // Date.parse alone is not a length backstop (MEASURED, cache-meta.ts's own comment):
+      // Date.parse("2020-01-01T00:00:00." + "1".repeat(10_000) + "Z") returns a finite
+      // timestamp. ISO_INSTANT's shape check must reject the length before Date.parse ever
+      // runs, matching cache-meta.ts's bounded (\.\d{1,9})? — not project-store.ts's or
+      // search-index.ts's still-unbounded copies, which this file must not become a third of.
+      const hostile = `2026-09-17T18:00:00.${"1".repeat(10_000)}Z`;
+      expect(Number.isFinite(Date.parse(hostile))).toBe(true); // the trap: Date.parse alone accepts it
+      expect(toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: hostile })).toBeUndefined();
+      // Nanosecond precision (9 digits) still passes; a 10th digit is already past anything
+      // real `toISOString` produces and is refused.
+      expect(toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.123456789Z" })).toBeDefined();
+      expect(toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.1234567890Z" })).toBeUndefined();
+    });
+
     it("an oversized library/query/url/version is CLIPPED, not dropped; the row survives", () => {
       const e = toActivityEntry({
         tool: "search",
@@ -296,6 +311,16 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
         timestamp: "2026-09-17T18:00:00.000Z",
       };
       expect(formatActivityLogTable([hostile])).not.toMatch(/[​‮]/);
+    });
+
+    it("security-architect B1: clips an oversized timestamp at the render boundary too, even for an entry that bypassed validation — an unclipped one would widen every OTHER row's cell to match it", () => {
+      const hostile: ActivityEntry = {
+        tool: "get_docs",
+        outcome: "matched",
+        timestamp: `2026-01-01T00:00:00.${"1".repeat(50_000)}Z`,
+      };
+      const table = formatActivityLogTable([hostile, { tool: "search", outcome: "no-match", timestamp: "2026-01-01T00:00:01.000Z" }]);
+      expect(table.length).toBeLessThan(1000); // not tens of KB padded to the hostile row's width
     });
 
     it("an empty log formats to a header and a zero-entry summary", () => {

@@ -468,6 +468,38 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
 });
 
 describe("refreshToolText activity log (A20/PAR-729, D-51)", () => {
+  it("code-reviewer B1: a re-resolution of a RESOLVED entry that falls back to stale cache (network unreachable) also logs fresh: FALSE — the same fix applies on the resolved-entry branch, not only the direct-fetch one", async () => {
+    const HONO_PRIMARY = "https://hono.dev/llms-full.txt";
+    const resolvedHono = {
+      name: "hono",
+      urls: ["https://hono.dev/llms.txt"],
+      resolved: { source: "npm" as const, resolvedAt: "2026-09-06T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+    };
+    const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
+    writeCache("hono", HONO_PRIMARY, "# Hono old");
+    const fetchSpy = vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u === "https://registry.npmjs.org/hono/latest") {
+        return new Response(JSON.stringify({ homepage: "https://hono.dev" }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+      return new Response("not found", { status: 404 }); // every candidate unreachable
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await refreshToolText(reg, "hono");
+
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "hono",
+      url: HONO_PRIMARY,
+      contentHash: documentHash("# Hono old"),
+      fresh: false,
+      outcome: "matched",
+    });
+  });
+
   it("a successful single-library refresh logs one entry: canonical library, its url, contentHash, fresh: true, matched", async () => {
     writeCache("react", REACT_URL, "# React old");
     stubFetch({ [REACT_URL]: "# React new" });
@@ -480,6 +512,22 @@ describe("refreshToolText activity log (A20/PAR-729, D-51)", () => {
       url: REACT_URL,
       contentHash: documentHash("# React new"),
       fresh: true,
+      outcome: "matched",
+    });
+  });
+
+  it("code-reviewer B1: a refresh that falls back to a STALE cache (every candidate unreachable, prior cache exists) logs matched with fresh: FALSE — not the unconditional true forceRefresh used to imply", async () => {
+    writeCache("react", REACT_URL, "# React old");
+    stubFetch({}); // every candidate 404s; getLibraryDoc falls back to serving the stale cache
+    await refreshToolText(registry, "reactjs");
+    const entries = readActivityEntries();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "refresh",
+      library: "react",
+      url: REACT_URL,
+      contentHash: documentHash("# React old"),
+      fresh: false,
       outcome: "matched",
     });
   });
