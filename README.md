@@ -1001,15 +1001,25 @@ Unknown top-level keys in the config (for example `$comment`) are ignored.
 Names and aliases are trimmed and lower-cased before anything else, so `"name": "Next.js"`
 overrides `next.js`. Precedence:
 
-- **Config beats default alias.** A config entry whose `name` or alias equals a *default's
-  alias* wins; that alias is silently dropped from the default (`{"name": "next"}` loads and
-  `next` is yours, while `next.js` and `nextjs` still reach the default).
-- **Alias vs. canonical name is an error.** A config alias equal to any library's `name`
-  (default or config), the same alias on two config entries, or an alias equal to its own
-  entry's name fails to load, with a message naming both sides.
-- **An override keeps the default's aliases unless you say otherwise.** Overriding a default
-  (same `name`) and omitting `aliases` inherits them; `"aliases": []` clears them; an
-  explicit list replaces them.
+- **Config beats default alias — including its PEP 503 twin.** A config entry whose `name` or
+  alias equals a *default's alias*, or a PEP 503 twin of one (`-`, `_`, `.` runs collapse to
+  one `-`), wins; that alias is silently dropped from the default (`{"name": "next"}` loads
+  and `next` is yours; `{"name": "react_dom"}` claims the default `react-dom` alias the same
+  way, while `next.js`/`react` still reach their own remaining aliases).
+- **Two spellings of one name are one entry, not two.** `foo-bar`, `foo_bar` and `Foo.Bar` are
+  the same package under PEP 503, so `{"name": "ai.sdk"}` *overrides* the default `ai-sdk` —
+  inheriting its aliases (see below) and taking its place under your spelling, in the same
+  registry slot — rather than adding a second entry. The library's on-disk cache is keyed by
+  name, so an override under a different spelling starts a fresh cache directory; the old one
+  is unused, not deleted. Two entries in the *same* config file that are PEP 503 twins of each
+  other fail to load, naming both.
+- **Alias vs. canonical name is an error, exact spelling or PEP 503 twin alike.** A config
+  alias equal to — or a PEP 503 twin of — any library's `name` (default or config), the same
+  alias (or its twin) on two config entries, or an alias equal to its own entry's name fails
+  to load, with a message naming both sides.
+- **An override keeps the replaced entry's aliases unless you say otherwise.** Overriding a
+  default or another entry (same name, or a PEP 503 twin of it) and omitting `aliases`
+  inherits them; `"aliases": []` clears them; an explicit list replaces them.
 - **A pin also claims its PEP 503 spelling.** A config (or default) name or alias owns the
   form with runs of `-`, `_`, `.` collapsed to `-` as well, so `{"name": "typing_extensions"}`
   answers `typing-extensions` and `Typing.Extensions`, and no auto-resolved record can sit
