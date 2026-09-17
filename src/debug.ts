@@ -25,6 +25,8 @@
  * If you need a fetch failure in a script, that is a feature request, not a `grep`.
  */
 
+import { cleanText } from "./text.js";
+
 /** Longest a single field value is printed at; a URL from a fetched document is untrusted. */
 const MAX_FIELD_CHARS = 300;
 
@@ -38,12 +40,13 @@ export function debugEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
-/** Strip C0/C1 and bidi controls and clip. A debug line carries URLs and error messages
- *  that came off the network; a terminal must not be able to be driven by one. */
+/** Strip C0/C1 and bidi controls (D-48's shared class, `text.ts`) and clip. A debug line
+ *  carries URLs and error messages that came off the network; a terminal must not be able to
+ *  be driven by one. */
 export function debugField(value: string | number | undefined): string {
   if (value === undefined) return "-";
   const text = typeof value === "number" ? String(value) : value;
-  const cleaned = text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, "");
+  const cleaned = cleanText(text);
   const clipped = cleaned.length > MAX_FIELD_CHARS ? `${cleaned.slice(0, MAX_FIELD_CHARS)}…` : cleaned;
   return /[\s"]/.test(clipped) ? JSON.stringify(clipped) : clipped;
 }
