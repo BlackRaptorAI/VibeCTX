@@ -523,12 +523,25 @@ export async function getDocsDetailed(
   // and `noteBlock` (index-follow accounting) is dropped entirely: D-43's "the answer outranks
   // the accounting" applies here too — when there is no room for the real answer, the
   // EXPLANATION of why outranks the follow/skip bookkeeping that no longer matters as much.
+  //
+  // code-reviewer round 1, S1 — the first version of this stopped there, and MEASURED, it left
+  // the note itself invisible in the large majority of budgets that actually reach `thinMatch`
+  // (94.6% of a swept range, for a document with a longish URL): `fitStampLine` has a floor it
+  // cannot degrade below (`Source: <url>` — up to ~308 chars once the url itself is clipped),
+  // so whenever that floor alone reaches the room reserved for it, the note that was supposed
+  // to get PRIORITY got silently sliced off by the plain head-truncating `clipToBudget`
+  // instead. Fixed by making the priority real, not aspirational: the stamp is included ONLY
+  // when even its shortest complete form fits beside the note; otherwise it is dropped
+  // entirely, never rendered as a partial (mid-URL) fragment — the same lesson A17's B2 finding
+  // established for the fetched-at date, applied here to the stamp as a whole. D-43's ordering
+  // is now genuinely: note first, stamp only if there's room left for the WHOLE thing.
   const thinMatch = (what: string, matchedCount: number): GetDocsOutcome => {
     const note = thinMatchNote(what, matchedCount);
     const stampRoom = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);
     const stamp = fitStampLine(stampFacts, stampRoom);
+    const head = stamp.length <= stampRoom ? `${stamp}\n` : "";
     return {
-      text: clipToBudget(`${resolutionPrefix}${prefix}${stamp}\n${note}`, budgetChars),
+      text: clipToBudget(`${resolutionPrefix}${prefix}${head}${note}`, budgetChars),
       source,
       contentHash,
       isIndex,

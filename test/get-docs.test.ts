@@ -740,19 +740,17 @@ describe("getDocs index following", () => {
 
     /** A17 (PAR-726) done-when: "the stamp survives the D-43 degradation ordering... when the
      *  budget cannot hold everything, the section body wins, but the stamp is not the first
-     *  thing dropped." `docStamp` is the FIRST text `header` is built from (ahead of the note
-     *  block, ahead of the body) — so under the final `clipToBudget` backstop, which truncates
-     *  from the END, the stamp is provably the LAST thing to be cut, whatever the budget.
+     *  thing dropped." True for the ordinary budgeted paths this file already had. A18
+     *  (PAR-727) deliberately narrows it for the NEW `thinMatch` path specifically — see the
+     *  next test's comment for why — so this test now proves the version of the claim that is
+     *  still true: not silence, whatever survives is complete (no mid-field cut of any kind).
      *
-     *  A18 (PAR-727), RE-DESIGNED, not merely re-measured: this budget (20, well below the
-     *  zero-content crossover of 45/46) used to render JUST the stamp and nothing else — no
-     *  section body of any kind, and no explanation of why. That silence is exactly the gap
-     *  PAR-727 exists to close. The `thinMatch` path now builds ITS OWN smaller header, which
-     *  reserves room for the explanatory note FIRST and re-degrades the stamp around what is
-     *  left — so at this same budget, both the stamp (degraded to `Source: <url>` alone) AND a
-     *  (truncated) thin-match note now share the response, instead of the stamp having the
-     *  whole budget to itself. */
-    it("(A17, PAR-726 / A18, PAR-727) the standing stamp survives even where the section body does not — it is not the first thing dropped", async () => {
+     *  RE-MEASURED at this budget (20, well below the zero-content crossover of 45/46): this
+     *  used to render JUST the stamp and nothing else — no section body, no explanation. That
+     *  silence is the gap PAR-727 exists to close. It now renders the thin-match note ALONE,
+     *  without the stamp — see the next test's comment for why that trade is the fix, not a
+     *  regression. */
+    it("(A17, PAR-726 / A18, PAR-727) something honest always survives even where the section body does not — never silence, never a mid-field cut", async () => {
       seedIndex(
         [
           "# Fastify",
@@ -779,12 +777,32 @@ describe("getDocs index following", () => {
         }),
       );
       const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 20 }); // well below the zero-content crossover (45/46) — no section body of any kind
-      // MEASURED at this budget: the stamp degrades all the way to `Source: <url>` (thinMatch
-      // reserves room for the note first), and the note itself is truncated but present — not
-      // silence, and no mid-field cut of the stamp's own fields either.
-      expect(out.text.startsWith("Source: https://fastify.dev/llms.txt\n")).toBe(true);
-      expect(out.text).toContain("4 matching sections found, but none fit");
+      // MEASURED at this budget: `thinMatch` finds even the shortest complete stamp
+      // (`Source: <url>`) does not leave room for the note beside it, so it drops the stamp
+      // entirely (code-reviewer round 1, S1) rather than let it, or the note, be cut mid-field.
+      expect(out.text).toBe("4 matching sections found, but none fit inside the response budget. Raise maxTok");
+      expect(out.text).not.toMatch(/^Source:/); // the stamp lost the room to the note, deliberately, not silently
       expect(out.matched).toBeGreaterThan(0); // the topic DID match a section — only the RENDERED text lacks room for it
+    });
+
+    /** code-reviewer round 1, S1 — the note was still invisible in 94.6% of a swept range of
+     *  reachable thin-match budgets in the FIRST version of this fix: `fitStampLine` has a
+     *  floor it cannot degrade below (`Source: <url>`, up to ~308 chars once `url` itself is
+     *  clipped), so whenever that floor alone reached the room reserved for it, the note was
+     *  silently sliced off by the plain head-truncating `clipToBudget` — the priority `thinMatch`
+     *  claimed to have (note first) was aspirational, not real. Proven here with a URL long
+     *  enough to reach that floor: even at a budget generous enough that a SHORT url's stamp
+     *  would have fit easily, this long one still yields the room to the note instead — the
+     *  stamp appears only once there is room for the WHOLE of it, never a fragment. */
+    it("(code-reviewer, A18 round 1, S1) the thin-match note wins the budget over the stamp when they cannot both fit — a truncated URL is a wrong fact, same as a truncated date", async () => {
+      const longUrl = `https://fastify.dev/${"a".repeat(150)}/llms.txt`;
+      const longEntry = { name: "fastify", urls: [longUrl] };
+      writeCache(longEntry.name, longUrl, "# Fastify\n\n## request.hostname\n\nThe hostname of the incoming request.");
+      stubFetch({});
+      const out = await getDocsDetailed(longEntry, { topic: "hostname", maxTokens: 25 });
+      expect(out.text).toBe("1 matching section found, but none fit inside the response budget. Raise maxTokens to see it.");
+      expect(out.text).not.toContain("Source:"); // no truncated URL masquerading as a complete one
+      expect(out.matched).toBeGreaterThan(0);
     });
 
     /** A18 (PAR-727) done-when: "every no-match and thin-match path in both modes emits the
@@ -1239,13 +1257,15 @@ describe('getDocs mode: "snippets" (D-26)', () => {
   /** A18 (PAR-727) done-when: "every no-match and thin-match path in BOTH modes emits the
    *  statement." The sections-mode thin-match tests above prove the mechanism; this proves
    *  snippets mode shares it — same `thinMatch` closure, same `thinMatchNote` grammar, and the
-   *  singular/plural noun form is right at count 1 ("code snippet", not "code snippets"). */
+   *  singular/plural noun form is right at count 1 ("code snippet", not "code snippets"). At
+   *  this budget (25) the note renders in FULL, without the stamp — code-reviewer round 1,
+   *  S1's fix: the note wins the room over the stamp when both cannot fit, rather than the
+   *  stamp surviving and the note being the one silently cut. */
   it("(A18, PAR-727) snippets mode also states the thin-match positive claim, not silence, when a match exists but none fits", async () => {
     writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
     stubFetch({});
-    const out = await getDocsDetailed(stripe, { topic: "checkout session create", mode: "snippets", maxTokens: 20 });
-    expect(out.text.startsWith(`Source: ${STRIPE_URL}\n`)).toBe(true);
-    expect(out.text).toContain("1 matching code snippet found, but"); // singular, not "snippets"
+    const out = await getDocsDetailed(stripe, { topic: "checkout session create", mode: "snippets", maxTokens: 25 });
+    expect(out.text).toBe("1 matching code snippet found, but none fit inside the response budget. Raise maxTokens to see it."); // singular, not "snippets"/"them"
     expect(out.matched).toBe(1);
   });
 });
