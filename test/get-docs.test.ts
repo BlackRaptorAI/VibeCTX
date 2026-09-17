@@ -800,6 +800,24 @@ describe("getDocs index following", () => {
         expect(out, `maxTokens=${maxTokens}: ${JSON.stringify(out)}`).not.toMatch(/ · f$| · fr$| · fre$| · fres$| · s$| · st$| · sta$| · stal$| · c$| · cu$| · cur$| · cura$| · curat$| · curate$| · r$| · re$| · res$| · reso$| · resol$| · resolv$| · resolve$/);
       }
     });
+
+    /** (code-reviewer, A17 round 2, SF2): the SAME defect class as B2 above, found by review
+     *  to survive in `doc.staleNote`'s prose banner — it embeds `fetchedAt` mid-sentence
+     *  ("STALE: served from cache fetched 2026-09-1…") and was never priced against a
+     *  fits-or-omit rule the way every other header piece now is. Fixed as all-or-nothing (not
+     *  a field-by-field degrade like the stamp): the banner appears in full or not at all,
+     *  never character-sliced mid-date. */
+    it("(code-reviewer, A17 round 2, SF2) the stale-served banner never truncates mid-date either — whole or absent", async () => {
+      seedIndex(TOC_DOC);
+      stubFetch({}); // every candidate 404s -> getLibraryDoc falls back to serving the stale cache
+      const stale = { ...entry, ttlHours: 0 };
+      for (const maxTokens of [5, 10, 14, 20, 26, 30, 40]) {
+        const out = await getDocs(stale, { maxTokens });
+        const staleMatch = out.match(/^> STALE: served from cache fetched (\S+)/);
+        if (staleMatch) expect(staleMatch[1], `maxTokens=${maxTokens}: ${JSON.stringify(out)}`).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z;$/);
+        expect(out, `maxTokens=${maxTokens}: ${JSON.stringify(out)}`).not.toMatch(/^> STALE: served from cache fetched \d{1,3}$/);
+      }
+    });
   });
 
   /**

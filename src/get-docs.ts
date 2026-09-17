@@ -18,7 +18,6 @@ import {
   rankLinks,
   extractLinks,
   followLimit,
-  sourceStampLine,
   fitStampLine,
   MAX_FOLLOWED_BYTES,
   type SplitSection,
@@ -92,6 +91,16 @@ const MAX_ECHOED_TOPIC_CHARS = 200;
  *  threading it through unclipped breaks that path's own invariant. Capped here, once, so
  *  every render path — budgeted or exempt — sees the same bounded worst case. */
 const MAX_RESOLUTION_NOTE_CHARS = 500;
+
+/** security-architect, A17 round 2, SF-1 — `entry.name` and `entry.urls` are config-authored
+ *  raw strings (`link-policy.ts`'s `validateLibraryUrl` checks scheme/host but never
+ *  re-serializes, unlike `sanitizeRemoteUrl`'s `url.href` on the resolved path) and, unlike
+ *  every stamp field, were never cleaned or clipped before landing in the could-not-fetch and
+ *  no-match messages — the same forgery class `sourceStampLine`'s own `url` cleaning (S-1)
+ *  closed, one interpolation over. One shared bound for both fields here (not npm's tighter
+ *  214-char name limit `search.ts`'s `MAX_LIBRARY_CHARS` uses) — simplicity over precision,
+ *  since a config-defined name is not npm-validated the way a resolved one is. */
+const MAX_STAMP_FIELD_CHARS = 300;
 
 /** A6 (PAR-719) — the final backstop every render path in this file applies: whatever the
  *  header (stale-note prefix, `Source:` line, table of contents or note block) and body come
@@ -199,8 +208,13 @@ export async function getDocsDetailed(
     // "fact · fact" grammar the stamp itself uses (code-reviewer round 1, N2), not a second,
     // independently-worded vocabulary for the same field.
     const noDocStamp = `No document available · ${curated ? "curated" : "resolved"}`;
+    // security-architect, A17 round 2, SF-1: `entry.name`/`entry.urls` come straight from a
+    // config file's raw strings — `validateLibraryUrl` (link-policy.ts) checks scheme/host but
+    // never re-serializes, so a URL is validated, not normalised, the same gap S-1 closed for
+    // the stamp's own `url`. Cleaned and clipped here too, so this response can't carry the
+    // same forged-second-line risk right next to the marker that names it "no document".
     return {
-      text: `${resolutionPrefix}${noDocStamp}\nCould not fetch docs for "${entry.name}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.join("\n")}`,
+      text: `${resolutionPrefix}${noDocStamp}\nCould not fetch docs for "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.map((u) => clipText(u, MAX_STAMP_FIELD_CHARS)).join("\n")}`,
       isIndex: false,
       matched: 0,
       returnedFromFollowed: 0,
@@ -218,7 +232,16 @@ export async function getDocsDetailed(
   const isIndex = looksLikeIndex(doc.content);
   const budget = args.maxTokens ?? DEFAULT_BUDGET_TOKENS;
   const budgetChars = budget * 4;
-  const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
+  // code-reviewer, A17 round 2, SF2 — the same B2 defect `fitStampLine` exists to prevent
+  // (a real, well-formed, WRONG date from a mid-value character slice: `doc.staleNote` embeds
+  // `fetchedAt` in prose, e.g. "STALE: served from cache fetched 2026-09-1…") was still
+  // reachable here, pre-existing and unaffected by A6/A17 alike, because this banner was never
+  // priced against a "fits or omit" rule the way every OTHER header piece now is. All-or-
+  // nothing, not a field-by-field degrade like the stamp: the STRUCTURED fact ("stale") still
+  // survives in `docStamp` below whenever docStamp itself fits, so dropping this prose
+  // explanation first (never truncating it) loses elaboration, not the fact.
+  const staleBanner = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
+  const prefix = staleBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length) ? staleBanner : "";
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
   // resolution note and the stale prefix already spent, so a small budget degrades the stamp
@@ -405,19 +428,18 @@ export async function getDocsDetailed(
   // ADVICE that tells the caller what to try next, which is the one thing worth keeping. The
   // genuinely unbounded PER-CALL field, `topic`, is clipped on its own instead (round 4,
   // code-reviewer S4 — earlier wording here claimed `topic` was the only unclipped field,
-  // which the `noMatch` template below directly contradicts). It is not the only unclipped field in this
-  // template: `entry.name` and `doc.url` are both interpolated raw. `doc.url` is unbounded
-  // (see the same note on the no-topic path above); `entry.name` is bounded to 214 chars only
-  // on the resolve path (`npmNameError`/`pypiNameError`), not for a config-defined entry.
-  // Clipping those two the way `search.ts` already clips its own name/URL fields
-  // (`MAX_LIBRARY_CHARS`/`MAX_URL_CHARS`) is a known deferred follow-up, not something A6
-  // closes.
+  // which the `noMatch` template below directly contradicts). `doc.url` no longer appears in
+  // this template at all (A17/PAR-726 — see below) and, everywhere it DOES still appear
+  // (`docStamp`), is cleaned and clipped by `sourceStampLine`/`fitStampLine` (security-
+  // architect, A17 round 1, S-1). `entry.name` is clipped below too (round 2, SF-1) — it was
+  // bounded to 214 chars only on the resolve path (`npmNameError`/`pypiNameError`), not for a
+  // config-defined entry, the same gap S-1 closed for `url`.
   const noMatch = (what: string, advice: string): GetDocsOutcome => ({
     // A17 (PAR-726): the lowercase inline "(source: url)" fragment this used to carry is gone
     // — replaced by the same `docStamp` line every other path renders, closing a wording
     // inconsistency this file's own ground-truth review flagged (capitalized `Source:` line
     // everywhere else, lowercase inline fragment only here).
-    text: `${resolutionPrefix}${prefix}${docStamp}\nNo ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${entry.name} docs.${
+    text: `${resolutionPrefix}${prefix}${docStamp}\nNo ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${clipText(entry.name, MAX_STAMP_FIELD_CHARS)} docs.${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     source,

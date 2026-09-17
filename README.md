@@ -203,14 +203,16 @@ verbatim"), which fails if the two ever drift. It is the *shape* of a response, 
 capture from any vendor's documentation site; the exact headings depend on what the library
 publishes.
 
-Every response that actually has a document to show — this one included — opens with that
+Every response that actually has a document to show — this one included — carries that
 `Source:` line: where the text came from, when it was fetched, whether that copy is fresh or
 past its cache TTL, and whether the entry is curated (from the default registry or your
 config) or auto-resolved from a package name. Not just the FIRST time a name resolves — every
 call, so an agent two calls later still knows what it is reading, and can weigh it as
-retrieved external text rather than instruction. (The one response that never had a document
-— nothing reachable, nothing cached — still states curated-or-resolved; it just cannot claim
-a `Source:` for text that was never fetched.)
+retrieved external text rather than instruction. (Two things can precede it on the same
+response: a `> STALE:` banner when the cached copy is past its TTL, and the one-time `>
+Resolved …` note on the call that first resolves a package name. The one response that never
+had a document — nothing reachable, nothing cached — still states curated-or-resolved; it
+just cannot claim a `Source:` for text that was never fetched.)
 
 A snippet is ranked by its section's BM25 score plus a BM25 over the code itself, so the
 block that actually contains the call you asked for wins. Blocks under two lines are
