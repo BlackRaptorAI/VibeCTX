@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 /**
  * A3 (PAR-716) · one index session for the whole refresh loop, not one read-then-write per
- * library — the same R2 fix `warm` and `autowarm` already carry (search-index.ts:495-508).
+ * library — the same R2 fix `warm` and `autowarm` already carry (`IndexSession`'s own doc
+ * comment in search-index.ts).
  *
  * Counted at the `node:fs` boundary, the same technique `search-index-session.test.ts` uses
  * for the identical claim about `warm`, and for the identical reason: the win is invisible in
@@ -15,9 +16,11 @@ import { join } from "node:path";
  *
  * WHAT "one session" ACTUALLY COSTS, measured here rather than assumed: when at least one
  * library's content CHANGED, `add()`'s lazy snapshot reads once; `flush()` re-reads once more
- * before merging, by design, so a concurrent writer is merged rather than clobbered
- * (search-index.ts:503-504, unchanged by this item); `writeIndex()` itself reads once more
- * through `newerSchemaVersion`'s own guard (atomic-store.ts:136-144, unchanged by this item).
+ * before writing, by design — NARROWING, not closing, the window in which a concurrent writer
+ * could lose an entry (F-3, PAR-740 — wording only; the read/write counts this test asserts are
+ * unchanged; `IndexSession`'s own doc comment in search-index.ts carries the corrected claim);
+ * `writeIndex()` itself reads once more through `newerSchemaVersion`'s own guard
+ * (atomic-store.ts:136-144, unchanged by this item).
  * That is THREE reads and ONE write for the whole loop — not the "exactly one read, exactly
  * one write" the go-card's done-when states verbatim. Round 1 (code-reviewer, S5) found the
  * FIRST of those three elidable: when nothing in the whole loop actually changed, `add()` now
