@@ -465,7 +465,7 @@ const fold = (s: string): string => s.trim().toLowerCase();
 
 /**
  * Every alias must be unique across the registry and must not equal any canonical name
- * (compared on folded keys, and — PAR-777 (D-76) — on their PEP 503 form too:
+ * (compared on folded keys, and — PAR-777 (D-78) — on their PEP 503 form too:
  * `typing_extensions` as an alias collides with a canonical `typing-extensions` exactly as an
  * exact-spelling alias would). `normalisePyPiName` (package-names.ts) is already this file's
  * answer to "is this the same PyPI project under a different spelling" — used since PAR-655
@@ -492,7 +492,7 @@ const fold = (s: string): string => s.trim().toLowerCase();
  * do (`resolveLibrary`'s fallback only finds an entry a lookup would otherwise miss;
  * `curatedKeys`/`isTaken` only refuse an install). If two genuinely different packages ever
  * shared a PEP 503 form, that merge would silently answer one library's queries with the
- * other's docs — accepted as a documented, low-likelihood residual risk (D-76 in
+ * other's docs — accepted as a documented, low-likelihood residual risk (D-78 in
  * `.vibectx-plan/DECISIONS.md`), not something this comment claims cannot happen.
  *
  * D-71 (PAR-749) treats `foo.bar`/`foo_bar` as "two DISTINCT, independently valid npm names"
@@ -501,7 +501,7 @@ const fold = (s: string): string => s.trim().toLowerCase();
  * of spelling), while a REGISTRY identity needs to recognise two spellings of one PyPI project
  * as the same package. Two different questions, answered consistently within each: cache keys
  * never fold punctuation (avoiding a real collision between unrelated names), registry names
- * always do (recognising a real twin). Recorded together at D-76 so the two decisions read as
+ * always do (recognising a real twin). Recorded together at D-78 so the two decisions read as
  * a deliberate pair, not a contradiction.
  *
  * Runs on every load, config or not, so the shipped defaults are checked too. By the time
@@ -540,7 +540,7 @@ function validateAliases(
             `rename the alias, or override "${a}" (with its urls) and set aliases: [] on that entry`,
         );
       }
-      // PAR-777 (D-76): the same collision, one punctuation spelling apart — `a` itself is
+      // PAR-777 (D-78): the same collision, one punctuation spelling apart — `a` itself is
       // not a canonical key (the exact check above already ruled that out), but its PEP 503
       // form matches one.
       const twinCanonical = canonicalPep.get(pep);
@@ -624,7 +624,7 @@ function applyLayer(
   fileOf: Map<string, ConfigSite>,
   display: string,
 ): void {
-  // PAR-777 (D-76): two entries in the SAME layer whose canonical names are PEP 503 twins are
+  // PAR-777 (D-78): two entries in the SAME layer whose canonical names are PEP 503 twins are
   // ambiguous — D-06/D-07's precedence rules decide which of two LAYERS wins, not which of two
   // entries declared side by side in one file should. Checked before anything else in this
   // layer is applied, so a config error here never leaves a partial merge behind. NOT the same
@@ -647,7 +647,7 @@ function applyLayer(
     if (firstIndex === undefined) seenPep.set(pep, index);
   }
   // D-06: every key this layer claims — as a name or an alias — leaves the layers below.
-  // PAR-777 (D-76): claimed on its PEP 503 form too, not just the exact spelling — otherwise
+  // PAR-777 (D-78): claimed on its PEP 503 form too, not just the exact spelling — otherwise
   // a config `react_dom` does not dissolve the default alias `react-dom` before
   // `validateAliases` runs, and `validateAliases` (which DOES compare PEP 503 forms) then
   // sees a collision D-06 was supposed to have already removed: the load fails outright,
@@ -672,7 +672,7 @@ function applyLayer(
   }
   for (const [key, e] of rewritten) entries.set(key, e);
   // Merge, this layer wins on name; D-07 alias inheritance from the layer it replaces.
-  // PAR-777 (D-76): "wins on name" now also means "wins on the PEP 503 twin of an existing
+  // PAR-777 (D-78): "wins on name" now also means "wins on the PEP 503 twin of an existing
   // canonical name" — a config `foo_bar` overrides a registry `foo-bar` exactly as a
   // same-spelling entry would, inheriting its aliases (D-07) and taking its place under the
   // NEW entry's own spelling. Unlike a same-name override (a `Map.set` on an existing key,

@@ -251,7 +251,7 @@ describe("config aliases validation", () => {
   });
 });
 
-describe("PAR-777 (D-76): PEP 503 name twins (foo-bar / foo_bar) are the same package, not two entries", () => {
+describe("PAR-777 (D-78): PEP 503 name twins (foo-bar / foo_bar) are the same package, not two entries", () => {
   it("a config entry that is a PEP 503 twin of a default registry entry overrides it, exactly as a same-name entry would", () => {
     const reg = loadRegistry(writeConfig([{ name: "ai.sdk", urls: [U] }]));
     expect(reg.entries.has("ai-sdk")).toBe(false); // the old spelling is gone, not kept alongside the new one

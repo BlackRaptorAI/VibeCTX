@@ -789,9 +789,9 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-76 — decided 2026-09-17, executing PAR-777
+## D-78 — decided 2026-09-17, executing PAR-777
 
-- **D-76** 2026-09-17 — **Two spellings of a name that differ only by PEP 503 punctuation
+- **D-78** 2026-09-17 — **Two spellings of a name that differ only by PEP 503 punctuation
   folding (`foo-bar` / `foo_bar` / `Foo.Bar`) are the SAME package for registry identity —
   applied with no ecosystem check — but remain DISTINCT for cache-directory key derivation
   (D-71).** `normalisePyPiName` (`src/package-names.ts`) already existed and was already used,
