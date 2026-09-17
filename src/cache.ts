@@ -275,20 +275,25 @@ export function readCache(
  *  `etag` that somehow reached disk is silently dropped here rather than merely ignored for
  *  one read. Benign — the field is a revalidation hint, not identity — and consistent with
  *  every write in this file already going through a validator before it lands. */
-export function touchCache(library: string, url: string): void {
+/** Returns the `fetchedAt` it wrote, or `undefined` on any of the best-effort no-op paths
+ *  (A17/PAR-726: callers that need to report exactly when a revalidated document was fetched
+ *  read it from here rather than calling `new Date()` a second time, which could disagree
+ *  with what actually landed on disk by the width of that second call). */
+export function touchCache(library: string, url: string): string | undefined {
   const dir = libDir(library);
   const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
-  if (!existsSync(metaPath)) return;
+  if (!existsSync(metaPath)) return undefined;
   const meta = readMetaFile(metaPath);
   // Best effort (D-13): a meta this process cannot trust has nothing to refresh. The next
   // `readCache` reports the entry uncached and the next fetch writes a fresh, valid meta.
-  if (!meta) return;
+  if (!meta) return undefined;
   // D-71 (PAR-749, Root 1) — same verification as `readCache`: a meta whose own `url` does
   // not match the URL this call was asked to refresh is not this entry, whatever the file
   // name says. Refreshing it anyway would extend the TTL of a mismatched record.
-  if (meta.url !== url) return;
+  if (meta.url !== url) return undefined;
   meta.fetchedAt = new Date().toISOString();
   writeAtomic(metaPath, JSON.stringify(meta, null, 2));
+  return meta.fetchedAt;
 }
 
 /**
@@ -304,12 +309,14 @@ export function touchCache(library: string, url: string): void {
  * with no meta at all, which readCache reports as a miss — both files are required), so no
  * reader ever observes a partially written file.
  */
+/** Returns the `fetchedAt` it wrote (A17/PAR-726 — see `touchCache`'s doc comment; the same
+ *  reasoning applies here: report the timestamp actually persisted, not a freshly-taken one). */
 export function writeCache(
   library: string,
   url: string,
   content: string,
   etag?: string,
-): void {
+): string {
   const dir = libDir(library);
   mkdirSync(dir, { recursive: true });
   const slug = urlSlug(url);
@@ -339,6 +346,7 @@ export function writeCache(
   // amortised inside noteCacheWrite, which never throws — an unsweepable cache must not fail
   // a write that already succeeded.
   noteCacheWrite(cacheRoot(), contentPath, Buffer.byteLength(content, "utf8"));
+  return meta.fetchedAt;
 }
 
 /**

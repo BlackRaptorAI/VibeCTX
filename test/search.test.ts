@@ -499,8 +499,48 @@ describe("runSearch · what the response tells the agent (PAR-659, D-35)", () =>
     const stale: Registry = { entries: new Map([["hono", { name: "hono", urls: [HONO_URL], ttlHours: 0 }]]) };
     const text = formatSearchResults(runSearch(stale, { query: "streaming" }));
     expect(text).toContain(`Source: ${HONO_URL}`);
-    expect(text).toMatch(/> Stale: cached \d{4}-\d{2}-\d{2}T/);
+    // A17 (PAR-726): the standing stamp now carries fetched-at/fresh-or-stale/curated-or-
+    // resolved on the SAME `Source:` line, every group, not just a stale one.
+    expect(text).toMatch(new RegExp(`Source: ${HONO_URL} · fetched \\S+ · stale · curated`));
+    expect(text).toMatch(/> Stale: cached \d{4}-\d{2}-\d{2}T/); // the separate, actionable hint survives too
     expect(text).toContain("vibectx refresh hono");
+  });
+
+  describe("A17 (PAR-726): the standing stamp on every group", () => {
+    it("a FRESH group states 'fresh' on its Source line, not just silence", () => {
+      warmAll();
+      const text = formatSearchResults(search({ query: "streaming" }));
+      expect(text).toMatch(new RegExp(`Source: ${HONO_URL} · fetched \\S+ · fresh · curated`));
+    });
+
+    it("a resolved (uncurated) entry's group says 'resolved', not 'curated'", () => {
+      writeCache("hono", HONO_URL, HONO_DOC);
+      const reg: Registry = {
+        entries: new Map([
+          [
+            "hono",
+            {
+              name: "hono",
+              urls: [HONO_URL],
+              resolved: { source: "npm", resolvedAt: "2026-09-17T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/hono/latest" },
+            },
+          ],
+        ]),
+      };
+      const text = formatSearchResults(runSearch(reg, { query: "streaming" }));
+      expect(text).toMatch(new RegExp(`Source: ${HONO_URL} · fetched \\S+ · fresh · resolved`));
+    });
+
+    /** A17 (PAR-726) done-when: "the stamp survives the D-43 degradation ordering... the stamp
+     *  is not the first thing dropped." `groupHeader`'s cost (name line + stamp line) is what
+     *  `selectAcrossLibraries` prices for the GUARANTEED first section of the best-scoring
+     *  library (D-35's "at least one section, always" rule) — so at ANY budget that returns
+     *  anything at all, the stamp is part of what was paid for before the section itself. */
+    it("the stamp is part of the guaranteed first section's own cost, at the smallest possible budget", () => {
+      warmAll();
+      const text = formatSearchResults(search({ query: "streaming", maxTokens: 1 }));
+      expect(text).toMatch(new RegExp(`Source: \\S+ · fetched \\S+ · (fresh|stale) · (curated|resolved)`));
+    });
   });
 
   it("zero matches is an honest message naming the libraries searched", () => {
@@ -739,10 +779,19 @@ describe("the README's search example (PAR-659)", () => {
         ["acme-edge", { name: "acme-edge", urls: [EDGE_URL] }],
       ]),
     };
-    expect(formatSearchResults(runSearch(reg, { query: "server-sent events streaming" }))).toBe(
+    const out = formatSearchResults(runSearch(reg, { query: "server-sent events streaming" }));
+    // A17 (PAR-726): each group's header now opens with the standing stamp, which carries a
+    // live `fetched <ISO>` timestamp per document — the one piece of this response that
+    // cannot be pinned as a literal without lying about the wall clock. Extracted and
+    // validated as real ISO timestamps, then spliced into the otherwise fully verbatim
+    // comparison below, so this still catches any other drift byte-for-byte.
+    const fetchedAts = [...out.matchAll(/ · fetched (\S+) · /g)].map((m) => m[1]);
+    expect(fetchedAts).toHaveLength(2);
+    for (const t of fetchedAts) expect(t).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(out).toBe(
       [
         "# acme-pay",
-        `Source: ${PAY_URL}`,
+        `Source: ${PAY_URL} · fetched ${fetchedAts[0]} · fresh · curated`,
         "",
         "## Acme Pay > Webhooks > Listening for events",
         "",
@@ -753,7 +802,7 @@ describe("the README's search example (PAR-659)", () => {
         "```",
         "",
         "# acme-edge",
-        `Source: ${EDGE_URL}`,
+        `Source: ${EDGE_URL} · fetched ${fetchedAts[1]} · fresh · curated`,
         "",
         "## Acme Edge > Streaming responses",
         "",
@@ -779,10 +828,13 @@ describe("runSearch · what the budget reports, and where bodies come from (PAR-
     expect(tight.groups).toHaveLength(1);
     expect(tight.matchedLibraries).toBe(full.matchedLibraries); // unchanged by the budget
 
-    // The smallest budget that still buys BOTH the answer and the full accounting. Below it,
-    // D-43 spends what is left on the section and the footer is what gives way — so this case
-    // asks its question (does the footer count MATCHES or what fitted?) where a footer exists.
-    const narrow = search({ query: "streaming server-sent events schema object", maxTokens: 60 });
+    // A budget that buys BOTH the answer and the full accounting. Below it, D-43 spends what
+    // is left on the section and the footer is what gives way — so this case asks its
+    // question (does the footer count MATCHES or what fitted?) where a footer exists.
+    // A17 (PAR-726), RE-MEASURED at the larger, stamp-carrying group header: moved from 60 to
+    // 90 (below 80 the footer no longer fits at all on this fixture; at exactly 120 a second
+    // group's section starts fitting too, which this test does not want).
+    const narrow = search({ query: "streaming server-sent events schema object", maxTokens: 90 });
     expect(narrow.groups).toHaveLength(1);
     const text = formatSearchResults(narrow);
     expect(text).toContain(`${full.matchedLibraries} matched, 1 shown within the budget`);

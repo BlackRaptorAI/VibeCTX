@@ -8,6 +8,7 @@ import {
   queryIndex,
   renderSection,
   splitSections,
+  sourceStampLine,
   weighSections,
   type SplitSection,
   type Weighted,
@@ -125,11 +126,11 @@ export const MAX_TOKENS_BUDGET = 200_000;
  */
 export const MAX_RENDERED_LIBRARIES = 8;
 
-/** Longest library name and URL rendered into the response (D-30/D-36: every attacker-influenced
- *  string that reaches the output is cleaned and clipped). A name is bounded by npm's 214; a URL
- *  well under 300. ASSUMED. */
+/** Longest library name rendered into the response (D-30/D-36: every attacker-influenced string
+ *  that reaches the output is cleaned and clipped). Bounded by npm's 214. ASSUMED. (The URL's
+ *  own bound moved to `retrieval.ts`'s `MAX_STAMP_URL_CHARS` — A17/PAR-726, security-architect
+ *  round 1 S-1 — since `sourceStampLine` now owns cleaning/clipping `url` for every caller.) */
 const MAX_LIBRARY_CHARS = 214;
-const MAX_URL_CHARS = 300;
 /** Libraries named individually in the "not cached" line before it switches to a count. ASSUMED. */
 const MAX_NAMED_UNCACHED = 8;
 /** Longest heading, and longest single ancestor heading, carried on a returned section.
@@ -168,6 +169,10 @@ export interface SearchGroup {
   stale: boolean;
   /** Cache meta's `fetchedAt` for that document. */
   fetchedAt: string;
+  /** True for a default-registry or config-file entry; false for one `resolve_library`
+   *  synthesized this session (A17/PAR-726 — same reading of `entry.resolved` get-docs.ts's
+   *  `isCurated` uses). */
+  curated: boolean;
   /** Best section score in this library — what libraries are ordered by. */
   bestScore: number;
   /** Sections scoring above zero, best first (before the budget is applied). */
@@ -353,11 +358,19 @@ function selectAcrossLibraries(groups: SearchGroup[], budget: number): SearchGro
   return groups.map((g, i) => ({ ...g, sections: taken[i] })).filter((g) => g.sections.length > 0);
 }
 
-/** The lines that open a library's block: its name, then the `Source:` line D-35 requires,
- *  then a staleness marker when the cached copy is past TTL. Both derived fields are cleaned
- *  and clipped (D-30/D-36). */
+/** The lines that open a library's block: its name, then the standing stamp A17/PAR-726
+ *  requires on EVERY group (not just a stale one) — source, fetched-at, fresh-or-stale,
+ *  curated-or-resolved, in the one wording `sourceStampLine` shares with `get_docs` — then an
+ *  actionable staleness note when the cached copy is past TTL (the stamp already SAYS stale;
+ *  this is the "and here's what to do about it" line, kept separately for that reason). `url`
+ *  is cleaned and clipped INSIDE `sourceStampLine` itself (security-architect, A17 round 1,
+ *  S-1) — this file no longer clips its own copy first, so there is exactly one place, not two
+ *  that have to agree. */
 function groupHeader(group: SearchGroup): string {
-  const lines = [`# ${clipText(group.library, MAX_LIBRARY_CHARS)}`, `Source: ${clipText(group.url, MAX_URL_CHARS)}`];
+  const lines = [
+    `# ${clipText(group.library, MAX_LIBRARY_CHARS)}`,
+    sourceStampLine({ url: group.url, fetchedAt: group.fetchedAt, stale: group.stale, curated: group.curated }),
+  ];
   if (group.stale) {
     lines.push(
       `> Stale: cached ${clipText(group.fetchedAt, 40)}, past this library's TTL — run \`vibectx refresh ${clipText(group.library, MAX_LIBRARY_CHARS)}\` for the current text.`,
@@ -546,6 +559,7 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
       url: c.url,
       stale: c.stale,
       fetchedAt: c.fetchedAt,
+      curated: c.entry.resolved === undefined,
       bestScore: sections[0].score,
       matched: sections.length,
       sections,

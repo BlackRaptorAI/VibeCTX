@@ -180,7 +180,7 @@ path, one line of context from the doc, and the fence's language:
 ```
 
 ~~~markdown
-Source: https://docs.acme.example.com/llms-full.txt
+Source: https://docs.acme.example.com/llms-full.txt · fetched 2026-09-17T14:32:07.418Z · fresh · curated
 
 ### Acme Pay > Checkout > Create a Checkout Session
 Create the session on your server, then redirect the customer:
@@ -196,10 +196,23 @@ const session = await acme.checkout.sessions.create({
 
 **Where that response came from.** `acme-pay` is a made-up library on a
 [reserved documentation domain](https://datatracker.ietf.org/doc/html/rfc2606), and the
-block above is the real, unedited output of this code against a fixture document — pinned
-by `test/get-docs.test.ts` ("produces the README's snippets example verbatim"), which
-fails if the two ever drift. It is the *shape* of a response, not a capture from any
-vendor's documentation site; the exact headings depend on what the library publishes.
+block above is the real, unedited output of this code against a fixture document (only the
+`fetched` timestamp is illustrative — every response carries the real wall-clock time it was
+fetched at) — pinned by `test/get-docs.test.ts` ("produces the README's snippets example
+verbatim"), which fails if the two ever drift. It is the *shape* of a response, not a
+capture from any vendor's documentation site; the exact headings depend on what the library
+publishes.
+
+Every response that actually has a document to show — this one included — carries that
+`Source:` line: where the text came from, when it was fetched, whether that copy is fresh or
+past its cache TTL, and whether the entry is curated (from the default registry or your
+config) or auto-resolved from a package name. Not just the FIRST time a name resolves — every
+call, so an agent two calls later still knows what it is reading, and can weigh it as
+retrieved external text rather than instruction. (Two things can precede it on the same
+response: a `> STALE:` banner when the cached copy is past its TTL, and the one-time `>
+Resolved …` note on the call that first resolves a package name. The one response that never
+had a document — nothing reachable, nothing cached — still states curated-or-resolved; it
+just cannot claim a `Source:` for text that was never fetched.)
 
 A snippet is ranked by its section's BM25 score plus a BM25 over the code itself, so the
 block that actually contains the call you asked for wins. Blocks under two lines are
@@ -210,7 +223,8 @@ out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a 
 matches you get, in full:
 
 ```
-No code snippets matched "<topic>" in <library> docs (source: <url>). Try mode "sections" or broader terms.
+Source: <url> · fetched <ISO timestamp> · fresh|stale · curated|resolved
+No code snippets matched "<topic>" in <library> docs. Try mode "sections" or broader terms.
 ```
 
 ## Don't know which library? `search`
@@ -229,7 +243,7 @@ vibectx search "revalidate" --max-tokens 1500 --json
 
 ~~~markdown
 # acme-pay
-Source: https://docs.acme-pay.example.com/llms-full.txt
+Source: https://docs.acme-pay.example.com/llms-full.txt · fetched 2026-09-17T14:32:07.418Z · fresh · curated
 
 ## Acme Pay > Webhooks > Listening for events
 
@@ -240,7 +254,7 @@ const events = acme.events.stream({ types: ['payment.succeeded'] });
 ```
 
 # acme-edge
-Source: https://docs.acme-edge.example.com/llms-full.txt
+Source: https://docs.acme-edge.example.com/llms-full.txt · fetched 2026-09-17T14:32:07.512Z · fresh · curated
 
 ## Acme Edge > Streaming responses
 
@@ -251,9 +265,10 @@ Searched 2 of 2 configured libraries; 2 matched.
 
 **Where that response came from.** `acme-pay` and `acme-edge` are made-up libraries on a
 [reserved documentation domain](https://datatracker.ietf.org/doc/html/rfc2606), and the block
-above is the real, unedited output of this code against a fixture — pinned by
-`test/search.test.ts` ("produces the README's search example verbatim"), which fails if the
-two ever drift. It is the *shape* of a response, not a capture from any vendor's site.
+above is the real, unedited output of this code against a fixture (only the two `fetched`
+timestamps are illustrative) — pinned by `test/search.test.ts` ("produces the README's search
+example verbatim"), which fails if the two ever drift. It is the *shape* of a response, not a
+capture from any vendor's site.
 
 **Cache-only, by design.** `search` never fetches, never resolves a new package name and
 never touches the network — so it is deterministic and works on a plane. (How fast is
