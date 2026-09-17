@@ -72,6 +72,8 @@ describe("default registry: vibe-coder top-30 (PAR-654)", () => {
   it.each(DEFAULT_REGISTRY.map((e) => [e.name, e] as const))("%s is a well-formed entry", (_name, e) => {
     expect(e.name.trim().length).toBeGreaterThan(0);
     expect(e.name).toBe(e.name.toLowerCase()); // naming rule: canonical names are lowercase
+    // PAR-722/A9: every one of the 30 is a JS/TS package (no PyPI entry in the defaults today).
+    expect(e.ecosystem, e.name).toBe("npm");
     expect(e.description?.trim().length ?? 0).toBeGreaterThan(0);
     expect(e.urls.length).toBeGreaterThanOrEqual(1);
     for (const u of e.urls) expect(u, `${e.name}: ${u}`).toMatch(/^https:\/\//);
@@ -270,6 +272,11 @@ describe("D-06: config beats default alias (backward compatibility with 0.1.3 co
     expect(DEFAULT_REGISTRY.find((e) => e.name === "next.js")?.aliases).toEqual(["next", "nextjs"]);
     expect(resolveLibrary(loadRegistry(), "next")?.name).toBe("next.js");
   });
+
+  it("PAR-722: the alias-trimmed copy of a default still carries its `ecosystem` field (a plain spread, not an identity contract)", () => {
+    const reg = loadRegistry(writeConfig([{ name: "next", urls: [U] }]));
+    expect(reg.entries.get("next.js")?.ecosystem).toBe("npm");
+  });
 });
 
 describe("D-07: an override that omits aliases inherits the default's; aliases: [] clears them", () => {
@@ -446,6 +453,13 @@ describe("config allowedHosts validation (PAR-655)", () => {
   it("strips a `resolved` marker from config entries (only the resolver may set it)", () => {
     const reg = loadRegistry(writeConfig([{ name: "acme", urls: [U], resolved: { source: "npm", resolvedAt: "x", metadataUrl: "y" } }]));
     expect(reg.entries.get("acme")?.resolved).toBeUndefined();
+  });
+
+  it("strips an `ecosystem` marker from config entries (PAR-722, D-63: never config-settable)", () => {
+    // zod already strips the unknown key before this ever reaches normaliseLayer's belt-and-
+    // braces `delete`; this pins the observable outcome either way.
+    const reg = loadRegistry(writeConfig([{ name: "acme", urls: [U], ecosystem: "pypi" }]));
+    expect(reg.entries.get("acme")?.ecosystem).toBeUndefined();
   });
 });
 

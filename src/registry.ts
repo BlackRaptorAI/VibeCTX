@@ -51,6 +51,9 @@ export interface LibraryEntry {
   allowedHosts?: string[];
   /** Present only on entries resolve_library synthesized (never on defaults or config). */
   resolved?: ResolvedMeta;
+  /** D-11/D-63: the ecosystem a shipped default is evidently the package for. Set only on
+   *  DEFAULT_REGISTRY entries; stripped from config entries (D-63 — never config-settable). */
+  ecosystem?: "npm" | "pypi";
 }
 
 /*
@@ -90,6 +93,7 @@ export interface LibraryEntry {
 export const DEFAULT_REGISTRY: LibraryEntry[] = [
   {
     name: "next.js",
+    ecosystem: "npm",
     aliases: ["next", "nextjs"],
     urls: [
       "https://nextjs.org/llms-full.txt",
@@ -101,6 +105,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "react",
+    ecosystem: "npm",
     aliases: ["react-dom"],
     urls: [
       "https://react.dev/llms-full.txt",
@@ -114,6 +119,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "supabase",
+    ecosystem: "npm",
     aliases: ["supabase-js", "@supabase/supabase-js"],
     urls: [
       "https://supabase.com/docs/llms-full.txt",
@@ -126,6 +132,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "tailwindcss",
+    ecosystem: "npm",
     aliases: ["tailwind", "@tailwindcss/postcss"],
     urls: [
       "https://tailwindcss.com/llms-full.txt",
@@ -137,6 +144,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "shadcn",
+    ecosystem: "npm",
     aliases: ["shadcn-ui", "shadcn/ui"],
     urls: [
       "https://ui.shadcn.com/llms-full.txt",
@@ -148,6 +156,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "stripe",
+    ecosystem: "npm",
     urls: [
       "https://docs.stripe.com/llms-full.txt",
       "https://docs.stripe.com/llms.txt",
@@ -158,6 +167,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "ai-sdk",
+    ecosystem: "npm",
     aliases: ["ai", "vercel-ai"],
     urls: [
       "https://ai-sdk.dev/docs/llms-full.txt",
@@ -170,6 +180,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "expo",
+    ecosystem: "npm",
     urls: [
       "https://docs.expo.dev/llms-full.txt",
       "https://docs.expo.dev/llms.txt",
@@ -180,6 +191,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "drizzle-orm",
+    ecosystem: "npm",
     aliases: ["drizzle"],
     urls: [
       "https://orm.drizzle.team/llms-full.txt",
@@ -191,6 +203,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "prisma",
+    ecosystem: "npm",
     urls: [
       "https://www.prisma.io/docs/llms-full.txt",
       "https://www.prisma.io/docs/llms.txt",
@@ -201,6 +214,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "trpc",
+    ecosystem: "npm",
     aliases: ["@trpc/server", "@trpc/client"],
     urls: [
       "https://trpc.io/llms-full.txt",
@@ -212,6 +226,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "zod",
+    ecosystem: "npm",
     urls: [
       "https://zod.dev/llms-full.txt",
       "https://zod.dev/llms.txt",
@@ -222,6 +237,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "hono",
+    ecosystem: "npm",
     urls: [
       "https://hono.dev/llms-full.txt",
       "https://hono.dev/llms.txt",
@@ -232,6 +248,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "bun",
+    ecosystem: "npm",
     urls: [
       "https://bun.com/llms-full.txt",
       "https://bun.com/llms.txt",
@@ -243,6 +260,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "vite",
+    ecosystem: "npm",
     urls: [
       "https://vite.dev/llms-full.txt",
       "https://vite.dev/llms.txt",
@@ -253,6 +271,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "clerk",
+    ecosystem: "npm",
     aliases: ["@clerk/nextjs"],
     urls: [
       "https://clerk.com/llms-full.txt",
@@ -265,6 +284,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "convex",
+    ecosystem: "npm",
     urls: [
       "https://docs.convex.dev/llms-full.txt",
       "https://docs.convex.dev/llms.txt",
@@ -276,6 +296,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "firebase",
+    ecosystem: "npm",
     aliases: ["firebase-js"],
     urls: [
       "https://firebase.google.com/llms-full.txt",
@@ -287,6 +308,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "openai",
+    ecosystem: "npm",
     urls: [
       "https://platform.openai.com/docs/llms-full.txt",
       "https://platform.openai.com/docs/llms.txt",
@@ -298,6 +320,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "anthropic-sdk",
+    ecosystem: "npm",
     aliases: ["anthropic", "@anthropic-ai/sdk"],
     urls: [
       "https://platform.claude.com/llms.txt",
@@ -310,6 +333,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "playwright",
+    ecosystem: "npm",
     aliases: ["@playwright/test"],
     urls: [
       "https://playwright.dev/llms-full.txt",
@@ -321,6 +345,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "vitest",
+    ecosystem: "npm",
     urls: [
       "https://vitest.dev/llms-full.txt",
       "https://vitest.dev/llms.txt",
@@ -331,6 +356,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "react-router",
+    ecosystem: "npm",
     aliases: ["remix", "react-router-dom"],
     urls: [
       "https://reactrouter.com/llms-full.txt",
@@ -342,6 +368,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "astro",
+    ecosystem: "npm",
     urls: [
       "https://docs.astro.build/llms-full.txt",
       "https://docs.astro.build/llms.txt",
@@ -354,6 +381,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "sveltekit",
+    ecosystem: "npm",
     aliases: ["svelte", "@sveltejs/kit"],
     urls: [
       "https://svelte.dev/llms-full.txt",
@@ -366,6 +394,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "nuxt",
+    ecosystem: "npm",
     urls: [
       "https://nuxt.com/llms-full.txt",
       "https://nuxt.com/llms.txt",
@@ -376,6 +405,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "vue",
+    ecosystem: "npm",
     urls: [
       "https://vuejs.org/llms-full.txt",
       "https://vuejs.org/llms.txt",
@@ -386,6 +416,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "tanstack-query",
+    ecosystem: "npm",
     aliases: ["react-query", "@tanstack/react-query"],
     urls: [
       "https://tanstack.com/query/llms-full.txt",
@@ -398,6 +429,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "motion",
+    ecosystem: "npm",
     aliases: ["framer-motion"],
     urls: [
       "https://motion.dev/llms-full.txt",
@@ -409,6 +441,7 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
   },
   {
     name: "resend",
+    ecosystem: "npm",
     urls: [
       "https://resend.com/docs/llms-full.txt",
       "https://resend.com/docs/llms.txt",
@@ -477,8 +510,9 @@ interface ConfigSite {
 
 /**
  * Normalise one config file's entries: keys folded, allowed hosts normalised, any `resolved`
- * marker dropped (only the resolver may set one). Shape was already validated by
- * `readConfigFile`; what can still fail here is a host VALUE the link policy refuses.
+ * or `ecosystem` marker dropped (only the resolver may set the former; only a shipped default
+ * carries the latter — D-63). Shape was already validated by `readConfigFile`; what can still
+ * fail here is a host VALUE the link policy refuses.
  *
  * The refusal is re-worded into D-22's grammar, with the offending value clipped: it is a
  * string from a file this process did not write, and link-policy quotes it back whole.
@@ -499,6 +533,9 @@ function normaliseLayer(libraries: LibraryEntry[], display: string): LibraryEntr
       });
     }
     delete normalised.resolved;
+    // D-63: ecosystem is never config-settable; EntrySchema already strips the key (zod's
+    // default is to drop unknown properties), so this guards the type, not the parser.
+    delete normalised.ecosystem;
     return normalised;
   });
 }

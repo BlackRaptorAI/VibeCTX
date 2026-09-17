@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, mkdirSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readCache, writeCache } from "../src/cache.js";
-import { loadDiscoveredRegistry, loadRegistry, DEFAULT_REGISTRY, type Registry } from "../src/registry.js";
+import { loadDiscoveredRegistry, loadRegistry, type Registry } from "../src/registry.js";
 import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { readProjectRecord, projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 import { documentHash, readIndex, resetSearchIndexMemo } from "../src/search-index.js";
@@ -578,28 +578,26 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     expect(json).toContain("requirements-[31mred.txt");
   });
 
-  it("N-4: evidentEcosystem's array-identity contract — a shipped default (and its D-06 alias-trimmed copy) keeps DEFAULT_REGISTRY's `urls` array; a config entry brings its own", () => {
-    // evidentEcosystem calls a registry entry "the npm package by the NAMING RULE" only when
-    // its `urls` array IS a DEFAULT_REGISTRY entry's array (===, not deep equality). Two things
-    // must therefore stay true, and nothing else in the suite pins them:
-    //   1. loadRegistry copies default entries with a spread, so `urls` is shared, not cloned;
-    //   2. a config entry overriding a default name replaces `urls` with its own array.
-    // Break either and warm silently stops emitting (or starts wrongly emitting) the D-11 note.
-    const byUrls = new Map(DEFAULT_REGISTRY.map((d) => [d.name, d.urls]));
-    const plain = loadRegistry(undefined, { includeResolved: false });
-    for (const d of DEFAULT_REGISTRY) expect(plain.entries.get(d.name)?.urls, d.name).toBe(byUrls.get(d.name));
+  it("N-4/PAR-722: the D-11 ecosystem note survives a structuredClone of the registry", async () => {
+    // The bug this replaced: evidentEcosystem used to call an entry "the npm package" only
+    // when its `urls` array WAS (===, not deep equality) a DEFAULT_REGISTRY entry's array — a
+    // structuredClone deep-copies arrays, so that reference-identity check could never survive
+    // one, and would have silently stopped emitting the D-11 note with no test failure. Now
+    // evidentEcosystem reads the entry's own `ecosystem` field, which a clone carries by value.
+    writeFileSync(join(project, "pyproject.toml"), '[project]\ndependencies = ["stripe"]\n', "utf8");
+    const cloned: Registry = structuredClone(loadRegistry(undefined, { includeResolved: false }));
+    writeCache("stripe", "https://docs.stripe.com/llms-full.txt", "# Stripe");
+    const report = await runWarm(cloned, { dir: project, offline: true });
+    const row = report.dependencies.find((r) => r.name === "stripe" && r.ecosystem === "pypi");
+    expect(row).toMatchObject({ library: "stripe", status: "already fresh", note: "curated entry is the npm package" });
 
-    // D-06: a config entry claiming a DEFAULT alias makes loadRegistry rewrite that default's
-    // `aliases`; the copy must still share the same `urls` array.
+    // A config entry still has no evident ecosystem (D-63: `ecosystem` is not config-settable) —
+    // that survives the clone too, cloned or not.
     const cfg = join(project, "vibectx.config.json");
-    writeFileSync(cfg, JSON.stringify({ libraries: [{ name: "next", urls: ["https://example.com/llms.txt"] }] }), "utf8");
-    const trimmed = loadRegistry(cfg, { includeResolved: false });
-    expect(trimmed.entries.get("next.js")?.aliases).not.toContain("next");
-    expect(trimmed.entries.get("next.js")?.urls).toBe(byUrls.get("next.js"));
-
-    // A config entry overriding a default BY NAME brings its own urls: no evident ecosystem.
-    writeFileSync(cfg, JSON.stringify({ libraries: [{ name: "next.js", urls: ["https://example.com/llms.txt"] }] }), "utf8");
-    expect(loadRegistry(cfg, { includeResolved: false }).entries.get("next.js")?.urls).not.toBe(byUrls.get("next.js"));
+    writeFileSync(cfg, JSON.stringify({ libraries: [{ name: "stripe", urls: ["https://docs.stripe.com/llms-full.txt"] }] }), "utf8");
+    const cfgClone: Registry = structuredClone(loadRegistry(cfg, { includeResolved: false }));
+    const cfgReport = await runWarm(cfgClone, { dir: project, offline: true });
+    expect(cfgReport.dependencies.find((r) => r.name === "stripe" && r.ecosystem === "pypi")?.note).toBeUndefined();
   });
 
   it("D-10: warmToolText (the MCP tool) accepts only the server's working directory or a directory beneath it", async () => {
