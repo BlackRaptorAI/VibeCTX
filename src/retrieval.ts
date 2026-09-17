@@ -296,6 +296,68 @@ function renderedPath(s: { heading: string; path: string[] }): string {
   return renderField(headingPath(s), MAX_PATH_CHARS);
 }
 
+/** The standing per-document facts A17/PAR-726 requires on EVERY `get_docs`/`search` response,
+ *  not just the one that performed an implicit resolution: where the text came from, how old
+ *  it is, and whether the entry is a curated registry entry or one `resolve_library`
+ *  synthesized this session. One function, one wording, so the model reads the same envelope
+ *  shape from either tool (the lesson D-48 already established for the control/bidi class
+ *  applies here too: one place states the fact, every render path calls it) — and, per
+ *  security-architect's A17 round-1 finding S-1, the same lesson applies to the CLEANING too:
+ *  `url` is cleaned and clipped HERE, not left to each caller's own convention. Before this,
+ *  `search.ts` clipped its copy (`MAX_URL_CHARS`) but `get-docs.ts` passed `doc.url` raw — a
+ *  config-authored entry's URL is validated for scheme/host (`link-policy.ts`) but never
+ *  re-serialized, so an embedded control character or newline could survive into a rendered
+ *  stamp on the get_docs path only. One shared function is what makes "clean once, here" an
+ *  actual guarantee rather than a convention two callers could independently forget.
+ *
+ *  Does NOT include a package/document VERSION or ref: A11/PAR-724 (manifest-derived version
+ *  matching), the item this one's own Linear description names as the source of that field,
+ *  has not been built — there is no version or ref tracked anywhere in this codebase today.
+ *  Recorded as a deliberate, flagged gap rather than invented or silently dropped; see D-73 in
+ *  .vibectx-plan/DECISIONS.md. */
+export interface StampFacts {
+  url: string;
+  /** ISO, from the document's own cache meta — ambient `Date.now()` for this MUST NOT be
+   *  substituted; see fetcher.ts's DocResult / cache.ts's writeCache/touchCache. Bounded and
+   *  charset-restricted by `cache-meta.ts`'s `ISO_INSTANT` validation on every read path, so
+   *  cleaning it here is redundant defense, not a live gap the way `url` was. */
+  fetchedAt: string;
+  /** Past this document's TTL. */
+  stale: boolean;
+  /** True for a default-registry or config-file entry; false for one `resolve_library`
+   *  synthesized this session (`entry.resolved !== undefined`). */
+  curated: boolean;
+}
+
+/** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
+ *  so a caller that used to clip separately sees no change in outcome, only in ownership. */
+const MAX_STAMP_URL_CHARS = 300;
+
+export function sourceStampLine(f: StampFacts): string {
+  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+}
+
+/** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
+ *  `maxChars` — dropping whole trailing fields (curated/resolved, then fresh/stale, then
+ *  fetched-at) rather than leaving that to a caller's own final length-based backstop clip to
+ *  cut mid-field (code-reviewer, A17 round 1, B2). A mid-field cut is not merely ugly: `·
+ *  fetched 2026-09-1` — the true fetch date sliced at its 9th character — is a plausible,
+ *  well-formed, WRONG date presented as fact, which is worse than the missing stamp A17 exists
+ *  to fix. At the extreme (`maxChars` too small even for `Source: <url>`), this returns that
+ *  shortest variant anyway and leaves it to the caller's own backstop — unchanged from
+ *  get_docs' pre-A17 behaviour for an oversized `Source:` line alone, already accepted and
+ *  pinned by test. */
+export function fitStampLine(f: StampFacts, maxChars: number): string {
+  const full = sourceStampLine(f);
+  if (full.length <= maxChars) return full;
+  const url = clipText(f.url, MAX_STAMP_URL_CHARS);
+  const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;
+  if (withoutCurated.length <= maxChars) return withoutCurated;
+  const withoutFreshness = `Source: ${url} · fetched ${f.fetchedAt}`;
+  if (withoutFreshness.length <= maxChars) return withoutFreshness;
+  return `Source: ${url}`;
+}
+
 export function renderSection(s: SplitSection): string {
   return `## ${renderedPath(s)}\n\n${s.body}`;
 }

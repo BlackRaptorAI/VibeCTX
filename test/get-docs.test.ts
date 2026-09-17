@@ -226,6 +226,39 @@ describe("getDocs index following", () => {
     expect(out).toContain("https://ghost.example.com/llms-full.txt\nhttps://ghost.example.com/llms.txt");
   });
 
+  /** A17 (PAR-726) addendum (CR-20260906-par-657-config-discovery, source-header-gap): the
+   *  could-not-fetch response used to carry NO marker at all — no `Source:` line, unlike every
+   *  other render path in this file. It cannot state a `Source:` line honestly (nothing was
+   *  ever fetched), but curated-vs-resolved is a fact about the entry regardless, and that
+   *  much is now stated on both the curated and resolved cases. */
+  describe("A17 (PAR-726) addendum: the could-not-fetch response carries a curated/resolved stamp", () => {
+    it("a curated entry", async () => {
+      const spy = stubFetch({});
+      const out = await getDocs(
+        { name: "ghost", urls: ["https://ghost.example.com/llms-full.txt"] },
+        { topic: "anything" },
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(out.split("\n")[0]).toBe("No document available · curated");
+      expect(out).toContain('Could not fetch docs for "ghost"');
+    });
+
+    it("a resolved (uncurated) entry", async () => {
+      const spy = stubFetch({});
+      const out = await getDocs(
+        {
+          name: "ghost",
+          urls: ["https://ghost.example.com/llms-full.txt"],
+          resolved: { source: "npm", resolvedAt: "2026-09-17T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/ghost/latest" },
+        },
+        { topic: "anything" },
+      );
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(out.split("\n")[0]).toBe("No document available · resolved");
+      expect(out).toContain('Could not fetch docs for "ghost"');
+    });
+  });
+
   const TOC_DOC = [
     "# Fastify",
     "Intro text.",
@@ -236,15 +269,25 @@ describe("getDocs index following", () => {
   ].join("\n");
 
   it("returns the table of contents and document head when no topic is given, at a budget that holds both", async () => {
+    // A17 (PAR-726): the header now carries the standing stamp (fetched-at/fresh-or-stale/
+    // curated-or-resolved, not just a bare `Source:` line), and its length includes a live
+    // ISO timestamp — no longer a fixed byte count to pin a tight budget against. Widened to
+    // a budget generous enough to hold the WHOLE document (MEASURED: the response stabilises
+    // at maxTokens 70 and does not grow further through 100), so this proves "holds both"
+    // directly — the full TOC and the full, untruncated document head — rather than pinning
+    // an exact partial head slice at one specific tight budget the way this test used to.
     seedIndex(TOC_DOC);
     const spy = stubFetch({});
-    const out = await getDocs(entry, { maxTokens: 30 }); // 120 chars: the header (98) plus room for a slice of head
+    const out = await getDocs(entry, { maxTokens: 90 });
     expect(spy).not.toHaveBeenCalled();
     expect(out).toContain("Source: https://fastify.dev/llms.txt");
+    // This exact substring match is itself the proof "#### Too deep" (level-4) is excluded
+    // from the TOC LISTING: were it included, the run of headings before "\n\n---\n\n" would
+    // not match this literal string. It still appears further down, as ordinary body text —
+    // the full, unclipped document head — which the endsWith check below covers separately.
     expect(out).toContain("Table of contents:\n# Fastify\n## Reference\n### Request\n\n---\n\n");
-    expect(out).not.toContain("#### Too deep");
-    expect(out.endsWith("\n\n---\n\n# Fastify\nIntro text.\n")).toBe(true);
-    expect(out.length).toBeLessThanOrEqual(120);
+    expect(out.endsWith(TOC_DOC)).toBe(true); // the full document head survives at this budget, unclipped
+    expect(out.length).toBeLessThanOrEqual(360);
   });
 
   /**
@@ -291,13 +334,24 @@ describe("getDocs index following", () => {
    * starved on ANY document, only on a document whose individual heading LINES are short (see
    * the companion test below for the long-single-heading case, which this many-short-headings
    * fixture cannot exercise).
+   *
+   * A17 (PAR-726), re-MEASURED: the numbers above (252/261) compare the OLD, un-fixed A6 code
+   * against A6's own fix and are otherwise unchanged by this item — the share-cap mechanism
+   * itself (`Math.floor(budgetChars / 2)`) is untouched here. What DID move is the header's own
+   * byte length (the standing stamp this item adds), so the maxTokens VALUES this test checks
+   * against moved out from `[50, 100, 200]` to `[100, 200, 400]` — `maxTokens: 50` no longer
+   * clears the header at all on this fixture.
    */
   it("(A6, PAR-719) the table of contents is capped as a SHARE of the budget too — many short headings no longer starve the document head", async () => {
+    // A17 (PAR-726): re-MEASURED against the now-larger header (the standing stamp adds a
+    // fixed-length ISO timestamp plus fresh/curated wording ahead of the TOC). `maxTokens: 50`
+    // no longer clears the header at all on this fixture; the smallest budget below still
+    // shows "Some prose" is 100.
     const lines = ["# Fastify"];
     for (let i = 0; i < 70; i++) lines.push(`## Ecosystem ${i}`, `Some prose about ecosystem ${i}.`);
     seedIndex(lines.join("\n"));
     stubFetch({});
-    for (const maxTokens of [50, 100, 200]) {
+    for (const maxTokens of [100, 200, 400]) {
       const out = await getDocs(entry, { maxTokens });
       expect(out).toContain("Some prose"); // the document head survives, not just the TOC
       expect(out.length).toBeLessThanOrEqual(maxTokens * 4); // the D-39 invariant, still
@@ -324,11 +378,14 @@ describe("getDocs index following", () => {
    * the header no longer eats the ENTIRE response the way it did before this fix.
    */
   it("(A6, PAR-719) a single heading line longer than the TOC's own budget share is clipped, not taken whole", async () => {
+    // A17 (PAR-726), re-MEASURED: the header carries the standing stamp now (a fixed-length
+    // ISO timestamp plus fresh/curated wording), so the budget that clears it moved from 50 to
+    // 60 (was 200/100 for budgetChars/tocBudget; now 240/120).
     const longHeading = "# " + "x".repeat(400);
     seedIndex([longHeading, "Some prose."].join("\n"));
     stubFetch({});
-    const out = await getDocs(entry, { maxTokens: 50 }); // budgetChars 200, tocBudget 100
-    expect(out.length).toBeLessThanOrEqual(200); // the D-39 invariant
+    const out = await getDocs(entry, { maxTokens: 60 }); // budgetChars 240, tocBudget 120
+    expect(out.length).toBeLessThanOrEqual(240); // the D-39 invariant
     // The response reaches the TOC/head separator (it did not, before this fix — the clipped
     // response cut off mid-TOC, before "---\n\n" ever appeared) and a non-empty slice of head
     // content follows it, even though that slice is not (at this budget) real prose.
@@ -343,28 +400,35 @@ describe("getDocs index following", () => {
    * document head is non-empty on "any budget large enough to hold the fixed overhead plus one
    * clipped heading character", i.e. once `budgetChars` clears the fixed `Source:`/label/
    * separator overhead by a single char. MEASURED instead (and pinned here, not just asserted
-   * in a comment): for this fixture's `INDEX_URL` (64-char fixed overhead once a long heading
-   * saturates its `tocBudget` share), `head` is empty through `maxTokens: 32` and only turns
-   * non-empty at `maxTokens: 33` — the fixed overhead has to be cleared roughly TWICE over, not
-   * once, because the TOC's own half-share (which the long heading fills exactly) is itself
-   * counted against the SAME budget the overhead comes out of.
+   * in a comment): for this fixture's `INDEX_URL`, the fixed overhead has to be cleared roughly
+   * TWICE over, not once, because the TOC's own half-share (which the long heading fills
+   * exactly) is itself counted against the SAME budget the overhead comes out of.
+   *
+   * A17 (PAR-726), RE-MEASURED at the larger, stamp-carrying header — the boundary moved from
+   * 32/33 to 58/59, AND the qualitative shape of the "below" case changed: at maxTokens 32 (old
+   * code) the response reached the TOC/head separator with exactly zero characters of head
+   * after it (`clipToBudget` cut nothing — the header itself, un-clipped, ended exactly at the
+   * separator). At maxTokens 58 (new code) the response is `clipToBudget`-backstopped BEFORE it
+   * ever reaches the separator — the header alone, with a maximally-clipped TOC entry, is
+   * itself now larger than 232 characters, so the final backstop clip lands mid-TOC. Both are
+   * the same D-29 "the cap always wins" guarantee, just cutting at a different point once the
+   * header itself grew; re-described rather than left to read as an unmodified claim.
    */
-  it("(A6, PAR-719) the document head stays empty through maxTokens 32 and only turns non-empty at 33, for a heading that saturates its TOC share", async () => {
+  it("(A6, PAR-719 / A17, PAR-726) the document head stays empty through maxTokens 58 and only turns non-empty at 59, for a heading that saturates its TOC share", async () => {
     const longHeading = "# " + "x".repeat(1000); // long enough to saturate tocBudget at both budgets below
     seedIndex([longHeading, "Some prose."].join("\n"));
     stubFetch({});
 
-    const below = await getDocs(entry, { maxTokens: 32 }); // budgetChars 128, header saturates it exactly
-    const sepBelow = below.indexOf("\n\n---\n\n");
-    expect(sepBelow).toBeGreaterThan(-1); // the TOC itself still fits (D-29's clip), same as maxTokens 50
-    expect(below.length).toBe(sepBelow + "\n\n---\n\n".length); // ...but nothing follows it: head IS empty here
+    const below = await getDocs(entry, { maxTokens: 58 }); // budgetChars 232 — the header alone, backstop-clipped, never reaches the separator
+    expect(below.indexOf("\n\n---\n\n")).toBe(-1);
+    expect(below.length).toBe(232); // the D-29 backstop clip: exactly the budget, mid-TOC
 
-    const at = await getDocs(entry, { maxTokens: 33 }); // budgetChars 132 — 4 chars clear the overhead
+    const at = await getDocs(entry, { maxTokens: 59 }); // budgetChars 236 — 4 chars clear it
     const sepAt = at.indexOf("\n\n---\n\n");
     expect(sepAt).toBeGreaterThan(-1);
-    // round 6 (test-auditor N1): pin the exact figure the comment above claims, not just
-    // "something survives" — a 2-char head slice, no more and no less.
-    expect(at.length).toBe(sepAt + "\n\n---\n\n".length + 2);
+    // Pin the exact figure the comment above claims, not just "something survives" — a
+    // 1-char head slice, no more and no less.
+    expect(at.length).toBe(sepAt + "\n\n---\n\n".length + 1);
   });
 
   it("exposes followed / dropped counts and section origin structurally (PAR-707)", async () => {
@@ -397,7 +461,8 @@ describe("getDocs index following", () => {
       }),
     );
     const out = await getDocsDetailed(entry, { topic: "request hostname" });
-    expect(out.source).toEqual({ url: INDEX_URL, stale: false });
+    expect(out.source).toMatchObject({ url: INDEX_URL, stale: false, curated: true });
+    expect(out.source?.fetchedAt).toEqual(expect.any(String));
     expect(out.isIndex).toBe(true);
     expect(out.followed).toEqual(["https://fastify.dev/docs/Request.md"]);
     expect(out.dropped).toEqual({ outsideOrigin: 1, tooLarge: 1, unavailable: 1 });
@@ -572,16 +637,17 @@ describe("getDocs index following", () => {
     /**
      * A6 (PAR-719), round 2 (test-auditor, F5 — CORRECTED, not self-caught: round 1's own
      * version of this test and its rationale were both wrong, and round 2 found it) — this
-     * does NOT pin "no answer content" at 33/34. Traced precisely: at `maxTokens: 33`, the
-     * room left for the body is 132 (budgetChars) minus a 104-character header (36-char
-     * `Source:` line + 66-char capped note block + 2 for the blank line) = 28 characters —
-     * POSITIVE, not zero — and `assemble` genuinely renders a 28-character slice of the top
-     * heading line, truncated one character short of completing the word "hostname". What 34
-     * actually marks is the first budget at which that ONE SPECIFIC SUBSTRING completes, not
-     * the first budget at which ANY content appears. Renamed and re-described to match what it
-     * actually asserts; the true zero-content boundary is the test below this one.
+     * does NOT pin "no answer content" at the boundary below. There is real content just
+     * short of it too — a truncated slice of the top heading line, one character short of
+     * completing the word "hostname". What the boundary marks is the first budget at which
+     * that ONE SPECIFIC SUBSTRING completes, not the first budget at which ANY content
+     * appears. Renamed and re-described to match what it actually asserts; the true
+     * zero-content boundary is the test below this one.
+     *
+     * A17 (PAR-726), RE-MEASURED at the larger, stamp-carrying header: the boundary moved
+     * from 33/34 to 59/60.
      */
-    it("(A6, PAR-719) marks the first budget at which the top heading's text is a COMPLETE match for the topic, not the first budget with any content at all", async () => {
+    it("(A6, PAR-719 / A17, PAR-726) marks the first budget at which the top heading's text is a COMPLETE match for the topic, not the first budget with any content at all", async () => {
       const fixture = () =>
         seedIndex(
           [
@@ -612,26 +678,26 @@ describe("getDocs index following", () => {
 
       fixture();
       stub();
-      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 33 });
-      // NOT "no content" — a real 28-character slice of the heading survives, one character
+      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 59 });
+      // NOT "no content" — a real, truncated slice of the heading survives, one character
       // short of completing this specific word. See the it() name and the comment above.
       expect(below.text).not.toContain("request.hostname");
 
       fixture();
       stub();
-      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 34 });
+      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 60 });
       expect(at.text).toContain("request.hostname"); // the word completes at exactly this budget
     });
 
     /**
      * A6 (PAR-719), round 2 (test-auditor, F5) — the boundary the test above is NOT: the
      * genuine zero-content crossover, where `assemble`'s room for the body is exactly zero and
-     * NOTHING of the top section — not even a partial heading marker — survives. MEASURED for
-     * this fixture: `budgetChars - header.length` is negative-or-zero at `maxTokens: 19` (76
-     * chars) and the first positive room at `maxTokens: 20` (80 chars, room = 2 — the "##"
-     * that opens "## Request...").
+     * NOTHING of the top section — not even a partial heading marker — survives.
+     *
+     * A17 (PAR-726), RE-MEASURED at the larger, stamp-carrying header: the boundary moved from
+     * 19/20 to 45/46.
      */
-    it("(A6, PAR-719) the genuine zero-content crossover: nothing of the top section survives below maxTokens 20, a sliver does at 20", async () => {
+    it("(A6, PAR-719 / A17, PAR-726) the genuine zero-content crossover: nothing of the top section survives below maxTokens 46, a sliver does at 46", async () => {
       const fixture = () =>
         seedIndex(
           [
@@ -662,13 +728,77 @@ describe("getDocs index following", () => {
 
       fixture();
       stub();
-      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 19 });
+      const below = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 45 });
       expect(below.text).not.toMatch(/#/); // not even a bare heading marker — the response is pure header
 
       fixture();
       stub();
-      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 20 });
+      const at = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 46 });
       expect(at.text).toMatch(/#/); // the first character of the top section's heading appears
+    });
+
+    /** A17 (PAR-726) done-when: "the stamp survives the D-43 degradation ordering... when the
+     *  budget cannot hold everything, the section body wins, but the stamp is not the first
+     *  thing dropped." `docStamp` is the FIRST text `header` is built from (ahead of the note
+     *  block, ahead of the body) — so under the final `clipToBudget` backstop, which truncates
+     *  from the END, the stamp is provably the LAST thing to be cut, whatever the budget.
+     *  Proven directly at a budget well below the zero-content crossover measured above (no
+     *  section body of any kind survives): the response is still headed by the stamp's own
+     *  `Source: <url>` opening, not silently empty or all note-block accounting. */
+    it("(A17, PAR-726) the standing stamp survives even where the section body does not — it is not the first thing dropped", async () => {
+      seedIndex(
+        [
+          "# Fastify",
+          "- [Request](/docs/Request.md)",
+          "- [Request mirror](https://mirror.example.net/Request.md)",
+          "- [Request big](/docs/Big.md)",
+          "- [Request gone](/docs/Gone.md)",
+        ].join("\n"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          const u = String(url);
+          if (u.endsWith("/Request.md")) {
+            return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+              status: 200,
+              headers: { "content-type": "text/plain" },
+            });
+          }
+          if (u.endsWith("/Big.md")) {
+            return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          }
+          return new Response("nope", { status: 404 });
+        }),
+      );
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 20 }); // well below the zero-content crossover (45/46) — no section body of any kind
+      // (code-reviewer round 1, S3): assert the whole degraded-but-complete stamp, not just its
+      // opening substring -- MEASURED at this budget, room runs out after "fresh" (curated is
+      // dropped), but every field that IS present is whole, never a fragment.
+      expect(out.text).toBe("Source: https://fastify.dev/llms.txt · fetched " + out.source?.fetchedAt + " · fresh\n");
+      expect(out.matched).toBeGreaterThan(0); // the topic DID match a section — only the RENDERED text lacks room for it
+    });
+
+    /** (code-reviewer, A17 round 1, B2): the exact scenario measured in review -- at
+     *  `maxTokens: 14`, the pre-fix code rendered `fetched 2026-09-1`, a real, well-formed,
+     *  WRONG date (the true date sliced mid-way through its 9th character). `fitStampLine`
+     *  (retrieval.ts) must never produce that: every prefix it returns ends at a field
+     *  boundary, never mid-value. */
+    it("(code-reviewer, A17 round 1, B2) a tiny budget never truncates mid-field — no half-rendered date, no partial word", async () => {
+      seedIndex(TOC_DOC);
+      stubFetch({});
+      const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+      for (const maxTokens of [5, 10, 14, 16, 18, 20, 22]) {
+        const out = await getDocs(entry, { maxTokens });
+        const fetchedMatch = out.match(/ · fetched (\S+)(?= |$)/);
+        // If "fetched" appears at all, the value after it is a COMPLETE, valid ISO timestamp
+        // — never a prefix of one, which is what let a truncated stamp read as a real, wrong
+        // date (the review's own repro: `fetched 2026-09-1`, missing "7T18:...").
+        if (fetchedMatch) expect(fetchedMatch[1], `maxTokens=${maxTokens}: ${JSON.stringify(out)}`).toMatch(ISO);
+        // And the trailing fresh/stale, curated/resolved words are always whole or wholly
+        // absent, never cut after the first character or two.
+        expect(out, `maxTokens=${maxTokens}: ${JSON.stringify(out)}`).not.toMatch(/ · f$| · fr$| · fre$| · fres$| · s$| · st$| · sta$| · stal$| · c$| · cu$| · cur$| · cura$| · curat$| · curate$| · r$| · re$| · res$| · reso$| · resol$| · resolv$| · resolve$/);
+      }
     });
   });
 
@@ -783,7 +913,8 @@ describe("getDocs index following", () => {
     stubFetch({}); // followed page 404s; the index line itself still matches "request"
     const stale = { ...entry, ttlHours: 0 };
     const out = await getDocsDetailed(stale, { topic: "request" });
-    expect(out.source).toEqual({ url: INDEX_URL, stale: true });
+    expect(out.source).toMatchObject({ url: INDEX_URL, stale: true, curated: true });
+    expect(out.source?.fetchedAt).toEqual(expect.any(String));
     expect(out.matched).toBeGreaterThan(0);
     expect(out.returnedFromFollowed).toBe(0);
     expect(out.dropped.unavailable).toBe(1);
@@ -946,9 +1077,16 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     writeCache(README_ENTRY.name, README_URL, README_DOC);
     stubFetch({});
     const out = await getDocs(README_ENTRY, { topic: "checkout session create", mode: "snippets" });
+    // A17 (PAR-726): the response now opens with the standing stamp, which carries a live
+    // `fetched <ISO>` timestamp — the one piece of this response that cannot be pinned as a
+    // literal without lying about the wall clock. Extracted and validated as a real ISO
+    // timestamp, then spliced into the otherwise fully verbatim comparison below, so this
+    // test still catches ANY other drift in the stamp's wording or the body byte-for-byte.
+    const fetchedAt = out.match(/ · fetched (\S+) · /)?.[1];
+    expect(fetchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
     expect(out).toBe(
       [
-        "Source: https://docs.acme.example.com/llms-full.txt",
+        `Source: https://docs.acme.example.com/llms-full.txt · fetched ${fetchedAt} · fresh · curated`,
         "",
         "### Acme Pay > Checkout > Create a Checkout Session",
         "Create the session on your server, then redirect the customer:",
@@ -978,7 +1116,8 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     stubFetch({});
     const out = await getDocsDetailed(stripe, { topic: "stripe create", mode: "snippets" });
     expect(out.matched).toBe(2); // two code blocks, not the four sections
-    expect(out.source).toEqual({ url: STRIPE_URL, stale: false });
+    expect(out.source).toMatchObject({ url: STRIPE_URL, stale: false, curated: true });
+    expect(out.source?.fetchedAt).toEqual(expect.any(String));
     expect(out.isIndex).toBe(false);
     expect(out.returnedFromFollowed).toBe(0);
   });
@@ -987,9 +1126,15 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
     stubFetch({});
     const out = await getDocsDetailed(stripe, { topic: "quantum blockchain", mode: "snippets" });
-    expect(out.text).toBe(
-      `No code snippets matched "quantum blockchain" in stripe docs (source: ${STRIPE_URL}). ` +
-        'Try mode "sections" or broader terms.',
+    // A17 (PAR-726): the standing stamp now opens this response, on its own line, ahead of
+    // the no-match message — it also replaced the old inline lowercase "(source: url)"
+    // fragment (see docStamp's own comment in get-docs.ts). `fetched <ISO>` is not pinned
+    // exactly (it is the wall clock at call time); everything else is.
+    expect(out.text).toMatch(
+      new RegExp(
+        `^Source: ${STRIPE_URL.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")} · fetched \\S+ · fresh · curated\\n` +
+          `No code snippets matched "quantum blockchain" in stripe docs\\. Try mode "sections" or broader terms\\.$`,
+      ),
     );
     expect(out.matched).toBe(0);
   });
@@ -1069,12 +1214,49 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     expect(out).toContain("onBeforeHandle");
     expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
     expect(spy).toHaveBeenCalledTimes(1 + 3); // metadata, two llms probes, README.md at HEAD
-    // Second call: served from the adopted entry and the cache — no new fetch, and no provenance line.
+    // Second call: served from the adopted entry and the cache — no new fetch, and no
+    // ONE-TIME resolution provenance line (that sentence is genuinely first-call-only: it
+    // carries facts, like the package-supplied description, that only exist at resolution
+    // time). A17 (PAR-726): this is exactly the defect this item exists to close — the
+    // STANDING stamp (source/fetched-at/fresh-or-stale/curated-or-resolved) is NOT one-time,
+    // and must still be present here, proving the second call is no longer bare.
     spy.mockClear();
     const again = await getDocsToolText(reg, { library: "elysia", topic: "middleware" });
     expect(again).toContain("onBeforeHandle");
     expect(again).not.toContain("Resolved ");
+    expect(again.split("\n")[0]).toMatch(
+      /^Source: https:\/\/raw\.githubusercontent\.com\/elysiajs\/elysia\/HEAD\/README\.md · fetched \S+ · fresh · resolved$/,
+    );
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  /** A17 (PAR-726): the resolution provenance line used to be prepended in `getDocsToolText`,
+   *  entirely OUTSIDE `getDocsDetailed`'s own budget accounting — repeating A6's own original
+   *  mistake for a second piece of header text. It is now passed down and priced alongside the
+   *  standing stamp, so the combined response (provenance + stamp + body) never exceeds
+   *  `maxTokens*4`, the same D-39 invariant A6 already proved for every other header. */
+  it("(A17, PAR-726) the resolution provenance line is priced into the budget, not prepended outside it", async () => {
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({
+        description: "A long package-supplied description that pads this out well past a tiny token budget on its own, so the provenance line alone is bigger than a small maxTokens*4 allowance",
+        homepage: "https://elysiajs.com",
+        repository: "https://github.com/elysiajs/elysia",
+      }),
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia\n\n## Middleware\n\nUse .onBeforeHandle() for middleware.",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    // (code-reviewer round 1, S2): only the FIRST iteration exercises the resolution
+    // provenance line — `reg` adopts the entry after that pass, so later iterations hit the
+    // standing-stamp path instead (still worth covering, but not what this test is about).
+    // Assert resolution actually happened on that first pass, so a drifted fixture that
+    // stopped resolving could not make this test pass vacuously.
+    const first = await getDocsToolText(reg, { library: "Elysia", topic: "middleware", maxTokens: 5 });
+    expect(first).toContain('Resolved "Elysia"');
+    expect(first.length).toBeLessThanOrEqual(5 * 4); // D-39, now covering the provenance line too
+    for (const maxTokens of [20, 60]) {
+      const out = await getDocsToolText(reg, { library: "Elysia", topic: "middleware", maxTokens });
+      expect(out.length).toBeLessThanOrEqual(maxTokens * 4);
+    }
   });
 
   it("A5 (PAR-718): with the cache directory read-only, get_docs on an unknown package still returns the resolved document, plus a 'resolution not saved: <reason>' note — real directory, real EACCES, not a mocked failure", async () => {

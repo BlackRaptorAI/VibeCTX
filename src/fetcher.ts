@@ -9,6 +9,14 @@ export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 export interface DocResult {
   content: string;
   url: string;
+  /** A17/PAR-726: when this document's cache meta was last written, ISO — the exact value
+   *  persisted by `writeCache`/`touchCache`, not a freshly-taken `new Date()` that could
+   *  disagree with it. */
+  fetchedAt: string;
+  /** A17/PAR-726: past this document's TTL. Structurally identical to `staleNote !== undefined`
+   *  today (every path below that omits `staleNote` also served a definitely-fresh copy), kept
+   *  as its own field rather than re-derived so a caller reads staleness without parsing prose. */
+  stale: boolean;
   /** Present when the network failed and cached content past its TTL was served. */
   staleNote?: string;
 }
@@ -256,7 +264,7 @@ export async function getLibraryDoc(
   if (!opts.forceRefresh) {
     for (const url of entry.urls) {
       const hit = readCache(entry.name, url, ttl);
-      if (hit && !hit.stale) return { content: hit.content, url };
+      if (hit && !hit.stale) return { content: hit.content, url, fetchedAt: hit.meta.fetchedAt, stale: false };
     }
   }
 
@@ -275,12 +283,15 @@ export async function getLibraryDoc(
         publicFinalUrl: entry.resolved !== undefined,
       });
       if (out.status === "not-modified" && cached) {
-        touchCache(entry.name, url); // content unchanged upstream: refresh the TTL
-        return { content: cached.content, url };
+        // content unchanged upstream: refresh the TTL. touchCache can no-op (a concurrent
+        // evict/corruption between the read above and here) — cached.meta.fetchedAt is the
+        // last value this process actually knows to be true in that case.
+        const touchedAt = touchCache(entry.name, url) ?? cached.meta.fetchedAt;
+        return { content: cached.content, url, fetchedAt: touchedAt, stale: false };
       }
       if (out.status === "ok" && out.body !== undefined) {
-        writeCache(entry.name, url, out.body, out.etag);
-        return { content: out.body, url };
+        const fetchedAt = writeCache(entry.name, url, out.body, out.etag);
+        return { content: out.body, url, fetchedAt, stale: false };
       }
     }
   }
@@ -292,6 +303,8 @@ export async function getLibraryDoc(
       return {
         content: hit.content,
         url,
+        fetchedAt: hit.meta.fetchedAt,
+        stale: true,
         staleNote: opts.offline
           ? `STALE: served from cache fetched ${hit.meta.fetchedAt}; offline mode, network not attempted.`
           : `STALE: served from cache fetched ${hit.meta.fetchedAt}; all candidate URLs unreachable just now.`,
@@ -326,12 +339,18 @@ export async function fetchLinkedPage(
 ): Promise<LinkedPageResult> {
   if (!isAllowedLink(url, sourceUrl, policy)) return { status: "refused" };
   const hit = readCache(library, url, ttlHours);
-  if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url } };
+  if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url, fetchedAt: hit.meta.fetchedAt, stale: false } };
   if (offline) {
     if (!hit) return { status: "unavailable" };
     return {
       status: "ok",
-      page: { content: hit.content, url, staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.` },
+      page: {
+        content: hit.content,
+        url,
+        fetchedAt: hit.meta.fetchedAt,
+        stale: true,
+        staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.`,
+      },
     };
   }
   const out = await fetchUrl(url, {
@@ -342,12 +361,13 @@ export async function fetchLinkedPage(
   if (out.status === "refused") return { status: "refused" };
   if (out.status === "too-large") return { status: "too-large" };
   if (out.status === "not-modified" && hit) {
-    touchCache(library, url);
-    return { status: "ok", page: { content: hit.content, url } };
+    // See getLibraryDoc's identical comment: touchCache's no-op fallback is hit.meta.fetchedAt.
+    const touchedAt = touchCache(library, url) ?? hit.meta.fetchedAt;
+    return { status: "ok", page: { content: hit.content, url, fetchedAt: touchedAt, stale: false } };
   }
   if (out.status === "ok" && out.body !== undefined) {
-    writeCache(library, url, out.body, out.etag);
-    return { status: "ok", page: { content: out.body, url } };
+    const fetchedAt = writeCache(library, url, out.body, out.etag);
+    return { status: "ok", page: { content: out.body, url, fetchedAt, stale: false } };
   }
   if (hit) {
     return {
@@ -355,6 +375,8 @@ export async function fetchLinkedPage(
       page: {
         content: hit.content,
         url,
+        fetchedAt: hit.meta.fetchedAt,
+        stale: true,
         staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.`,
       },
     };

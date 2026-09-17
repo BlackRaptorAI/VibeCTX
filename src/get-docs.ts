@@ -18,6 +18,8 @@ import {
   rankLinks,
   extractLinks,
   followLimit,
+  sourceStampLine,
+  fitStampLine,
   MAX_FOLLOWED_BYTES,
   type SplitSection,
 } from "./retrieval.js";
@@ -44,8 +46,10 @@ export interface GetDocsArgs {
 export interface GetDocsOutcome {
   /** Exactly the text the get_docs tool responds with. */
   text: string;
-  /** The primary document that was served; undefined when nothing was fetched and nothing cached. */
-  source?: { url: string; stale: boolean };
+  /** The primary document that was served; undefined when nothing was fetched and nothing
+   *  cached. `fetchedAt`/`curated` added at A17/PAR-726 alongside the rendered stamp, so a
+   *  structured consumer (doctor) reads the same facts the text states without parsing it. */
+  source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean };
   /** looksLikeIndex(primary document). */
   isIndex: boolean;
   /** Sections — or, in snippets mode, code blocks — that matched the topic across the
@@ -80,6 +84,15 @@ const MAX_NOTE_BLOCK_CHARS = 1000;
  *  in `search.ts`). ASSUMED, not measured. */
 const MAX_ECHOED_TOPIC_CHARS = 200;
 
+/** A17 (PAR-726), code-reviewer round 1, S1 — `resolutionNote` carries the resolved package's
+ *  own (untrusted) description, unbounded beyond `resolved-store.ts`'s ~200-char
+ *  `MAX_DESCRIPTION` plus homepage/docs/repository facts. `noMatch` is deliberately exempt
+ *  from `clipToBudget` (below, "a short, fixed-shape diagnostic, not content") — true of the
+ *  message itself, but `resolutionNote` is neither short by construction nor fixed-shape, so
+ *  threading it through unclipped breaks that path's own invariant. Capped here, once, so
+ *  every render path — budgeted or exempt — sees the same bounded worst case. */
+const MAX_RESOLUTION_NOTE_CHARS = 500;
+
 /** A6 (PAR-719) — the final backstop every render path in this file applies: whatever the
  *  header (stale-note prefix, `Source:` line, table of contents or note block) and body come
  *  to, the combined response never exceeds the budget. D-29's rule, unchanged: the cap always
@@ -93,8 +106,8 @@ function clipToBudget(text: string, budgetChars: number): string {
  * The get_docs tool body, kept out of index.ts so it can be exercised without a
  * transport. Returns the text the tool responds with.
  */
-export async function getDocs(entry: LibraryEntry, args: GetDocsArgs): Promise<string> {
-  return (await getDocsDetailed(entry, args)).text;
+export async function getDocs(entry: LibraryEntry, args: GetDocsArgs, resolutionNote?: string): Promise<string> {
+  return (await getDocsDetailed(entry, args, resolutionNote)).text;
 }
 
 /** The MCP `get_docs` tool body: resolve `library` (canonical name or alias) and run
@@ -109,7 +122,7 @@ export async function getDocsToolText(
 ): Promise<string> {
   const { library, ...rest } = args;
   let entry = lookupLibrary(registry, library);
-  let provenance = "";
+  let resolutionNote: string | undefined;
   if (!entry) {
     if (rest.offline) return unknownLibraryMessage(registry, library);
     const out = await resolvePackage(library);
@@ -117,14 +130,26 @@ export async function getDocsToolText(
     // S2: a resolved entry never replaces a curated one; if a curated entry owns the name
     // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
     entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
-    provenance = `${provenanceLine(registry, library, out)}\n`;
+    resolutionNote = provenanceLine(registry, library, out);
   }
-  return provenance + (await getDocs(entry, rest));
+  // A17 (PAR-726): resolutionNote used to be prepended here, entirely outside getDocsDetailed's
+  // own budget accounting — exactly A6's original mistake, repeated. It is now passed down and
+  // priced as part of the header alongside the standing stamp, so on every path `clipToBudget`
+  // actually applies to (no-topic, and topic-given success/snippets), `provenance + body`
+  // together never exceed `maxTokens*4`, not merely `body` alone. `noMatch` stays the one
+  // pre-existing, DELIBERATE exception to that cap (A6's own "short, fixed-shape diagnostic"
+  // design, unchanged here) — `resolutionNote` is bounded before it reaches that path too
+  // (code-reviewer round 1, S1: `MAX_RESOLUTION_NOTE_CHARS`), so "exempt from the hard cap"
+  // no longer also means "unbounded".
+  return getDocs(entry, rest, resolutionNote);
 }
 
 /** R3: one line the agent sees before docs that were resolved on this very call — where
  *  the package came from, its own (untrusted) description, and a nearby curated name
- *  when the request looks like a typo of one.
+ *  when the request looks like a typo of one. A17 (PAR-726): this is the ONE-TIME extra
+ *  detail a fresh resolution adds; the STANDING stamp every call gets (source, fetched-at,
+ *  fresh/stale, curated/resolved — see `sourceStampLine`) is separate and unconditional,
+ *  added inside `getDocsDetailed` itself.
  *
  *  A5 (PAR-718): also the ONLY place `get_docs`'s implicit-resolution path surfaces
  *  `out.saved === false` (a write failure the process could not avoid — a read-only
@@ -145,14 +170,37 @@ function provenanceLine(registry: Registry, requested: string, out: ResolveOutco
   return `> Resolved "${requested}" via ${label} on this call — not a curated entry; verify this is the package you meant. ${facts.join(" · ")}`.trimEnd();
 }
 
-/** getDocs with its structured outcome (see GetDocsOutcome). */
-export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): Promise<GetDocsOutcome> {
+/** True when `entry` was synthesized by `resolve_library` this session rather than coming
+ *  from the default registry or a config file (list-libraries.ts:54 established this exact
+ *  reading of the field first; A17/PAR-726 reuses it for the standing stamp). */
+function isCurated(entry: LibraryEntry): boolean {
+  return entry.resolved === undefined;
+}
+
+/** getDocs with its structured outcome (see GetDocsOutcome). `resolutionNote`: the one-time
+ *  extra prose `getDocsToolText` computed when THIS call is what resolved `entry` implicitly
+ *  (see `provenanceLine`) — undefined on every other call. Priced into the budget alongside
+ *  the standing stamp, not prepended outside it (A17/PAR-726). */
+export async function getDocsDetailed(
+  entry: LibraryEntry,
+  args: GetDocsArgs,
+  resolutionNote?: string,
+): Promise<GetDocsOutcome> {
   const { topic } = args;
   const noDropped = { outsideOrigin: 0, tooLarge: 0, unavailable: 0 };
+  const resolutionPrefix = resolutionNote ? `${clipText(resolutionNote, MAX_RESOLUTION_NOTE_CHARS)}\n` : "";
+  const curated = isCurated(entry);
   const doc = await getLibraryDoc(entry, { offline: args.offline });
   if (!doc) {
+    // A17 (PAR-726) addendum (CR-20260906-par-657-config-discovery, source-header-gap): the
+    // one response in this file that used to carry no marker at all — no `Source:` line
+    // (nothing was fetched, so there is no url/fetchedAt/stale to state), but curated/resolved
+    // is still a fact about `entry` regardless of whether a document was ever reached. Same
+    // "fact · fact" grammar the stamp itself uses (code-reviewer round 1, N2), not a second,
+    // independently-worded vocabulary for the same field.
+    const noDocStamp = `No document available · ${curated ? "curated" : "resolved"}`;
     return {
-      text: `Could not fetch docs for "${entry.name}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.join("\n")}`,
+      text: `${resolutionPrefix}${noDocStamp}\nCould not fetch docs for "${entry.name}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.join("\n")}`,
       isIndex: false,
       matched: 0,
       returnedFromFollowed: 0,
@@ -160,7 +208,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
       dropped: noDropped,
     };
   }
-  const source = { url: doc.url, stale: doc.staleNote !== undefined };
+  const source = { url: doc.url, stale: doc.stale, fetchedAt: doc.fetchedAt, curated };
   // D-34 (PAR-659): every writer of a PRIMARY cached document keeps the cross-library search
   // index current — a document get_docs just fetched is one `search` would otherwise have to
   // tokenize on its own. Only the primary document: followed index pages are per-query and
@@ -171,6 +219,16 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   const budget = args.maxTokens ?? DEFAULT_BUDGET_TOKENS;
   const budgetChars = budget * 4;
   const prefix = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
+  // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
+  // the room actually available for the stamp is `budgetChars` minus whatever the one-time
+  // resolution note and the stale prefix already spent, so a small budget degrades the stamp
+  // to a shorter COMPLETE line rather than leaving it to the final `clipToBudget` backstop to
+  // cut a field in half (measured pre-fix: `maxTokens: 14` rendered `fetched 2026-09-1` — a
+  // real, well-formed, WRONG date).
+  const docStamp = fitStampLine(
+    { url: doc.url, fetchedAt: doc.fetchedAt, stale: doc.stale, curated },
+    Math.max(0, budgetChars - resolutionPrefix.length - prefix.length),
+  );
 
   if (!topic) {
     const headings = doc.content.split("\n").filter((l) => /^#{1,3}\s/.test(l)).slice(0, 60);
@@ -218,7 +276,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
       }
       toc = next;
     }
-    const header = `${prefix}Source: ${doc.url}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
+    const header = `${resolutionPrefix}${prefix}${docStamp}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
     // A6 (PAR-719) — the OVERSIGHT FINDING this item exists to close: `head` used to be
     // computed as `doc.content.slice(0, budget * 4)` — the ENTIRE allowance — and the stale
     // prefix, `Source:` line and table of contents were then prepended ON TOP of that, so the
@@ -355,7 +413,11 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // (`MAX_LIBRARY_CHARS`/`MAX_URL_CHARS`) is a known deferred follow-up, not something A6
   // closes.
   const noMatch = (what: string, advice: string): GetDocsOutcome => ({
-    text: `${prefix}No ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${entry.name} docs (source: ${doc.url}).${
+    // A17 (PAR-726): the lowercase inline "(source: url)" fragment this used to carry is gone
+    // — replaced by the same `docStamp` line every other path renders, closing a wording
+    // inconsistency this file's own ground-truth review flagged (capitalized `Source:` line
+    // everywhere else, lowercase inline fragment only here).
+    text: `${resolutionPrefix}${prefix}${docStamp}\nNo ${what} matched "${clipText(topic ?? "", MAX_ECHOED_TOPIC_CHARS)}" in ${entry.name} docs.${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     source,
@@ -383,7 +445,7 @@ export async function getDocsDetailed(entry: LibraryEntry, args: GetDocsArgs): P
   // price their own join separators AND this reserved amount, so the combined text — header
   // plus body — fits `budget*4` by construction; `clipToBudget` below is the same D-29 backstop
   // the no-topic path uses, for the case a maximal header alone is over budget.
-  const header = `${prefix}Source: ${doc.url}${noteBlock}\n\n`;
+  const header = `${resolutionPrefix}${prefix}${docStamp}${noteBlock}\n\n`;
 
   if ((args.mode ?? "sections") === "snippets") {
     const snippets = rankSplitSnippets(corpusSections, topic);
