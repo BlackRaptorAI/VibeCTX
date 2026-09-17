@@ -1174,23 +1174,27 @@ and the entry is simply not recorded.
 only by you), self-healing on every write — a copy left world-readable by an older
 vibectx version is corrected the moment the next entry is recorded, not merely held
 steady from then on. **The 0600 mode is scoped to the log file itself** — it applies
-to `activity.json` only, not to the rest of the cache directory. Query-string
-stripping is shared more widely, though: as of this note, the same stripping also
-applies to the `Source:` line printed in every `get_docs` and `search` response (see
-[Tools](#tools)) — if a config entry's `urls` carries a secret in its query string
-(an internal docs endpoint behind a `?token=…`), that token no longer reaches your
-agent's context through either surface. It still appears — unstripped, at default
-file permissions — in cache file names, `.meta.json`, the search index and project
-records; none of those are touched by this. vibectx has no way to send credentials
-in a request header — it sends a user agent and a conditional `If-None-Match`,
-nothing else — so a token in the URL remains the only form it can carry one at all.
-If that applies to you, reach the endpoint by network-level means instead (a VPN, a
-fronting proxy, an IP allow-list) where you can; otherwise treat the cache directory
-as holding that secret (a `chmod 700` on the cache directory is on you — vibectx
-sets that mode only on a cache root it creates itself, not one that already
-existed). A general redaction policy and a real authenticated-fetch mechanism
-(so a credential never has to travel in a URL at all) are both open questions,
-deliberately not decided here — tracked for 0.2.1.
+to `activity.json` only, not to the rest of the cache directory.
+
+**It is not redacted everywhere.** If a config entry's `urls` carries a secret in
+its query string (an internal docs endpoint behind a `?token=…` — vibectx has no
+way to send credentials in a request header, only a user agent and a conditional
+`If-None-Match`, so the query string is the only form one can travel in at all),
+that token no longer reaches your agent's context through this log or through the
+`Source:` line every `get_docs`/`search` response carries (see [Tools](#tools)) —
+both strip the query string before rendering. **Other tool responses still print
+the URL whole**: `get_docs`'s "Candidates tried:" list, shown exactly when nothing
+could be fetched and nothing is cached — the moment a token has expired or
+rotated; `refresh`'s "refreshed from `<url>`" line; `resolve_library`'s "urls
+(probed in order)" list; and `warm_project`'s `url` column. It is also unstripped,
+at default file permissions, in cache file names, `.meta.json`, the search index
+and project records. Treat a URL-borne token as visible to your agent and to
+anyone who can read the cache directory — a VPN, a fronting proxy or an IP
+allow-list at the network level is the safer way to reach such an endpoint where
+you can use one. Closing the remaining response paths, a general redaction
+policy, and a real authenticated-fetch mechanism (so a credential never has to
+travel in a URL at all) are open questions, deliberately not decided here —
+tracked for 0.2.1.
 
 `--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
 contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;

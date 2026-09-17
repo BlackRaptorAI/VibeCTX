@@ -1502,6 +1502,20 @@ describe("get_docs Source: stamp never leaks a URL query string (PAR-811)", () =
     expect(out).toContain("Source: https://docs.internal.example.com/llms.txt ·");
     expect(out).not.toContain("super-secret-token");
   });
+
+  /** KNOWN GAP, deliberately not fixed here (both reviewers of this item confirmed it and the
+   *  README now names it explicitly): the "Candidates tried:" list on the nothing-fetched,
+   *  nothing-cached path was never part of `sourceStampLine`/`fitStampLine` — it renders
+   *  `entry.urls` directly (`get-docs.ts`'s `noDocStamp` branch) and was out of PAR-811's own
+   *  stated scope ("the Source:/provenance stamp", not every URL-rendering path in this file).
+   *  Pinned here so the gap is visible in code, not only in prose — and so this test starts
+   *  FAILING, not silently passing, the day someone closes it (tracked for 0.2.1). */
+  it("KNOWN GAP (0.2.1): unlike the stamp, the 'Candidates tried:' list on a total-miss still prints the query string in full", async () => {
+    stubFetch({}); // every candidate 404s, nothing cached
+    const out = await getDocsToolText(registry, { library: "acme" });
+    expect(out).toContain("Candidates tried:");
+    expect(out).toContain(INTERNAL_URL); // the raw url, query string and all — the gap
+  });
 });
 
 describe("get_docs activity log (A20/PAR-729, D-51)", () => {
