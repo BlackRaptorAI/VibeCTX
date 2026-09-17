@@ -499,12 +499,22 @@ export function resetSearchIndexMemo(): void {
  * already-fresh 30-library / 150 MB warm for zero index change.
  *
  * A session reads the file ONCE (lazily, on the first library that the in-process memo cannot
- * answer for), builds posting lists as documents arrive, and writes ONCE at the end. The final
- * write re-reads first, so a concurrent writer — another `vibectx` process, a `get_docs` in the
- * same run — is merged rather than clobbered; that is one extra read per run, not per library.
+ * answer for), builds posting lists as documents arrive, and writes ONCE at the end. `flush()`
+ * is safe to call more than once and does nothing when nothing changed. Nothing here throws:
+ * the index is derived, so a failure leaves the caller's own result untouched (D-13).
  *
- * `flush()` is safe to call more than once and does nothing when nothing changed. Nothing here
- * throws: the index is derived, so a failure leaves the caller's own result untouched (D-13).
+ * The final write re-reads first — one extra read per run, not per library — which NARROWS the
+ * window in which a concurrent writer (another `vibectx` process, a `get_docs` in the same run)
+ * can lose an entry: from "first `add()` to `flush()`" (a whole warm loop) down to "re-read to
+ * rename" (one serialise plus one write). It does not CLOSE it (F-3, PAR-740): the read-then-
+ * write is UNLOCKED and the write replaces the WHOLE map, so any entry another process commits
+ * inside that narrower window is lost — its own library or one this session never touched alike
+ * — last writer wins, the identical limitation `resolved-store.ts` states for its own record.
+ * (A re-read entry can also fail to reach disk for an unrelated reason: D-40 shedding, below.)
+ * Never a corrupt file either way (`writeAtomic`'s temp-file-plus-rename); acceptable for the
+ * single-user local tool this is. Closing the window for real means locking the index write —
+ * more machinery, and a stale-lock failure mode of its own — a design decision this comment
+ * does not make on its own.
  */
 export interface IndexSession {
   /** Offer one primary cached document to the index. Cheap when it is already indexed. */
