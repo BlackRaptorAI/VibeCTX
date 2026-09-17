@@ -153,11 +153,21 @@ gives way, the same "the cap always wins" rule that already applies to a single 
 snippet. The table of contents on the no-topic path gets the same discipline: it is capped as
 a share of the budget too, so a document with many headings cannot make the table of contents
 itself crowd out the document head. The one exception is the short "no sections/snippets
-matched" diagnostic: it is deliberately NOT bounded by `maxTokens`, so its advice ("try
-broader terms") survives even a very small budget in full. The `topic` it echoes back is
-length-clipped, and so is the note block folded into that same message; the library name and
-source URL it names are not, so a very long configured URL is the one thing that can still make
-this message large.
+matched" diagnostic (genuinely zero matches — see below for the different, budgeted case where
+something DID match but couldn't fit): it is deliberately NOT bounded by `maxTokens`, so its
+advice ("try broader terms") survives even a very small budget in full. Everything it names —
+the echoed `topic`, the note block folded into that same message, the library name, and (via
+the `Source:` stamp two paragraphs below) the source URL — is now length-clipped too.
+
+A no-match response is never silence about WHAT was searched, either: it opens with the same
+standing `Source:` stamp every other response carries (below), so "nothing matched" reads as a
+positive claim — this document, this old, was searched and the topic is not in it — never as
+"nothing was looked at". A topic that DID match something, but where the budget was too small
+to render any of it, gets the same treatment rather than an empty response indistinguishable
+from a genuine no-match: `N matching sections found, but none fit inside the response budget.
+Raise maxTokens to see them.` This one IS budgeted like an ordinary answer, not exempt like the
+zero-match diagnostic above — at the smallest budgets the note itself can still be truncated,
+the same "the cap always wins" rule as everywhere else in this file.
 
 Measured comparison against the previous ranker: on the GitHub-README corpus the
 build sandbox can reach, BM25 and the previous ranker tie at 18 of 60 probe
@@ -224,7 +234,7 @@ matches you get, in full:
 
 ```
 Source: <url> · fetched <ISO timestamp> · fresh|stale · curated|resolved
-No code snippets matched "<topic>" in <library> docs. Try mode "sections" or broader terms.
+No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
 
 ## Don't know which library? `search`
