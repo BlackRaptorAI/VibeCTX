@@ -250,6 +250,96 @@ describe("config aliases validation", () => {
   });
 });
 
+describe("PAR-777 (D-2): PEP 503 name twins (foo-bar / foo_bar) are the same package, not two entries", () => {
+  it("a config entry that is a PEP 503 twin of a default registry entry overrides it, exactly as a same-name entry would", () => {
+    const reg = loadRegistry(writeConfig([{ name: "ai.sdk", urls: [U] }]));
+    expect(reg.entries.has("ai-sdk")).toBe(false); // the old spelling is gone, not kept alongside the new one
+    expect(reg.entries.get("ai.sdk")?.urls).toEqual([U]);
+    expect(resolveLibrary(reg, "ai-sdk")?.urls).toEqual([U]); // still reachable under the OLD spelling via lookup
+    expect(reg.entries.size).toBe(30); // one entry overridden, not a 31st added
+  });
+
+  it("D-07 still applies across a PEP 503 twin override: omitting aliases inherits the replaced entry's", () => {
+    const reg = loadRegistry(writeConfig([{ name: "ai.sdk", urls: [U] }]));
+    expect(reg.entries.get("ai.sdk")?.aliases).toEqual(["ai", "vercel-ai"]); // ai-sdk's own aliases, inherited
+  });
+
+  it("an override that also sets aliases: [] clears them, same as a same-name override would", () => {
+    const reg = loadRegistry(writeConfig([{ name: "ai.sdk", urls: [U], aliases: [] }]));
+    expect(reg.entries.get("ai.sdk")?.aliases).toEqual([]);
+  });
+
+  it("a PEP 503 twin override between layers behaves exactly like a same-name override (D-14)", () => {
+    const user = join(dir, "user.json");
+    const project = join(dir, "project.json");
+    writeFileSync(user, JSON.stringify({ libraries: [{ name: "acme-tool", urls: [U] }] }), "utf8");
+    writeFileSync(project, JSON.stringify({ libraries: [{ name: "acme.tool", urls: ["https://project.example.com/llms.txt"] }] }), "utf8");
+    const reg = loadRegistryFrom({
+      files: [
+        { path: user, scope: "user", legacy: false },
+        { path: project, scope: "project", legacy: false },
+      ],
+      notes: [],
+    });
+    expect(reg.entries.has("acme-tool")).toBe(false);
+    expect(reg.entries.get("acme.tool")?.urls).toEqual(["https://project.example.com/llms.txt"]);
+  });
+
+  it("two config entries that are PEP 503 twins are a config error, not two separate entries (Done-when 2)", () => {
+    expect(() =>
+      loadRegistry(writeConfig([
+        { name: "foo-bar", urls: [U] },
+        { name: "foo_bar", urls: [U] },
+      ])),
+    ).toThrow(
+      /libraries\[1\]\.name \("foo_bar"\): "foo_bar" is a PEP 503 twin of "foo-bar" \(libraries\[0\]\) — the same package under two spellings; rename one, or delete the duplicate/,
+    );
+  });
+
+  it("does NOT fire on two entries with the exact same folded name — that stays the existing last-wins override", () => {
+    // Regression guard: {name:"Foo"} / {name:"foo "} both fold to "foo" and must keep the
+    // pre-existing, separately-tested "last one wins" behavior, not the new twin error —
+    // there is nothing ambiguous about two spellings that fold to the identical string.
+    expect(() =>
+      loadRegistry(writeConfig([
+        { name: "Foo", urls: [U] },
+        { name: "foo ", urls: ["https://b.example.com/llms.txt"] },
+      ])),
+    ).not.toThrow();
+  });
+
+  it("an alias that is a PEP 503 twin of a canonical name is a config error", () => {
+    expect(() => loadRegistry(writeConfig([{ name: "hono", urls: [U], aliases: ["ai.sdk"] }]))).toThrow(
+      /libraries\[0\]\.aliases \("hono"\): alias "ai\.sdk" is a PEP 503 twin of the canonical name "ai-sdk" \(a default library\); rename the alias, or override "ai-sdk" \(with its urls\) and set aliases: \[\]/,
+    );
+  });
+
+  it("an alias that is a PEP 503 twin of ANOTHER config entry's alias is a config error", () => {
+    expect(() =>
+      loadRegistry(writeConfig([
+        { name: "a", urls: [U], aliases: ["shared-name"] },
+        { name: "b", urls: [U], aliases: ["shared_name"] },
+      ])),
+    ).toThrow(/libraries\[1\]\.aliases \("b"\): alias "shared_name" is a PEP 503 twin of alias "shared-name" declared on "a"/);
+  });
+
+  it("an alias that is a PEP 503 twin of its OWN entry's name is a config error, reported as colliding with the entry itself", () => {
+    expect(() => loadRegistry(writeConfig([{ name: "foo-bar", urls: [U], aliases: ["foo_bar"] }]))).toThrow(
+      /libraries\[0\]\.aliases \("foo-bar"\): alias "foo_bar" is a PEP 503 twin of the canonical name "foo-bar" \(the entry itself\)/,
+    );
+  });
+
+  it("(Done-when 3) a scoped/dotted npm name is unaffected when nothing else in the registry twins it — loads as its own entry, not merged or refused", () => {
+    const reg = loadRegistry(writeConfig([{ name: "@foo/bar.baz", urls: [U] }]));
+    expect(reg.entries.get("@foo/bar.baz")?.urls).toEqual([U]);
+    expect(reg.entries.size).toBe(31); // a genuinely new entry, nothing to override
+  });
+
+  it("validates the defaults even without a config — the shipped registry has no PEP 503 twin pair", () => {
+    expect(() => loadRegistry()).not.toThrow();
+  });
+});
+
 describe("D-06: config beats default alias (backward compatibility with 0.1.3 configs)", () => {
   it("a legacy config named after a default alias loads; the alias is dropped from the default", () => {
     const reg = loadRegistry(writeConfig([{ name: "next", urls: ["https://example.com/next.txt"] }]));

@@ -465,10 +465,30 @@ const fold = (s: string): string => s.trim().toLowerCase();
 
 /**
  * Every alias must be unique across the registry and must not equal any canonical name
- * (compared on folded keys). Runs on every load, config or not, so the shipped defaults
- * are checked too. By the time this runs, D-06 has already removed the default aliases a
- * config claimed — so a collision here is always something the config must change.
- * `configNames` tells the message whether the colliding canonical is a default or config entry.
+ * (compared on folded keys, and — PAR-777 (D-2) — on their PEP 503 form too:
+ * `typing_extensions` as an alias collides with a canonical `typing-extensions` exactly as an
+ * exact-spelling alias would). `normalisePyPiName` (package-names.ts) is already this file's
+ * answer to "is this the same PyPI project under a different spelling" — used since PAR-655
+ * by `resolveLibrary`'s lookup fallback and by `curatedKeys`/`isTaken` to keep a resolved
+ * record from shadowing a curated pin. This item, and `applyLayer` below, apply that SAME,
+ * already-accepted rule to the two places PAR-777's own Problem statement names as still
+ * comparing by exact fold only.
+ *
+ * Applied with no ecosystem check, deliberately, matching the precedent those three existing
+ * call sites already set: two npm names that happen to differ only by a `-`/`_`/`.` run
+ * (`resend-node` vs a hypothetical `resend.node`) collide under this rule exactly as two PyPI
+ * spellings of the same project do. Accepted for the reasons those three sites already
+ * accepted it — an accidental collision here costs a config author a confusing override or a
+ * config error to resolve, never a wrong document silently served, and the shipped defaults
+ * contain no such pair (checked by hand across every name/alias in `DEFAULT_REGISTRY`, and
+ * enforced going forward by this same function running on every load). A scoped npm name
+ * (`@scope/pkg`) is unaffected: `@`/`/` are not folded, so it can only ever collide with
+ * another spelling of the SAME scoped name.
+ *
+ * Runs on every load, config or not, so the shipped defaults are checked too. By the time
+ * this runs, D-06 has already removed the default aliases a config claimed — so a collision
+ * here is always something the config must change. `configNames` tells the message whether
+ * the colliding canonical is a default or config entry.
  */
 function validateAliases(
   entries: Map<string, LibraryEntry>,
@@ -476,6 +496,9 @@ function validateAliases(
   fileOf: ReadonlyMap<string, ConfigSite>,
 ): void {
   const owner = new Map<string, string>();
+  const ownerPep = new Map<string, { alias: string; entry: string }>();
+  const canonicalPep = new Map<string, string>();
+  for (const key of entries.keys()) canonicalPep.set(normalisePyPiName(key), key);
   /** D-22: a config-caused failure is `<file>: libraries[i].aliases ("name"): <detail>`; a
    *  defaults-only one has no file and no index, so it names the entry in the detail. */
   const fail = (name: string, detail: string): never => {
@@ -486,6 +509,7 @@ function validateAliases(
   for (const e of entries.values()) {
     for (const raw of e.aliases ?? []) {
       const a = fold(raw);
+      const pep = normalisePyPiName(a);
       if (entries.has(a)) {
         const what = a === fold(e.name) ? "the entry itself" : configNames.has(a) ? "another config entry" : "a default library";
         fail(
@@ -494,9 +518,26 @@ function validateAliases(
             `rename the alias, or override "${a}" (with its urls) and set aliases: [] on that entry`,
         );
       }
+      // PAR-777 (D-2): the same collision, one punctuation spelling apart — `a` itself is
+      // not a canonical key (the exact check above already ruled that out), but its PEP 503
+      // form matches one.
+      const twinCanonical = canonicalPep.get(pep);
+      if (twinCanonical !== undefined) {
+        const what = twinCanonical === fold(e.name) ? "the entry itself" : configNames.has(twinCanonical) ? "another config entry" : "a default library";
+        fail(
+          e.name,
+          `alias "${a}" is a PEP 503 twin of the canonical name "${twinCanonical}" (${what}); ` +
+            `rename the alias, or override "${twinCanonical}" (with its urls) and set aliases: [] on that entry`,
+        );
+      }
       const other = owner.get(a);
       if (other !== undefined) fail(e.name, `alias "${a}" is also declared on "${other}"`);
+      const otherPep = ownerPep.get(pep);
+      if (otherPep !== undefined) {
+        fail(e.name, `alias "${a}" is a PEP 503 twin of alias "${otherPep.alias}" declared on "${otherPep.entry}"`);
+      }
       owner.set(a, e.name);
+      ownerPep.set(pep, { alias: a, entry: e.name });
     }
   }
 }
@@ -562,6 +603,28 @@ function applyLayer(
   fileOf: Map<string, ConfigSite>,
   display: string,
 ): void {
+  // PAR-777 (D-2): two entries in the SAME layer whose canonical names are PEP 503 twins are
+  // ambiguous — D-06/D-07's precedence rules decide which of two LAYERS wins, not which of two
+  // entries declared side by side in one file should. Checked before anything else in this
+  // layer is applied, so a config error here never leaves a partial merge behind. NOT the same
+  // case as two entries with the EXACT same folded name (`{name:"Foo"}, {name:"foo "}`) —
+  // that stays the existing, tested "last one wins" override, since there is nothing
+  // ambiguous about two spellings that fold to the SAME string; only a genuine twin (same
+  // PEP 503 form, different fold) is the new, ambiguous case this item adds an error for.
+  const seenPep = new Map<string, number>(); // normalisePyPiName(name) -> first index with that pep-form
+  for (const [index, e] of layer.entries()) {
+    const pep = normalisePyPiName(e.name);
+    const firstIndex = seenPep.get(pep);
+    if (firstIndex !== undefined && layer[firstIndex].name !== e.name) {
+      const first = layer[firstIndex].name;
+      throw new ConfigError(
+        display,
+        `${configLocator(index, "name", e.name)}: "${e.name}" is a PEP 503 twin of "${first}" (libraries[${firstIndex}]) — ` +
+          `the same package under two spellings; rename one, or delete the duplicate`,
+      );
+    }
+    if (firstIndex === undefined) seenPep.set(pep, index);
+  }
   // D-06: every key this layer claims — as a name or an alias — leaves the layers below.
   const claimed = new Set<string>();
   for (const [index, e] of layer.entries()) {
@@ -577,10 +640,20 @@ function applyLayer(
   }
   for (const [key, e] of rewritten) entries.set(key, e);
   // Merge, this layer wins on name; D-07 alias inheritance from the layer it replaces.
+  // PAR-777 (D-2): "wins on name" now also means "wins on the PEP 503 twin of an existing
+  // canonical name" — a config `foo_bar` overrides a registry `foo-bar` exactly as a
+  // same-spelling entry would, inheriting its aliases (D-07) and taking its place under the
+  // NEW entry's own spelling (the old key is dropped, not kept alongside the new one).
+  const canonicalPep = new Map<string, string>();
+  for (const key of entries.keys()) canonicalPep.set(normalisePyPiName(key), key);
   for (const e of layer) {
-    const replaced = entries.get(e.name);
+    const pep = normalisePyPiName(e.name);
+    const existingKey = entries.has(e.name) ? e.name : canonicalPep.get(pep);
+    const replaced = existingKey !== undefined ? entries.get(existingKey) : undefined;
     if (e.aliases === undefined && replaced?.aliases !== undefined) e.aliases = replaced.aliases;
+    if (existingKey !== undefined && existingKey !== e.name) entries.delete(existingKey);
     entries.set(e.name, e);
+    canonicalPep.set(pep, e.name);
   }
 }
 
