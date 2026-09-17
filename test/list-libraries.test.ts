@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeCache } from "../src/cache.js";
+import { writeCache, urlSlug, libDirName } from "../src/cache.js";
 import { loadRegistry, loadRegistryFrom, type Registry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
 
@@ -238,7 +238,7 @@ describe("A4 (PAR-717) — a corrupt .meta.json no longer crashes list_libraries
   it("reports the entry not cached instead of throwing (audit finding 4.5: list-libraries.ts:37 was unguarded and untested)", () => {
     const url = "https://fastify.dev/llms.txt";
     writeCache("fastify", url, "# Fastify\n- [A](/docs/A.md)");
-    const metaPath = join(dir, "fastify", `${url.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    const metaPath = join(dir, libDirName("fastify"), `${urlSlug(url)}.meta.json`);
     writeFileSync(metaPath, "{ not json", "utf8");
     let text = "";
     expect(() => {

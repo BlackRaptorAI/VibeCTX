@@ -1,6 +1,7 @@
-import { lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { lstatSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { debugField } from "./debug.js";
+import { readMetaFile } from "./cache-meta.js";
 
 /**
  * PAR-652 item 7a — a total size cap on the cache, with least-recently-used eviction.
@@ -19,9 +20,12 @@ import { debugField } from "./debug.js";
  *
  * RECENCY is `meta.fetchedAt`, which `touchCache` already refreshes on every 304
  * revalidation — so a document that is still being used keeps moving to the back of the
- * queue even when its bytes never change. A meta file that cannot be read or parsed sorts
- * as oldest: it is the same judgement `readCache` makes (an unparsable `fetchedAt` reads as
- * stale, N-6), and a document whose meta is corrupt is exactly the one to drop first.
+ * queue even when its bytes never change. A meta file that fails `toCacheMeta` validation
+ * (D-71, PAR-749 — shared with `cache.ts` via `./cache-meta.js`; before D-71 this file parsed
+ * `.meta.json` itself, ad hoc and more laxly than `readCache`) sorts as oldest: post-A4,
+ * `readCache` treats the same failure as fully UNCACHED rather than "stale but served" (N-6 is
+ * superseded), and a document whose meta this process cannot trust is exactly the one to drop
+ * first here too — "oldest" for eviction purposes, not a claim that it is still being served.
  *
  * WHAT "THIS RUN" MEANS is one sweep, not one process (R3, PAR-652c). `writtenThisRun` holds
  * the documents written since the last sweep, and the sweep clears it down to the write that
@@ -269,23 +273,24 @@ function rootIsSweepable(root: string, warn: (message: string) => void): boolean
  * to reach that answer was 103 ms of JSON for 10,000 documents that needed no work at all.
  * The size total needs only `lstat`; recency is needed only once the cap is exceeded.
  *
- * A meta that cannot be read or parsed keeps `fetchedAtMs` at 0 and sorts as oldest — the
- * same judgement `readCache` makes (an unparsable `fetchedAt` reads as stale, N-6).
+ * D-71 (PAR-749, Root 2) — `readMetaFile` (`./cache-meta.js`), the SAME strict, per-field
+ * validator `readCache` and `dropFollowedPageCache` use, not an ad hoc `typeof`/`isFinite`
+ * parse of `fetchedAt` alone. Before this, this was the laxest of the four `.meta.json`
+ * readers in the codebase — it accepted a `fetchedAt` of any length with no shape check,
+ * the exact gap A4 closed for `readCache` (an unbounded fractional-seconds group is not a
+ * length backstop, see `cache-meta.ts`'s `ISO_INSTANT` comment). A meta that fails validation
+ * (bad `fetchedAt`, but also now a missing/invalid `url` or an oversized `etag`) keeps
+ * `fetchedAtMs` at 0 and sorts as oldest — eviction's own judgement that a document whose
+ * meta this process cannot trust is the one to drop first, not a claim that `readCache` would
+ * still serve it as merely "stale" (N-6 is superseded there too; see this file's own top
+ * comment).
  */
 function resolveRecency(candidates: CandidateDocument[]): void {
   for (const doc of candidates) {
-    try {
-      const parsed = JSON.parse(readFileSync(doc.metaPath, "utf8")) as { fetchedAt?: unknown };
-      if (typeof parsed.fetchedAt === "string") {
-        const ms = new Date(parsed.fetchedAt).getTime();
-        if (Number.isFinite(ms)) {
-          doc.fetchedAt = parsed.fetchedAt;
-          doc.fetchedAtMs = ms;
-        }
-      }
-    } catch {
-      /* oldest */
-    }
+    const meta = readMetaFile(doc.metaPath);
+    if (meta === undefined) continue; // oldest
+    doc.fetchedAt = meta.fetchedAt;
+    doc.fetchedAtMs = new Date(meta.fetchedAt).getTime();
   }
 }
 
@@ -344,6 +349,24 @@ function scanCache(root: string): { totalBytes: number; candidates: CandidateDoc
 /**
  * Bring the cache under the cap, evicting least-recently-fetched documents first and never
  * one this run wrote. Returns the summary, or `undefined` when the cap is off.
+ *
+ * D-71 (PAR-749, Root 2) — the recency this sorts by is now read at the same trust level as
+ * every other `.meta.json` reader (`resolveRecency`, above). The DELETE decision itself still
+ * does not require `dropFollowedPageCache`'s `metaMatchesSlug` provenance proof, and that is
+ * deliberate, not the "no trust check" gap Root 2 named: this function frees space from
+ * candidates `scanCache` already proved are real `<slug>.md`/`<slug>.meta.json` pairs under a
+ * root D-46 already proved is this tool's own real cache directory, and it does not need to
+ * tell one URL's document apart from another's the way a KEEP-these/DROP-the-rest call does —
+ * every candidate is equally eligible for space regardless of what its meta claims. This is
+ * also the mechanism by which eviction can reach old-format (pre-D-71, non-hash-suffixed)
+ * cache files: `scanCache` discovers whatever `<slug>.md`/`<slug>.meta.json` pairs actually
+ * exist on disk rather than deriving the slug it expects from a URL, so a document orphaned
+ * under its old name is just another candidate. That reach is CONDITIONAL, not automatic,
+ * stated plainly because D-71's own migration note oversold it: this function does nothing at
+ * all below the cap (the `totalBytes <= capBytes` return just below), so under a typical cache
+ * that never exceeds `VIBECTX_CACHE_MAX_MB` (512 MB default), orphaned old-format files are
+ * never evicted by this path — they simply sit on disk, wasted space rather than a hazard,
+ * until the cache is either swept for real or the user clears it by hand.
  *
  * Never throws: a cache that cannot be swept must not fail the write that triggered it.
  */

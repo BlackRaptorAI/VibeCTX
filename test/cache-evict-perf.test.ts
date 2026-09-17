@@ -31,7 +31,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const { mkdtempSync, rmSync, writeFileSync } = await import("node:fs");
-const { writeCache, urlSlug } = await import("../src/cache.js");
+const { writeCache, urlSlug, libDirName } = await import("../src/cache.js");
 const { enforceCacheSizeCap, resetCacheEvictionState } = await import("../src/cache-evict.js");
 
 let dir: string;
@@ -68,7 +68,7 @@ describe("the under-cap sweep reads no meta files", () => {
   it("reads them only once the cap is actually exceeded, and still evicts oldest-first", () => {
     seedDocs();
     // Back-date one document by hand so "oldest" is unambiguous, then forget that read.
-    const metaPath = join(dir, "react", `${urlSlug("https://example.com/7.md")}.meta.json`);
+    const metaPath = join(dir, libDirName("react"), `${urlSlug("https://example.com/7.md")}.meta.json`);
     writeFileSync(
       metaPath,
       JSON.stringify({ url: "https://example.com/7.md", fetchedAt: "1999-01-01T00:00:00.000Z" }),
