@@ -278,11 +278,14 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // -- re-measured on the merged tree, not summed by hand, because two deltas landing on the
 // same file is exactly the case a by-hand sum gets wrong.
 // Cross-checked by a second, independent route: counting every relative `from "./…"`
-// specifier site by hand across src/ (137, was 127 before A20/PAR-729's activity-log.ts:
+// specifier site by hand across src/ (136, was 127 before A20/PAR-729's activity-log.ts:
 // its own 5 relative imports -- ./atomic-store.js, ./cache.js, ./link-policy.js,
 // ./limits.js, ./text.js -- plus one new edge INTO it from each of get-docs.ts, search.ts,
 // resolve.ts, refresh.ts and cli.ts, all runtime value imports, none a repeat of an
-// existing edge), minus whole-statement `import type`/`export type` relative imports (9 by
+// existing edge (net +10); then -1 at PAR-792 (activity-log hardening), which replaced
+// activity-log.ts's `sanitizeRemoteUrl` import from ./link-policy.js with a self-contained
+// shape-only validator, dropping that one edge and leaving activity-log.ts with 4 relative
+// imports, not 5), minus whole-statement `import type`/`export type` relative imports (9 by
 // inspection -- warm.ts's `export type { WarmRow, WarmStatus } from "./project-store.js"`
 // is one of these, so it is NOT a second edge on top of warm.ts's runtime import from the
 // same file), before de-duplicating a handful of files that import the same module twice
@@ -294,7 +297,7 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // real regression -- 0 edges with 34 nodes is the vacuous "resolver silently drops everything"
 // failure mode this whole non-vacuity block exists to catch, and a floor of merely "greater
 // than zero" would not.
-const MEASURED_EDGE_COUNT = 124;
+const MEASURED_EDGE_COUNT = 123;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {
@@ -318,7 +321,7 @@ describe("import graph: non-vacuity (a resolver that silently drops edges must b
   });
 
   it("every endpoint named in an assertion below actually exists in the graph", () => {
-    for (const id of ["list-libraries", "fetcher", "retrieval", "config", "project-deps", "autowarm-status"]) {
+    for (const id of ["list-libraries", "fetcher", "retrieval", "config", "project-deps", "autowarm-status", "activity-log"]) {
       expect(graph.nodes.has(id)).toBe(true);
     }
   });
@@ -379,6 +382,21 @@ describe("import graph: THE DONE-WHEN", () => {
     expect(reaches(graph, "retrieval", "config")).toBe(false);
     expect(reaches(graph, "retrieval", "project-deps")).toBe(false);
   });
+
+  /**
+   * PAR-792 (not part of A8/PAR-721's original two-item done-when above; added later,
+   * reusing the same established pattern): `activity-log.ts`'s `sanitizeLoggedUrl`
+   * deliberately skips `link-policy.ts`'s `isForbiddenHost` host-policy check for the
+   * persisted `url` field, on the premise that this value is only ever DISPLAYED
+   * (`vibectx log`'s table and `--json` output) and never turned back into a fetch — the
+   * exact premise that makes skipping the SSRF-class host check safe. This is the test that
+   * premise's own honesty depends on: if activity-log.ts ever gained a path to fetcher.ts,
+   * the reasoning in `sanitizeLoggedUrl`'s doc comment would need re-litigating, and this
+   * done-when is what forces that to happen rather than silently going stale.
+   */
+  it("(c) activity-log.ts does NOT reach fetcher.ts", () => {
+    expect(reaches(graph, "activity-log", "fetcher")).toBe(false);
+  });
 });
 
 /**
@@ -415,6 +433,17 @@ describe("import graph: falsifiability of the done-when itself (mutation control
     // path is retrieval -> tokenize -> config (2 hops).
     tokenizeEdges!.add("config"); // hypothetical future regression
     expect(reaches(g, "retrieval", "config")).toBe(true);
+  });
+
+  it("(c) is falsifiable: an edge injected into activity-log's closure flips it to true", () => {
+    const g = buildGraph();
+    const cacheEdges = g.edges.get("cache");
+    expect(cacheEdges).toBeDefined();
+    expect(reaches(g, "activity-log", "fetcher")).toBe(false); // false before the injection
+    // activity-log -> cache is already a direct edge; this adds cache -> fetcher, so the
+    // injected path is activity-log -> cache -> fetcher (2 hops).
+    cacheEdges!.add("fetcher"); // hypothetical future regression
+    expect(reaches(g, "activity-log", "fetcher")).toBe(true);
   });
 });
 
