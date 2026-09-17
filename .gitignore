@@ -20,8 +20,10 @@ USER-PREFS.md
 
 # Local-only agent tooling. Kept here so a reinstall cannot re-add any of it to the
 # repository: the pack writes several of these paths into the working tree on install.
-.claude/
-CLAUDE.md
+# CLAUDE.md and .claude/settings.json are tracked on purpose (D-70): the lean process and
+# the deny-rule settings for this repo live in git, not just on Tom's machine.
+.claude/*
+!.claude/settings.json
 .development-team-agents-backup/
 docs/TEAM.md
 docs/agent-operating-standard.md

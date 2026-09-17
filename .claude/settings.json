@@ -1,0 +1,19 @@
+{
+  "env": {
+    "BR_VERDICT_HOOK": "off",
+    "BR_CLAIMS_HOOK": "off"
+  },
+  "enabledPlugins": {
+    "blackraptor-marketing@blackraptor": false,
+    "blackraptor-hardware@blackraptor": false,
+    "blackraptor-council@blackraptor": false
+  },
+  "permissions": {
+    "deny": [
+      "Bash(git push origin main)",
+      "Bash(git push origin main:*)",
+      "Bash(git push --force:*)",
+      "Bash(gh pr merge:*)"
+    ]
+  }
+}
