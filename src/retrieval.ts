@@ -358,6 +358,43 @@ export function fitStampLine(f: StampFacts, maxChars: number): string {
   return `Source: ${url}`;
 }
 
+/** Longest `topic`/`library` echoed into `noMatchNote` — matches get-docs.ts's own
+ *  pre-existing bounds (the old, now-removed `MAX_ECHOED_TOPIC_CHARS` / `MAX_STAMP_FIELD_CHARS`
+ *  constants), now owned here so the cleaning/clipping happens once, centrally, rather than
+ *  trusting a caller's convention (D-48 / security-architect A17 S-1's lesson, applied again).
+ *  `topic` in particular has no length bound at the MCP schema (unlike `search`'s `query`,
+ *  capped at 1000 chars there — A6/PAR-719 round 1, test-auditor F4) and used to be echoed
+ *  verbatim into this exact sentence; still bounded on echo, just here instead of get-docs.ts. */
+const MAX_NOTE_TOPIC_CHARS = 200;
+const MAX_NOTE_LIBRARY_CHARS = 300;
+
+/** A18/PAR-727 — the ONE grammar for "this document was searched and the topic was not found
+ *  in it", shared by every mode `get_docs` has (sections, snippets — previously two
+ *  independently-worded strings). A POSITIVE claim, not a bare absence: paired with the stamp
+ *  (`sourceStampLine`/`fitStampLine`) immediately above it, so a reader knows exactly WHAT was
+ *  searched and HOW OLD it was, not just that nothing came back — "no results" alone reads as
+ *  ambiguous between "I looked and it isn't here" and "I didn't really look," and a quiet gap
+ *  is what invites an agent to invent an answer instead (the problem this item exists to
+ *  close). Deliberately does NOT say "this package does not exist" or anything that could be
+ *  read that way — that is A16's (not-yet-built) claim, a different fact from "this document
+ *  does not cover the topic," and the two must stay visibly distinct once A16 lands. */
+export function noMatchNote(what: string, topic: string, library: string): string {
+  return `No ${what} in ${clipText(library, MAX_NOTE_LIBRARY_CHARS)} docs match "${clipText(topic, MAX_NOTE_TOPIC_CHARS)}".`;
+}
+
+/** A18/PAR-727 — the thin-match case: `what` genuinely DID match, but none of it fit inside
+ *  the response budget once the header was paid for. Previously silent: the response was just
+ *  the stamp and nothing else, indistinguishable from "found nothing at all" to a reader who
+ *  cannot see the structured `matched` count. States the positive fact (content exists) rather
+ *  than leaving a short response to be misread as an empty one. */
+export function thinMatchNote(what: string, matchedCount: number): string {
+  // `what` is always passed as its plural noun ("sections", "code snippets"); naive
+  // de-pluralization (drop a trailing "s") reads correctly for both callers this file has —
+  // not a general-purpose singularizer, and not meant to become one.
+  const noun = matchedCount === 1 ? what.replace(/s$/, "") : what;
+  return `${matchedCount} matching ${noun} found, but none fit inside the response budget. Raise maxTokens to see ${matchedCount === 1 ? "it" : "them"}.`;
+}
+
 export function renderSection(s: SplitSection): string {
   return `## ${renderedPath(s)}\n\n${s.body}`;
 }
