@@ -117,7 +117,7 @@ describe("getDocs index following", () => {
     const spy = stubFetch({});
     const out = await getDocs(entry, { topic: "https" });
     expect(spy).not.toHaveBeenCalled();
-    expect(out).toContain('No sections matched "https"');
+    expect(out).toContain('No sections in fastify docs match "https"');
     expect(out).toContain("Skipped 3 index links outside allowed hosts (fastify.dev)");
   });
 
@@ -155,7 +155,7 @@ describe("getDocs index following", () => {
     const spy = stubFetch({});
     const out = await getDocs(entry, { topic: "zzz-unmatched" });
     expect(spy).not.toHaveBeenCalled();
-    expect(out).toContain('No sections matched "zzz-unmatched"');
+    expect(out).toContain('No sections in fastify docs match "zzz-unmatched"');
     expect(out).not.toContain("Skipped");
   });
 
@@ -742,10 +742,16 @@ describe("getDocs index following", () => {
      *  thing dropped." `docStamp` is the FIRST text `header` is built from (ahead of the note
      *  block, ahead of the body) — so under the final `clipToBudget` backstop, which truncates
      *  from the END, the stamp is provably the LAST thing to be cut, whatever the budget.
-     *  Proven directly at a budget well below the zero-content crossover measured above (no
-     *  section body of any kind survives): the response is still headed by the stamp's own
-     *  `Source: <url>` opening, not silently empty or all note-block accounting. */
-    it("(A17, PAR-726) the standing stamp survives even where the section body does not — it is not the first thing dropped", async () => {
+     *
+     *  A18 (PAR-727), RE-DESIGNED, not merely re-measured: this budget (20, well below the
+     *  zero-content crossover of 45/46) used to render JUST the stamp and nothing else — no
+     *  section body of any kind, and no explanation of why. That silence is exactly the gap
+     *  PAR-727 exists to close. The `thinMatch` path now builds ITS OWN smaller header, which
+     *  reserves room for the explanatory note FIRST and re-degrades the stamp around what is
+     *  left — so at this same budget, both the stamp (degraded to `Source: <url>` alone) AND a
+     *  (truncated) thin-match note now share the response, instead of the stamp having the
+     *  whole budget to itself. */
+    it("(A17, PAR-726 / A18, PAR-727) the standing stamp survives even where the section body does not — it is not the first thing dropped", async () => {
       seedIndex(
         [
           "# Fastify",
@@ -772,11 +778,52 @@ describe("getDocs index following", () => {
         }),
       );
       const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 20 }); // well below the zero-content crossover (45/46) — no section body of any kind
-      // (code-reviewer round 1, S3): assert the whole degraded-but-complete stamp, not just its
-      // opening substring -- MEASURED at this budget, room runs out after "fresh" (curated is
-      // dropped), but every field that IS present is whole, never a fragment.
-      expect(out.text).toBe("Source: https://fastify.dev/llms.txt · fetched " + out.source?.fetchedAt + " · fresh\n");
+      // MEASURED at this budget: the stamp degrades all the way to `Source: <url>` (thinMatch
+      // reserves room for the note first), and the note itself is truncated but present — not
+      // silence, and no mid-field cut of the stamp's own fields either.
+      expect(out.text.startsWith("Source: https://fastify.dev/llms.txt\n")).toBe(true);
+      expect(out.text).toContain("4 matching sections found, but none fit");
       expect(out.matched).toBeGreaterThan(0); // the topic DID match a section — only the RENDERED text lacks room for it
+    });
+
+    /** A18 (PAR-727) done-when: "every no-match and thin-match path in both modes emits the
+     *  statement." At a budget generous enough for the note to render in FULL (but still short
+     *  of the zero-content crossover, so the section body itself still cannot fit), both the
+     *  degraded stamp and the complete thin-match sentence are present — proving the statement
+     *  is not merely attempted (truncated, as in the tighter-budget test above) but actually
+     *  delivered once there is room for it. */
+    it("(A18, PAR-727) the thin-match note renders in full once the budget allows, stating the positive fact instead of leaving silence", async () => {
+      seedIndex(
+        [
+          "# Fastify",
+          "- [Request](/docs/Request.md)",
+          "- [Request mirror](https://mirror.example.net/Request.md)",
+          "- [Request big](/docs/Big.md)",
+          "- [Request gone](/docs/Gone.md)",
+        ].join("\n"),
+      );
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (url: unknown) => {
+          const u = String(url);
+          if (u.endsWith("/Request.md")) {
+            return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+              status: 200,
+              headers: { "content-type": "text/plain" },
+            });
+          }
+          if (u.endsWith("/Big.md")) {
+            return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+          }
+          return new Response("nope", { status: 404 });
+        }),
+      );
+      const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 35 });
+      expect(out.text).toBe(
+        "Source: https://fastify.dev/llms.txt\n4 matching sections found, but none fit inside the response budget. Raise maxTokens to see them.",
+      );
+      expect(out.matched).toBe(4);
+      expect(out.returnedFromFollowed).toBe(0); // nothing was actually rendered from anywhere
     });
 
     /** (code-reviewer, A17 round 1, B2): the exact scenario measured in review -- at
@@ -1147,11 +1194,13 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     // A17 (PAR-726): the standing stamp now opens this response, on its own line, ahead of
     // the no-match message — it also replaced the old inline lowercase "(source: url)"
     // fragment (see docStamp's own comment in get-docs.ts). `fetched <ISO>` is not pinned
-    // exactly (it is the wall clock at call time); everything else is.
+    // exactly (it is the wall clock at call time); everything else is. A18 (PAR-727): the
+    // sentence itself is now retrieval.ts's shared `noMatchNote` grammar ("No <what> in <name>
+    // docs match <topic>."), the same shape sections mode uses.
     expect(out.text).toMatch(
       new RegExp(
         `^Source: ${STRIPE_URL.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")} · fetched \\S+ · fresh · curated\\n` +
-          `No code snippets matched "quantum blockchain" in stripe docs\\. Try mode "sections" or broader terms\\.$`,
+          `No code snippets in stripe docs match "quantum blockchain"\\. Try mode "sections" or broader terms\\.$`,
       ),
     );
     expect(out.matched).toBe(0);
@@ -1184,6 +1233,19 @@ describe('getDocs mode: "snippets" (D-26)', () => {
     const out = await getDocs({ ...stripe, ttlHours: 0 }, { topic: "checkout session create", mode: "snippets" });
     expect(out.split("\n")[0]).toMatch(/^> /); // the staleNote prefix
     expect(out).toContain("stripe.checkout.sessions.create(");
+  });
+
+  /** A18 (PAR-727) done-when: "every no-match and thin-match path in BOTH modes emits the
+   *  statement." The sections-mode thin-match tests above prove the mechanism; this proves
+   *  snippets mode shares it — same `thinMatch` closure, same `thinMatchNote` grammar, and the
+   *  singular/plural noun form is right at count 1 ("code snippet", not "code snippets"). */
+  it("(A18, PAR-727) snippets mode also states the thin-match positive claim, not silence, when a match exists but none fits", async () => {
+    writeCache(stripe.name, STRIPE_URL, STRIPE_DOC);
+    stubFetch({});
+    const out = await getDocsDetailed(stripe, { topic: "checkout session create", mode: "snippets", maxTokens: 20 });
+    expect(out.text.startsWith(`Source: ${STRIPE_URL}\n`)).toBe(true);
+    expect(out.text).toContain("1 matching code snippet found, but"); // singular, not "snippets"
+    expect(out.matched).toBe(1);
   });
 });
 
@@ -1380,7 +1442,7 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
     stubFetch({});
     const out = await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched", maxTokens: 10 });
-    expect(out).toMatch(/No sections matched "zzz-unmatched" in react docs/);
+    expect(out).toMatch(/No sections in react docs match "zzz-unmatched"/);
   });
 });
 
