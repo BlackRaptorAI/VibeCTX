@@ -38,16 +38,17 @@ export async function refreshToolText(registry: Registry, library?: string, opts
   }
   const results: string[] = [];
   // R2 (A3, PAR-716): ONE session for the whole loop, not one read-then-write per library —
-  // the same fix `warm` and `autowarm` already have (search-index.ts:495-508). Scoped to the
-  // direct-fetch path below; a RESOLVED entry's indexing is `resolvePackage`'s own single-
-  // document write (R1, D-34) and stays outside this session — see the branch below. MEASURED
-  // for the direct-fetch path only (round 1, code-reviewer, S4 — a resolved-entry refresh is
-  // still O(n): its own `invalidateIndex` plus `resolvePackage`'s own `indexCachedDocument`,
-  // unchanged by this item): a 30-library refresh of non-resolved entries costs at most 3
-  // `index.json` reads and 1 write, CONSTANT in library count — not the literal "one read, one
-  // write" the issue states. Two of those three reads (the `flush()` re-read that guards
-  // against a concurrent writer, and `writeIndex`'s own schema-version check) are intrinsic to
-  // the shared session/writeIndex API `warm`/`autowarm` already use and are unchanged here; the
+  // the same fix `warm` and `autowarm` already have (`IndexSession`'s own doc comment in
+  // search-index.ts). Scoped to the direct-fetch path below; a RESOLVED entry's indexing is
+  // `resolvePackage`'s own single-document write (R1, D-34) and stays outside this session —
+  // see the branch below. MEASURED for the direct-fetch path only (round 1, code-reviewer, S4 —
+  // a resolved-entry refresh is still O(n): its own `invalidateIndex` plus `resolvePackage`'s
+  // own `indexCachedDocument`, unchanged by this item): a 30-library refresh of non-resolved
+  // entries costs at most 3 `index.json` reads and 1 write, CONSTANT in library count — not the
+  // literal "one read, one write" the issue states. Two of those three reads (the `flush()`
+  // re-read that NARROWS, not closes, the window for a concurrent writer — F-3, PAR-740 — and
+  // `writeIndex`'s own schema-version check) are intrinsic to the shared session/writeIndex API
+  // `warm`/`autowarm` already use and are unchanged here; the
   // third (the lazy snapshot read this item's own `add()`/`remove()` interplay was routing
   // through) is NOT intrinsic — round 1 found it elidable and `search-index.ts`'s `add()` now
   // cancels a pending removal instead of re-reading for it, which also means a refresh that
