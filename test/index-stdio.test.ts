@@ -435,3 +435,48 @@ describe("spawn(node, [dist/index.js, subcommand]) — real read-only cache dire
     SPAWN_TEST_TIMEOUT_MS,
   );
 });
+
+/**
+ * PAR-780 — "tested through the spawn harness": `--help`/`-h` must exit 0 from a REAL spawned
+ * process (the A10 describe block above already proves `process.exitCode = cliExit` carries a
+ * non-default 0 vs. the search-usage-error 2; the property specific to this item is that help
+ * printed something and exited 0 without ever reaching the MCP transport or a config lookup —
+ * no seeded cache, no config file, in an isolated sandbox with no `.git` above it).
+ */
+describe("spawn(node, [dist/index.js, --help]) — real process (PAR-780)", () => {
+  it("vibectx --help and vibectx -h print usage on stdout and exit 0, with nothing on stderr", async () => {
+    for (const flag of ["--help", "-h"]) {
+      const env = sandboxEnv();
+      const { code, signal, stdout, stderr } = await spawnCli([flag], env);
+      expect(signal).toBeNull();
+      expect(code).toBe(0);
+      expect(stdout).toMatch(/^usage: vibectx <command> \[options\]/);
+      expect(stdout).toContain("doctor");
+      expect(stdout).toContain("resolve");
+      expect(stdout).toContain("warm");
+      expect(stdout).toContain("search");
+      expect(stdout).toContain("log");
+      expect(withoutNodeRuntimeWarnings(stderr)).toBe("");
+    }
+  }, SPAWN_TEST_TIMEOUT_MS);
+
+  it("vibectx <command> --help prints that command's usage and exits 0, for every subcommand, without a config file", async () => {
+    for (const command of ["doctor", "resolve", "warm", "search", "log"]) {
+      const env = sandboxEnv();
+      const { code, signal, stdout, stderr } = await spawnCli([command, "--help"], env);
+      expect(signal).toBeNull();
+      expect(code).toBe(0);
+      expect(stdout).toMatch(new RegExp(`^usage: vibectx ${command}\\b`));
+      expect(withoutNodeRuntimeWarnings(stderr)).toBe("");
+    }
+  }, SPAWN_TEST_TIMEOUT_MS);
+
+  it("an unknown top-level option (no --help) is unaffected: search --bogus still exits 2 with one stderr line", async () => {
+    const env = sandboxEnv();
+    const { code, signal, stdout, stderr } = await spawnCli(["search", "--bogus"], env);
+    expect(signal).toBeNull();
+    expect(code).toBe(2);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(/Unknown option "--bogus"/);
+  }, SPAWN_TEST_TIMEOUT_MS);
+});

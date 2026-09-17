@@ -99,6 +99,23 @@ node /absolute/path/to/VibeCTX/dist/index.js
 `library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
 or **any npm / PyPI package name** — an unknown name is resolved on the spot.
 
+## Command line
+
+Every subcommand below also runs from the shell — the same reports the MCP tools above
+return, without a client:
+
+| Command | What it does |
+|---|---|
+| `vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]` | Prove retrieval works per library — see [Checking coverage: `vibectx doctor`](#checking-coverage-vibectx-doctor) |
+| `vibectx resolve <package> [--npm \| --pypi] [--config <path>]` | Turn a package name into a docs source — see [Any library, no config](#any-library-no-config) |
+| `vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]` | Cache a project's dependency docs — see [Warm your project's docs](#warm-your-projects-docs) |
+| `vibectx search <query> [--library <name>]… [--max-tokens <n>] [--json] [--config <path>]` | Search every cached library at once — see [Don't know which library? `search`](#dont-know-which-library-search) |
+| `vibectx log [--json]` | Show recorded tool activity — see [Activity log: `vibectx log`](#activity-log-vibectx-log) |
+
+`vibectx --help` and `vibectx -h` print this list and exit `0`; `vibectx <command> --help`
+(or `-h`) prints that command's own usage and exits `0`. An unknown option still exits `2`,
+printing the error and that command's usage as two lines on stderr.
+
 ### How ranking works
 
 No embeddings, no network at query time, same answer every run.

@@ -2,10 +2,24 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { writeCache, libDirName } from "../src/cache.js";
 import { DEFAULT_REGISTRY, loadDiscoveredRegistry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
-import { parseDoctorArgs, parseResolveArgs, parseSearchArgs, parseLogArgs, dispatchCli, RESOLVE_USAGE, SEARCH_USAGE, type CliIo } from "../src/cli.js";
+import {
+  parseDoctorArgs,
+  parseResolveArgs,
+  parseSearchArgs,
+  parseLogArgs,
+  dispatchCli,
+  DOCTOR_USAGE,
+  RESOLVE_USAGE,
+  WARM_USAGE,
+  SEARCH_USAGE,
+  LOG_USAGE,
+  GLOBAL_USAGE,
+  type CliIo,
+} from "../src/cli.js";
 import { resetSearchIndexMemo } from "../src/search-index.js";
 import { MAX_QUERY_CHARS, MAX_TOKENS_BUDGET, SEARCH_SCHEMA_VERSION } from "../src/search.js";
 
@@ -830,5 +844,117 @@ describe("dispatchCli log (A20/PAR-729, D-51)", () => {
     const o = io();
     expect(await dispatchCli(["node", "vibectx", "log", "--json"], o)).toBe(0);
     expect(JSON.parse(o.out.join("")).entries).toEqual([]);
+  });
+});
+
+/**
+ * PAR-780: `--help`/`-h` prints usage and exits 0, both at the top level and per command;
+ * an unknown option still exits 2 with one stderr line (the existing "exits 2 with usage on a
+ * bad flag" tests above, unchanged, already cover the regression for doctor/resolve/warm/search;
+ * this block adds one for `log` and pins that `--help` does not disturb that path).
+ */
+describe("--help / -h (PAR-780)", () => {
+  it("vibectx --help and vibectx -h print the global usage on stdout and exit 0, with no config/registry touched", async () => {
+    for (const flag of ["--help", "-h"]) {
+      const o = io();
+      expect(await dispatchCli(["node", "dist/index.js", flag], o)).toBe(0);
+      expect(o.out.join("")).toBe(`${GLOBAL_USAGE}\n`);
+      expect(o.err).toEqual([]);
+    }
+  });
+
+  it("the global usage lists every subcommand", () => {
+    for (const name of ["doctor", "resolve", "warm", "search", "log"]) {
+      expect(GLOBAL_USAGE).toMatch(new RegExp(`^\\s+${name}\\b`, "m"));
+    }
+  });
+
+  it("vibectx <command> --help and -h print that command's usage and exit 0, for every subcommand", async () => {
+    const cases: [string, string][] = [
+      ["doctor", DOCTOR_USAGE],
+      ["resolve", RESOLVE_USAGE],
+      ["warm", WARM_USAGE],
+      ["search", SEARCH_USAGE],
+      ["log", LOG_USAGE],
+    ];
+    for (const [command, usage] of cases) {
+      for (const flag of ["--help", "-h"]) {
+        const o = io();
+        expect(await dispatchCli(["node", "dist/index.js", command, flag], o)).toBe(0);
+        expect(o.out.join("")).toBe(`${usage}\n`);
+        expect(o.err).toEqual([]);
+      }
+    }
+  });
+
+  it("--help before the subcommand token still resolves to that command's own usage, not the global one", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "dist/index.js", "--help", "doctor"], o)).toBe(0);
+    expect(o.out.join("")).toBe(`${DOCTOR_USAGE}\n`);
+  });
+
+  it("--help wins over an unknown option present in the same command — help is checked first", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "dist/index.js", "doctor", "--bogus", "--help"], o)).toBe(0);
+    expect(o.out.join("")).toBe(`${DOCTOR_USAGE}\n`);
+  });
+
+  it("an unknown option still exits 2 with one stderr line when --help is absent (log, the one subcommand not already covered above)", async () => {
+    const o = io();
+    expect(await dispatchCli(["node", "dist/index.js", "log", "--bogus"], o)).toBe(2);
+    expect(o.out).toEqual([]);
+    expect(o.err.join("")).toMatch(/Unknown option "--bogus"/);
+    expect(o.err.join("").split("\n").filter((l) => l.length > 0)).toHaveLength(2); // message + usage
+  });
+
+  /** The usage text lists every command and matches the README (Done-when, PAR-780): the
+   *  README's own "## Command line" section is read and checked against every exported
+   *  per-command USAGE string, the same drift guard test/debug.test.ts uses for its README
+   *  section. Bounded to the NEXT heading of any level (not just another "## "), so the slice
+   *  can't silently swallow unrelated sections below it. */
+  describe("the README's \"Command line\" section matches the shipped usage text", () => {
+    const README = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
+    const start = README.indexOf("## Command line");
+    const afterHeading = README.slice(start + "## Command line".length);
+    const nextHeading = afterHeading.search(/\n#{1,6} /);
+    const section = afterHeading.slice(0, nextHeading === -1 ? undefined : nextHeading);
+
+    it("found the section", () => {
+      expect(start).toBeGreaterThan(-1);
+      expect(section.length).toBeGreaterThan(200);
+      expect(section.length).toBeLessThan(2000); // caught the over-capture bug this guards against
+    });
+
+    /** Each table row's inline-code cell — `| \`vibectx <name> ...\` |` — parsed back to a
+     *  bare usage string ("vibectx <name> ..."), unescaping the "\|" a markdown table cell
+     *  needs for a literal pipe (`resolve`'s `--npm | --pypi`). */
+    function readmeUsage(name: string): string | undefined {
+      const row = section.split("\n").find((line) => line.startsWith(`| \`vibectx ${name} `) || line.startsWith(`| \`vibectx ${name}[`) || line.startsWith(`| \`vibectx ${name}\``));
+      const m = row?.match(/^\| `(vibectx [^`]*)` \|/);
+      return m?.[1].replace(/\\\|/g, "|");
+    }
+
+    it("each command's table row is exactly its own usage: <line>, not just present somewhere in the section", () => {
+      const cases: [string, string][] = [
+        ["doctor", DOCTOR_USAGE],
+        ["resolve", RESOLVE_USAGE],
+        ["warm", WARM_USAGE],
+        ["search", SEARCH_USAGE],
+        ["log", LOG_USAGE],
+      ];
+      for (const [name, usage] of cases) {
+        expect(readmeUsage(name)).toBe(usage.replace(/^usage: /, ""));
+      }
+    });
+
+    it("documents --help / -h and the exit codes", () => {
+      expect(section).toContain("--help");
+      // Not just .toContain("-h") — that's trivially true of "--help" itself. Requires -h as
+      // its own token (preceded by non-"-", followed by a non-word character), so deleting the
+      // README's separate "vibectx -h" mention would actually fail this.
+      expect(section).toMatch(/(?<!-)-h\b/);
+      expect(section).toMatch(/exits? `0`/);
+      expect(section).toMatch(/exits `2`/);
+    });
   });
 });
