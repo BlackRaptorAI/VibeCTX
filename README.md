@@ -1188,10 +1188,13 @@ both strip the query string before rendering. **Other tool responses still print
 the URL whole**: `get_docs`'s "Candidates tried:" list, shown exactly when nothing
 could be fetched and nothing is cached — the moment a token has expired or
 rotated; `refresh`'s "refreshed from `<url>`" line; `resolve_library`'s "urls
-(probed in order)" list; and `warm_project`'s `url` column. It is also unstripped,
-at default file permissions, in cache file names, `.meta.json`, the search index
-and project records. Treat a URL-borne token as visible to your agent and to
-anyone who can read the cache directory — a VPN, a fronting proxy or an IP
+(probed in order)" list; and `warm_project`'s `url` column. The `--json` form of
+the CLI commands emits it whole too — `vibectx doctor --json` and
+`vibectx search --json` both serialize the resolved URL to stdout, where a
+terminal or a CI log can hold it as easily as an agent's context can. It is also
+unstripped, at default file permissions, in cache file names, `.meta.json`, the
+search index and project records. Treat a URL-borne token as visible to your
+agent and to anyone who can read the cache directory — a VPN, a fronting proxy or an IP
 allow-list at the network level is the safer way to reach such an endpoint where
 you can use one. Closing the remaining response paths, a general redaction
 policy, and a real authenticated-fetch mechanism (so a credential never has to

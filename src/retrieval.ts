@@ -354,15 +354,18 @@ const MAX_STAMP_URL_CHARS = 300;
  *
  * SCOPE (PAR-811's own issue, stated plainly): this closes the leak for the rendered TEXT
  * stamp only — `GetDocsOutcome.source.url` / `SearchGroup.url` (the structured, --json fields)
- * are untouched. NOT because they "never leave the process" (code-reviewer, round 1: that
- * claim is false for `SearchGroup.url` — `vibectx search --json` serializes the whole
- * `SearchOutcome`, `cli.ts`'s `io.stdout(JSON.stringify(outcome, …))`, onto stdout, a real exit
- * from the process into a terminal or CI log); the actual reason is narrower and is the one
- * that matters here — neither surface reaches a MODEL's context the way a rendered response
- * does, and closing a machine-readable field is a different, deferred question (the 0.2.1
- * redaction policy below), not an oversight in this fix. It does not add a general redaction
- * policy, and it does not add a real authenticated-fetch mechanism (custom headers, say) so a
- * credential never has to travel in a URL at all — both stay open,
+ * are untouched. NOT because they "never leave the process" (code-reviewer, round 1: false for
+ * BOTH, not just one — `vibectx search --json` serializes `SearchGroup.url` via `cli.ts`'s
+ * `io.stdout(JSON.stringify(outcome, …))`, and `GetDocsOutcome.source.url` reaches stdout the
+ * same way, through `doctor.ts`'s `LibraryReport.url` on `vibectx doctor --json` — round 2
+ * caught this comment still singling out search as if get_docs's own structured field stayed
+ * contained, which it does not; `get-docs.ts`'s own doc comment on `source` even says this
+ * field exists BECAUSE doctor consumes it). The actual reason these are deferred is narrower
+ * and is the one that matters here — neither surface reaches a MODEL's context the way a
+ * rendered response does, and closing a machine-readable field is a different, deferred
+ * question (the 0.2.1 redaction policy below), not an oversight in this fix. It does not add a
+ * general redaction policy, and it does not add a real authenticated-fetch mechanism (custom
+ * headers, say) so a credential never has to travel in a URL at all — both stay open,
  * deliberately deferred to 0.2.1, not folded into this fix.
  */
 function stripStampQuery(url: string): string {
