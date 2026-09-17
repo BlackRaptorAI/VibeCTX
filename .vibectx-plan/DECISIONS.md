@@ -76,7 +76,7 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 | **D-47** | A library `urls` entry must clear the same host policy a followed link clears. Internal, loopback and non-routable hosts are reachable only through an explicit per-entry `allowInternalHosts: true`. | A1 / PAR-714 |
 | **D-48** | One exported control and bidi character class is the contract for every render path. Adding a character to it is a D-30 amendment; a local variant is a defect. | A7 / PAR-720 |
 | **D-49** | The URL trust decision lives in `src/link-policy.ts`, the one file that owns host policy, and every caller — config included — calls it rather than re-implementing a subset. | A14, folded into A1 |
-| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. | A11 / PAR-724 |
+| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. **Executed 2026-09-17 — see D-74.** | A11 / PAR-724 |
 | **D-51** | VibeCTX records its own activity, locally, bounded and content-free, readable through the same `--json` envelope as every other command. It never records what was *said*, only what was *looked at*. | A20 / PAR-729 |
 | **D-52** | Agent packs are consumed as Claude Code plugins from the `blackraptor` marketplace, never vendored into the repository. Verdict enforcement lives in the pack's `Stop` hook, not in VibeCTX's CI. Supersedes D-44. | governance |
 | **D-53** | The operating pack version for 0.2.0 is **2.1.0**. Gate verdicts follow the 2.0.0 schema (integer confidence, required `standards`, string `evidence`, no `N/A`); the 13 pre-existing Change Records predate it and are re-emitted rather than hand-patched. | governance |
@@ -575,5 +575,109 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `StampFacts`/`sourceStampLine`, not a rework of this item's plumbing.
   Ref: `src/retrieval.ts` (`sourceStampLine`), `src/get-docs.ts`, `src/search.ts`,
   `src/fetcher.ts`, `src/cache.ts` (A17 / PAR-726).
+  **Superseded 2026-09-17 by D-74**, which closes this gap exactly the way predicted above —
+  `StampFacts` gained an optional `version` field, `sourceStampLine`/`fitStampLine` extended,
+  nothing about A17's own plumbing reworked.
+
+---
+
+## D-74 — decided 2026-09-17, executing A11 / PAR-724
+
+- **D-74** 2026-09-17 — **D-50 executed: documentation is version-matched where a manifest
+  names an unambiguous exact pin, and the fallback to latest is always stated, never silent.**
+  Checked against the tree before starting: no version field existed anywhere (`ProjectDependency`,
+  `LibraryEntry`, `ResolveOutcome`, `StampFacts`) — D-73's premise (that A11 had already landed
+  when A17 was built) was confirmed false, exactly as D-73 itself found.
+  **What "an unambiguous exact pin" means, precisely** — the premise in A11's own Shape ("`warm`
+  already parses the version specifier next to every dependency name, then discards it") was
+  ALSO checked against the tree and found false: no version specifier was parsed anywhere in
+  `src/project-deps.ts` before this item, discarded or otherwise (`ProjectDependency` had no
+  version-shaped field to discard into). Parsing was built from scratch, scoped deliberately
+  narrow: a bare semver in package.json (`"1.2.3"`, never `"^1.2.3"`), a PEP 508 `==` pin in
+  requirements.txt / `[project].dependencies` (`django==4.2.3`, never `>=`/`~=`/a second
+  comma-separated constraint), and a plain quoted Poetry string with no range character
+  (`django = "4.2.3"`, never `^`/`~`/an inline table). A range is not a pin — `get_docs` has no
+  single version to match documentation against for one, and inventing the range's lower bound
+  as "the" version would itself be a silent fabrication of the kind D-50 forbids. Lockfile
+  resolved-version capture (`package-lock.json`'s `packages["node_modules/<name>"].version`,
+  pnpm's equivalent) is NOT built — those lockfiles are read today only when the manifest itself
+  is ABSENT (an existing, pre-A11 constraint unrelated to this item), so wiring resolved-version
+  capture through them would need restructuring that discovery path, out of this item's scope.
+  Filed as a follow-up, not silently dropped.
+  **The resolution chain, per the Shape's own naming** — when `get_docs(library, topic?,
+  version?)` is given a version: for an unknown name, `resolvePackage` gains one extra
+  metadata fetch at the exact pinned version (`registry.npmjs.org/<name>/<version>`,
+  `pypi.org/pypi/<name>/<version>/json` — both real, documented per-version registry endpoints)
+  to confirm the version is registered and read its (possibly different) repository field, then
+  tries GitHub tag-README candidates at `refs/tags/v<version>/<file>` and
+  `refs/tags/<version>/<file>` (the explicit `refs/tags/` ref form, not a bare tag name as the
+  ref segment — the same shape the existing `HEAD` candidates already use, `refs/tags/`
+  disambiguates a tag from a same-named branch) BEFORE the existing unversioned llms.txt/README
+  chain. A CURATED (default-registry or config) entry is deliberately never re-resolved for a
+  version — its `urls` are hand-picked doc sources, not registry-metadata-derived, so there is
+  no version-specific candidate to try; `get_docs` says so explicitly rather than silently
+  ignoring the argument. An already-RESOLVED (non-curated) entry IS re-resolved for a version,
+  reusing the same re-resolution machinery `warm.ts`'s D-11 ecosystem-mismatch handling already
+  established.
+  **Non-silent fallback (D-50's own words), both directions:** `StampFacts` gained an optional
+  `version` field, set ONLY on a genuine version-specific match — never merely because a version
+  was requested. When a version was requested and none was matched, the response states the
+  substitution explicitly (`retrieval.ts`'s `versionFallbackNote`) rather than leaving a stamp
+  with no version field to be silently misread as "no version was asked for".
+  **Cache keys are already version-aware, no structural change needed:** the cache is keyed by
+  `(library, url)` (D-71/PAR-749), and a version-specific candidate URL
+  (`.../refs/tags/v1.2.3/README.md`) is a different string from an unversioned one, so it
+  already lands in a distinct cache entry — verified, not merely assumed, by a regression test
+  proving two different pinned versions of the same library get isolated cache entries. The
+  UNVERSIONED fallback candidates (llms.txt, homepage) are, by contrast, genuinely
+  version-agnostic URLs and deliberately DO share one cache entry across every version that
+  falls back to them — that is the correct behaviour (one fetch, not one per requested version,
+  for content that is not actually version-partitioned), made safe by the fallback statement
+  above rather than by adding a cache dimension that would just paper over the same fact.
+  Ref: `src/limits.ts`, `src/resolve.ts`, `src/retrieval.ts`, `src/project-deps.ts`,
+  `src/get-docs.ts`, `src/warm.ts`, `src/server.ts` (A11 / PAR-724).
+
+---
+
+## D-75 — decided 2026-09-17, executing A16 / PAR-725
+
+- **D-75** 2026-09-17 — **A name that does not exist in npm or PyPI is now a structurally
+  distinct signal from a name that exists but has no reachable documentation.** Before this,
+  `resolve.ts` already queried both registries and already produced two different free-text
+  attempt strings for the two cases internally, but neither the `ResolveOutcome` type nor the
+  rendered message distinguished them for a caller — both read as one undifferentiated
+  "unresolved" outcome.
+  **The wording is scoped to what was actually checked, never broader:** "does not exist in npm
+  or PyPI" is used ONLY when both registries were genuinely queried and both answered a real
+  HTTP 404 (`fetcher.ts`'s new `FetchOutcome.httpStatus`, set only on a received response —
+  never on a timeout, a DNS failure or any other miss reason, which stay ambiguous and make no
+  existence claim). A caller that deliberately restricts the lookup to one registry
+  (`resolvePackage`'s `ecosystem` option — `warm.ts` always does this, matching a dependency to
+  the ecosystem its own manifest names) gets the narrower, equally honest claim scoped to just
+  that registry ("does not exist in npm"), never the two-registry phrasing it did not earn.
+  This is why `warm`'s own "not found" status is reachable at all: `warm` never queries both
+  registries for one dependency (by design, to halve metadata fetches and avoid the
+  same-name-on-both-registries ambiguity — a pre-existing decision, unchanged here), so the
+  two-registry claim alone would have made this status permanently unreachable from `warm`.
+  **Claim discipline (this repo's CLAUDE.md):** the only existence claim produced anywhere is
+  the fact itself — "X does not exist in npm or PyPI" (or the registry-scoped variant) — worded
+  so it cannot be read as "VibeCTX prevents hallucination" in general; the sibling wording for
+  the other case ("exists but publishes no documentation VibeCTX can reach") says in the same
+  sentence that this is NOT a sign the package doesn't exist, so the two cases cannot be
+  confused for each other even by a careless read.
+  **Four surfaces, one signal:** `resolve_library` / `get_docs` (both render
+  `couldNotResolveMessage`'s text directly, so no separate wiring was needed once the message
+  itself carried the distinction), the CLI (`vibectx resolve` prints the same text; the exit-code
+  check on the literal prefix `Could not resolve` still holds under every wording variant — pinned
+  by test), and `warm`'s status column (`"not found"` added to `WarmStatus`, distinct from
+  `"unresolved"`).
+  **Schema bump, per this repo's own K3 rule:** `PROJECT_RECORD_SCHEMA_VERSION` 1 → 2 — the
+  first REAL exercise of the bump machinery every schema-version constant in this codebase had
+  been carrying since 0.2.0 planning began, still at 1 everywhere else. An older reader that
+  stayed on version 1 and saw a `"not found"` row under an unchanged version would have silently
+  dropped it (K3's own stated reason for the rule); the bump makes that reader refuse the whole
+  file instead, with a visible "newer schemaVersion" note — the honest failure mode.
+  Ref: `src/fetcher.ts`, `src/resolve.ts`, `src/project-store.ts`, `src/warm.ts`,
+  `src/server.ts` (A16 / PAR-725).
 
 ---

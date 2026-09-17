@@ -29,7 +29,7 @@ afterEach(() => {
 
 function record(overrides: Partial<ProjectRecord> = {}): ProjectRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: PROJECT_RECORD_SCHEMA_VERSION,
     dir: project,
     manifests: ["package.json"],
     dependencies: [
@@ -137,7 +137,7 @@ describe("K2 — upgrade policy: a LOWER schemaVersion is replaced, only a HIGHE
     const notes: string[] = [];
     expect(writeProjectRecord(record(), (m) => notes.push(m))).toBe(false);
     expect(readFileSync(projectRecordPath(project), "utf8")).toBe(future);
-    expect(notes.join("")).toMatch(/newer schemaVersion 2/);
+    expect(notes.join("")).toMatch(new RegExp(`newer schemaVersion ${PROJECT_RECORD_SCHEMA_VERSION + 1}`));
   });
 
   it("K-1: the schema gate's seeded record — a javascript: url is dropped, a traversing source drops the row, an over-long note is truncated", () => {

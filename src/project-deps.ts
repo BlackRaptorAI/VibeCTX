@@ -76,6 +76,13 @@ export interface ProjectDependency {
   ecosystem: DependencyEcosystem;
   /** Manifest the name came from, relative to the project directory (forward slashes). */
   source: string;
+  /** A11/PAR-724 — the exact version this manifest pins, when it names one UNAMBIGUOUSLY: a
+   *  bare semver (`"1.2.3"`) or PEP 508 `==` pin (`django==4.2.3`), never a range's lower bound
+   *  or any other guess. Absent whenever only a range is declared (`^1.2.3`, `>=1.2.3`) — `warm`
+   *  and `get_docs` have no single version to match docs against in that case, and inventing one
+   *  would be exactly the silent substitution D-50 forbids. See `parsePackageJsonVersions` /
+   *  `requirementVersion` for the exact rule per manifest format. */
+  version?: string;
 }
 
 export interface ProjectDiscovery {
@@ -177,6 +184,36 @@ export function parsePackageJsonDeps(text: string): string[] {
   return out;
 }
 
+/** A bare semver with no range operator, no wildcard, no build-metadata-only oddity — the
+ *  ONLY shape package-deps.ts treats as an unambiguous pin (A11/PAR-724). */
+const EXACT_SEMVER = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+/** A11/PAR-724 — the exact version a package.json dependency spec pins, when it unambiguously
+ *  does: a bare semver (`"1.2.3"`, not `"^1.2.3"` / `"~1.2.3"` / `"*"` / `"1.2.x"`). A range is
+ *  not a pin — there is no single version to match docs against, so this leaves the name out
+ *  of the map rather than guessing (the range's lower bound, say). Aliased (`npm:`) and local
+ *  (`file:` / `link:` / `workspace:` / `portal:`) specs are excluded the same way
+ *  `parsePackageJsonDeps` excludes them from names — neither is a version of the name itself.
+ *  `dependencies` then `devDependencies`, first occurrence wins, matching `parsePackageJsonDeps`'s
+ *  own de-duplication order exactly. */
+export function parsePackageJsonVersions(text: string): Map<string, string> {
+  const json: unknown = JSON.parse(stripBom(text));
+  const out = new Map<string, string>();
+  if (!isRecord(json)) return out;
+  for (const field of ["dependencies", "devDependencies"]) {
+    const table = json[field];
+    if (!isRecord(table)) continue;
+    for (const [rawName, spec] of Object.entries(table)) {
+      const name = rawName.trim();
+      if (out.has(name) || typeof spec !== "string") continue;
+      const s = spec.trim();
+      if (LOCAL_SPEC_PREFIXES.some((p) => s.startsWith(p)) || s.startsWith("npm:")) continue;
+      if (EXACT_SEMVER.test(s)) out.set(name, s);
+    }
+  }
+  return out;
+}
+
 /* ------------------------------------------------------------------------- */
 /* requirements.txt                                                           */
 /* ------------------------------------------------------------------------- */
@@ -231,6 +268,32 @@ export function requirementName(spec: string): string | undefined {
   return normalisePyPiName(s.slice(0, i));
 }
 
+/** A11/PAR-724 — the exact version an `==` pin names (`django==4.2.3`), or undefined for
+ *  anything else: a range (`>=`, `~=`, `!=`, …), an unpinned name, or a spec with a SECOND
+ *  comma-separated constraint after the `==` (`=="4.2.3,!=4.2.5"` is not exact once a second
+ *  clause exists) or an environment marker. Reuses `requirementName`'s own name-end scan so
+ *  the two functions agree on where the name stops without duplicating the scan logic;
+ *  returns undefined whenever `requirementName` itself would (not a plain requirement). */
+export function requirementVersion(spec: string): string | undefined {
+  const s = stripComment(spec).trim();
+  if (requirementName(s) === undefined) return undefined;
+  let i = 0;
+  while (i < s.length && isNameChar(s[i])) i++;
+  if (s[i] === "[") {
+    // Extras (`pkg[extra]`) sit between the name and the version constraint; skip past them.
+    const close = s.indexOf("]", i);
+    if (close === -1) return undefined;
+    i = close + 1;
+  }
+  const rest = s.slice(i).trim();
+  if (!rest.startsWith("==")) return undefined;
+  let v = rest.slice(2).trim();
+  const semi = v.indexOf(";"); // an environment marker follows the version, not part of it
+  if (semi !== -1) v = v.slice(0, semi).trim();
+  if (v.length === 0 || v.includes(",")) return undefined;
+  return /^[A-Za-z0-9][A-Za-z0-9.+!_-]*$/.test(v) ? v : undefined;
+}
+
 /** `-r <path>` / `--requirement <path>` / `--requirement=<path>` → the path; undefined otherwise. */
 function includeTarget(line: string): string | undefined {
   let rest: string;
@@ -247,9 +310,10 @@ function includeTarget(line: string): string | undefined {
 }
 
 /** requirements.txt → names plus the `-r` / `--requirement` includes (paths as written). */
-export function parseRequirementsTxt(text: string): { names: string[]; includes: string[] } {
+export function parseRequirementsTxt(text: string): { names: string[]; includes: string[]; versions: Map<string, string> } {
   const names: string[] = [];
   const includes: string[] = [];
+  const versions = new Map<string, string>(); // A11/PAR-724 — first `==` pin per name wins
   const seen = new Set<string>();
   // Join `\` continuations first (anchored on the literal backslash-newline: linear).
   const logical = stripBom(text).replace(/\r\n?/g, "\n").replace(/\\\n\s*/g, " ").split("\n");
@@ -261,9 +325,13 @@ export function parseRequirementsTxt(text: string): { names: string[]; includes:
       continue;
     }
     const name = requirementName(line);
-    if (name) pushUnique(names, seen, name);
+    if (name) {
+      pushUnique(names, seen, name);
+      const version = requirementVersion(line);
+      if (version !== undefined && !versions.has(name)) versions.set(name, version);
+    }
   }
-  return { names, includes };
+  return { names, includes, versions };
 }
 
 /* ------------------------------------------------------------------------- */
@@ -417,6 +485,46 @@ export function parsePyprojectDeps(text: string): string[] {
       if (key.toLowerCase() === "python") continue;
       if (inlineTableKeys(value).some((k) => POETRY_SOURCE_KEYS.has(k))) continue; // R2: local / VCS source
       add(key);
+    }
+  }
+  return out;
+}
+
+/** A quoted TOML string's contents, or undefined for anything else (an inline table, an array,
+ *  a bare number). */
+function unquoteTomlString(value: string): string | undefined {
+  const v = value.trim();
+  if (v.length >= 2 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) return v.slice(1, -1);
+  return undefined;
+}
+
+/** Any Poetry range-constraint character (`^1.2`, `~1.2`, `>=1.2`, `*`, a comma-separated
+ *  multi-constraint) — its ABSENCE from a plain quoted string is what makes that string an
+ *  exact pin rather than a range (A11/PAR-724). */
+const POETRY_RANGE_CHARS = /[\^~<>=*,!]/;
+
+/** A11/PAR-724 — the exact version pyproject.toml pins per dependency, from the same dependency
+ *  tables `parsePyprojectDeps` reads: PEP 508 `==` pins (via `requirementVersion`) for
+ *  `[project].dependencies` / optional-dependencies / dependency-groups, and a plain quoted
+ *  string with no range-constraint character (`django = "4.2.3"`, not `django = "^4.2"`) for
+ *  Poetry's own table syntax. First occurrence across all tables wins, matching
+ *  `parsePyprojectDeps`'s own de-duplication order. */
+export function parsePyprojectVersions(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const addPep508 = (spec: string) => {
+    const name = requirementName(spec);
+    const version = requirementVersion(spec);
+    if (name && version !== undefined && !out.has(name)) out.set(name, version);
+  };
+  for (const { table, key, value } of scanToml(text)) {
+    if (table === "project" && key === "dependencies") tomlStringArray(value).forEach(addPep508);
+    else if (table === "project.optional-dependencies" || table === "dependency-groups") tomlStringArray(value).forEach(addPep508);
+    else if (isPoetryDependencyTable(table)) {
+      if (key.toLowerCase() === "python") continue;
+      if (inlineTableKeys(value).some((k) => POETRY_SOURCE_KEYS.has(k))) continue; // R2: local / VCS source
+      const name = requirementName(key);
+      const str = unquoteTomlString(value);
+      if (name && str !== undefined && str.length > 0 && !POETRY_RANGE_CHARS.test(str) && !out.has(name)) out.set(name, str);
     }
   }
   return out;
@@ -598,7 +706,9 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
   const readRels = new Set<string>();
   const note = (s: string) => notes.push(cleanText(s));
 
-  const addAll = (names: string[], ecosystem: DependencyEcosystem, source: string) => {
+  // A11/PAR-724 — `versions` is keyed by the RAW name as it appeared in the manifest (before
+  // PyPI's PEP 503 fold), matching what each parser's own version map returns.
+  const addAll = (names: string[], ecosystem: DependencyEcosystem, source: string, versions?: Map<string, string>) => {
     let invalid = 0;
     for (const raw of names) {
       const name = ecosystem === "pypi" ? normalisePyPiName(raw) : raw;
@@ -609,7 +719,8 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
       }
       if (seen[ecosystem].has(name)) continue;
       seen[ecosystem].add(name);
-      dependencies.push({ name, ecosystem, source: cleanText(source) });
+      const version = versions?.get(raw);
+      dependencies.push(version !== undefined ? { name, ecosystem, source: cleanText(source), version } : { name, ecosystem, source: cleanText(source) });
     }
     if (invalid > 0) {
       const label = ecosystem === "pypi" ? "PyPI project" : "npm package";
@@ -670,7 +781,11 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
     if (names) {
       npmManifest = true;
       record("package.json");
-      addAll(names, "npm", "package.json");
+      // A11/PAR-724: a version-map parse failure (malformed enough to throw, though the name
+      // parse above already succeeded on the same text) degrades to "no versions found" rather
+      // than dropping the manifest — the names are the load-bearing result here.
+      const versions = text !== undefined ? parseWith("package.json", text, parsePackageJsonVersions) : undefined;
+      addAll(names, "npm", "package.json", versions);
     }
   }
 
@@ -683,7 +798,8 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
       if (names) {
         pypiManifest = true;
         record("pyproject.toml");
-        addAll(names, "pypi", "pyproject.toml");
+        const versions = parseWith("pyproject.toml", text, parsePyprojectVersions);
+        addAll(names, "pypi", "pyproject.toml", versions);
       }
     }
   }
@@ -700,8 +816,8 @@ export function discoverProjectDependencies(dir: string): ProjectDiscovery {
     if (parsed === undefined) return; // N-3: a parse failure is a note, not a recorded manifest
     pypiManifest = true;
     record(rel);
-    const { names, includes } = parsed;
-    addAll(names, "pypi", rel);
+    const { names, includes, versions } = parsed;
+    addAll(names, "pypi", rel, versions);
     for (const inc of includes) {
       const incLabel = `${rel}: -r ${inc}`;
       if (depth >= 1) {

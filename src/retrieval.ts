@@ -310,11 +310,15 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  stamp on the get_docs path only. One shared function is what makes "clean once, here" an
  *  actual guarantee rather than a convention two callers could independently forget.
  *
- *  Does NOT include a package/document VERSION or ref: A11/PAR-724 (manifest-derived version
- *  matching), the item this one's own Linear description names as the source of that field,
- *  has not been built — there is no version or ref tracked anywhere in this codebase today.
- *  Recorded as a deliberate, flagged gap rather than invented or silently dropped; see D-73 in
- *  .vibectx-plan/DECISIONS.md. */
+ *  A11/PAR-724 closes the gap the comment here used to record (D-73: A17 shipped with no
+ *  version/ref field because A11 had not been built): `version`, below, is the version or ref
+ *  the document was actually matched to — set only when the resolution chain found a
+ *  version-SPECIFIC document (a GitHub tag README, an npm/PyPI version-pinned metadata
+ *  lookup), never merely echoing back what was requested. When a version was requested but no
+ *  versioned document could be found, the stamp says nothing about a version at all — the
+ *  caller states the fallback explicitly instead (see `versionFallbackNote`), so "no version
+ *  field" and "version field says X" are the only two readings, never a stamp that implies a
+ *  match that did not happen. See D-73 in .vibectx-plan/DECISIONS.md for the history. */
 export interface StampFacts {
   url: string;
   /** ISO, from the document's own cache meta — ambient `Date.now()` for this MUST NOT be
@@ -327,30 +331,47 @@ export interface StampFacts {
   /** True for a default-registry or config-file entry; false for one `resolve_library`
    *  synthesized this session (`entry.resolved !== undefined`). */
   curated: boolean;
+  /** A11/PAR-724 — the version or ref this document was matched to, set only on a genuine
+   *  version-specific match. Undefined on every unversioned call and on a versioned call that
+   *  fell back to the latest available document. */
+  version?: string;
 }
 
 /** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
  *  so a caller that used to clip separately sees no change in outcome, only in ownership. */
 const MAX_STAMP_URL_CHARS = 300;
+/** Longest `version` gets to be in the stamp. A11/PAR-724 — generous headroom over any real
+ *  npm/PyPI version string or git tag; not load-bearing (see `sourceStampLine`'s own url
+ *  cleaning for the load-bearing defense against a forged second stamp line — `version` gets
+ *  the same treatment here for the same reason: it originates from a manifest file or a
+ *  registry response, neither trusted). */
+const MAX_STAMP_VERSION_CHARS = 100;
 
 export function sourceStampLine(f: StampFacts): string {
-  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+  const version = f.version !== undefined ? ` · version ${clipText(f.version, MAX_STAMP_VERSION_CHARS)}` : "";
+  return `Source: ${clipText(f.url, MAX_STAMP_URL_CHARS)} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
- *  `maxChars` — dropping whole trailing fields (curated/resolved, then fresh/stale, then
- *  fetched-at) rather than leaving that to a caller's own final length-based backstop clip to
- *  cut mid-field (code-reviewer, A17 round 1, B2). A mid-field cut is not merely ugly: `·
- *  fetched 2026-09-1` — the true fetch date sliced at its 9th character — is a plausible,
- *  well-formed, WRONG date presented as fact, which is worse than the missing stamp A17 exists
- *  to fix. At the extreme (`maxChars` too small even for `Source: <url>`), this returns that
- *  shortest variant anyway and leaves it to the caller's own backstop — unchanged from
- *  get_docs' pre-A17 behaviour for an oversized `Source:` line alone, already accepted and
- *  pinned by test. */
+ *  `maxChars` — dropping whole trailing fields (version, then curated/resolved, then
+ *  fresh/stale, then fetched-at) rather than leaving that to a caller's own final length-based
+ *  backstop clip to cut mid-field (code-reviewer, A17 round 1, B2). A mid-field cut is not
+ *  merely ugly: `· fetched 2026-09-1` — the true fetch date sliced at its 9th character — is a
+ *  plausible, well-formed, WRONG date presented as fact, which is worse than the missing stamp
+ *  A17 exists to fix. At the extreme (`maxChars` too small even for `Source: <url>`), this
+ *  returns that shortest variant anyway and leaves it to the caller's own backstop — unchanged
+ *  from get_docs' pre-A17 behaviour for an oversized `Source:` line alone, already accepted and
+ *  pinned by test.
+ *
+ *  `version` degrades FIRST, ahead of curated/resolved — A11/PAR-724: it is the newest, most
+ *  optional field, added onto an already-established priority order rather than re-litigating
+ *  it; the fresh/stale and fetched-at facts A17 established as worth keeping longest still are. */
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
   const url = clipText(f.url, MAX_STAMP_URL_CHARS);
+  const withoutVersion = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+  if (withoutVersion.length <= maxChars) return withoutVersion;
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;
   if (withoutCurated.length <= maxChars) return withoutCurated;
   const withoutFreshness = `Source: ${url} · fetched ${f.fetchedAt}`;
@@ -387,6 +408,16 @@ export function noMatchNote(what: string, topic: string, library: string): strin
  *  the stamp and nothing else, indistinguishable from "found nothing at all" to a reader who
  *  cannot see the structured `matched` count. States the positive fact (content exists) rather
  *  than leaving a short response to be misread as an empty one. */
+/** A11/PAR-724 — the non-silent fallback statement D-50 requires: a version was requested and
+ *  no document specific to it could be found, so the latest available document is served
+ *  instead. Never omitted when that is what happened (the whole point of this item is that this
+ *  substitution must be stated, not silent) — paired with a stamp carrying no `version` field
+ *  (see `StampFacts`), so the two together read as "you asked for X; this is not X, it's the
+ *  latest" rather than a stamp that could be misread as confirming the match. */
+export function versionFallbackNote(version: string): string {
+  return `No document found for version ${clipText(version, MAX_STAMP_VERSION_CHARS)}; showing the latest available instead.`;
+}
+
 export function thinMatchNote(what: string, matchedCount: number): string {
   // `what` is always passed as its plural noun ("sections", "code snippets"); naive
   // de-pluralization (drop a trailing "s") reads correctly for both callers this file has —

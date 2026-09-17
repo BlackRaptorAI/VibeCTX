@@ -21,6 +21,7 @@ import {
   fitStampLine,
   noMatchNote,
   thinMatchNote,
+  versionFallbackNote,
   MAX_FOLLOWED_BYTES,
   type SplitSection,
 } from "./retrieval.js";
@@ -41,6 +42,16 @@ export interface GetDocsArgs {
   /** "sections" (default) or "snippets" (D-26). Only meaningful with a topic: without
    *  one, both modes return the table of contents and the document head. */
   mode?: GetDocsMode;
+  /** A11/PAR-724 — match documentation to this exact version (a GitHub tag README, an
+   *  npm/PyPI version-pinned metadata lookup), typically the version a project's manifest
+   *  pins. Applies only when `library` is unknown (resolved fresh by this call) or already a
+   *  RESOLVED (non-curated) entry — `resolvePackage`'s version-matched chain is what this
+   *  threads into; see `getDocsToolText`. A curated (default-registry or config) entry is
+   *  never re-resolved for a version: its `urls` are hand-picked doc sources, not derived from
+   *  registry metadata, so there is no version-specific candidate to try — the response says so
+   *  explicitly rather than silently ignoring the argument. When no version-specific document
+   *  is found, the fallback to the latest available document is stated, never silent (D-50). */
+  version?: string;
 }
 
 /** What get_docs did, as data — the text plus the accounting behind its notes,
@@ -51,7 +62,7 @@ export interface GetDocsOutcome {
   /** The primary document that was served; undefined when nothing was fetched and nothing
    *  cached. `fetchedAt`/`curated` added at A17/PAR-726 alongside the rendered stamp, so a
    *  structured consumer (doctor) reads the same facts the text states without parsing it. */
-  source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean };
+  source?: { url: string; stale: boolean; fetchedAt: string; curated: boolean; version?: string };
   /** `documentHash` (search-index.ts) of the primary document's content — set exactly when
    *  `source` is (A20/PAR-729, D-51: what the activity log records instead of the text). */
   contentHash?: string;
@@ -145,15 +156,20 @@ export async function getDocsToolText(
   registry: Registry,
   args: GetDocsArgs & { library: string },
 ): Promise<string> {
-  const { library, ...rest } = args;
+  const { library, version, ...rest } = args;
   let entry = lookupLibrary(registry, library);
   let resolutionNote: string | undefined;
+  // A11/PAR-724 — the already-resolved verdict `getDocsDetailed` renders into the stamp/note;
+  // computed here (never inside `getDocsDetailed` itself, which never calls `resolvePackage` —
+  // see its own doc comment) because only THIS layer knows whether `library` needed resolving
+  // at all.
+  let versionContext: { requested: string; matched: boolean; note?: string } | undefined;
   if (!entry) {
     if (rest.offline) {
       recordActivity({ tool: "get_docs", library, query: rest.topic, outcome: "unresolved" });
       return unknownLibraryMessage(registry, library);
     }
-    const out = await resolvePackage(library);
+    const out = await resolvePackage(library, { version });
     if (!out.ok || !out.entry) {
       recordActivity({ tool: "get_docs", library, query: rest.topic, outcome: "unresolved" });
       return out.text;
@@ -162,6 +178,32 @@ export async function getDocsToolText(
     // (it cannot, since the lookup above missed — but the guard is the invariant), serve that.
     entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, out.entry.name) ?? out.entry);
     resolutionNote = provenanceLine(registry, library, out);
+    if (version !== undefined) versionContext = { requested: version, matched: out.versionMatched === true };
+  } else if (version !== undefined && entry.resolved !== undefined) {
+    // A11/PAR-724 — an already-resolved (non-curated) entry gets re-resolved for the pinned
+    // version, the same D-11-established pattern `warm.ts` already uses to re-resolve for a
+    // different ecosystem: this entry's own provenance came from `resolvePackage` in the first
+    // place, so it has an ecosystem + name to re-resolve against.
+    const out = await resolvePackage(library, { version, ecosystem: entry.resolved.source });
+    if (out.ok && out.entry) {
+      entry = installResolvedEntry(registry, out.entry) ? out.entry : (resolveLibrary(registry, entry.name) ?? out.entry);
+      versionContext = { requested: version, matched: out.versionMatched === true };
+    } else {
+      // The re-resolution itself failed outright (network down, rate-limited): degrade to the
+      // entry's existing cached document rather than losing the answer — still non-silent about
+      // the version having gone unmatched (D-50).
+      versionContext = { requested: version, matched: false };
+    }
+  } else if (version !== undefined && entry.resolved === undefined) {
+    // A11/PAR-724 — a curated (default-registry or config) entry's `urls` are hand-picked doc
+    // sources, not derived from registry metadata, so there is no version-specific candidate to
+    // try. Stated explicitly rather than silently ignoring `version` (D-50's non-silent rule
+    // applies to "no version support here" exactly as it does to "no versioned document found").
+    versionContext = {
+      requested: version,
+      matched: false,
+      note: `Version ${clipText(version, MAX_STAMP_FIELD_CHARS)} was requested, but "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" is a curated entry — version-matching applies only to packages resolved automatically.`,
+    };
   }
   // A17 (PAR-726): resolutionNote used to be prepended here, entirely outside getDocsDetailed's
   // own budget accounting — exactly A6's original mistake, repeated. It is now passed down and
@@ -176,7 +218,7 @@ export async function getDocsToolText(
   // A20/PAR-729: `getDocsDetailed` directly, not the `getDocs` text-only wrapper — the
   // structured outcome is what the activity-log entry is built from; `detailed.text` already
   // carries `resolutionNote` baked into its own priced header, so nothing is prepended here.
-  const detailed = await getDocsDetailed(entry, rest, resolutionNote);
+  const detailed = await getDocsDetailed(entry, rest, resolutionNote, versionContext);
   recordActivity({
     tool: "get_docs",
     library: entry.name,
@@ -230,6 +272,9 @@ export async function getDocsDetailed(
   entry: LibraryEntry,
   args: GetDocsArgs,
   resolutionNote?: string,
+  // A11/PAR-724 — the already-resolved version verdict; see `getDocsToolText`'s own comment for
+  // why this function itself never calls `resolvePackage` to compute it.
+  versionContext?: { requested: string; matched: boolean; note?: string },
 ): Promise<GetDocsOutcome> {
   const { topic } = args;
   const noDropped = { outsideOrigin: 0, tooLarge: 0, unavailable: 0 };
@@ -258,7 +303,11 @@ export async function getDocsDetailed(
       dropped: noDropped,
     };
   }
-  const source = { url: doc.url, stale: doc.stale, fetchedAt: doc.fetchedAt, curated };
+  // A11/PAR-724 — the version this document is actually matched to, when it is; computed once
+  // and reused by `source` (the structured outcome) and `stampFacts` (the rendered line) so the
+  // two can never disagree.
+  const matchedVersion = versionContext?.matched ? versionContext.requested : undefined;
+  const source = { url: doc.url, stale: doc.stale, fetchedAt: doc.fetchedAt, curated, version: matchedVersion };
   // A20/PAR-729: the same hash the search index already computes to detect a changed
   // document (D-33) is what the activity log records in place of the text itself.
   const contentHash = documentHash(doc.content);
@@ -281,16 +330,24 @@ export async function getDocsDetailed(
   // explanation first (never truncating it) loses elaboration, not the fact.
   const staleBanner = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
   const prefix = staleBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length) ? staleBanner : "";
+  // A11 (PAR-724) — the version verdict, all-or-nothing like `staleBanner` above: either the
+  // fallback statement (a version was requested, none was matched — D-50, never silent) or the
+  // curated-entry-skip explanation, never truncated into a misleading partial sentence.
+  // `versionContext.matched === true` needs no banner here — that fact lives in `docStamp`'s own
+  // `version` field instead (`stampFacts` below), so the two never say the same thing twice.
+  const versionText = versionContext && !versionContext.matched ? (versionContext.note ?? versionFallbackNote(versionContext.requested)) : undefined;
+  const rawVersionBanner = versionText ? `${versionText}\n\n` : "";
+  const versionBanner = rawVersionBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length - prefix.length) ? rawVersionBanner : "";
   // A18 (PAR-727): built once, reused by both the standing `docStamp` below and `thinMatch`'s
   // own re-fitted stamp further down — the same facts, just re-degraded around less room.
-  const stampFacts = { url: doc.url, fetchedAt: doc.fetchedAt, stale: doc.stale, curated };
+  const stampFacts = { url: doc.url, fetchedAt: doc.fetchedAt, stale: doc.stale, curated, version: matchedVersion };
   // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
   // the room actually available for the stamp is `budgetChars` minus whatever the one-time
-  // resolution note and the stale prefix already spent, so a small budget degrades the stamp
-  // to a shorter COMPLETE line rather than leaving it to the final `clipToBudget` backstop to
-  // cut a field in half (measured pre-fix: `maxTokens: 14` rendered `fetched 2026-09-1` — a
-  // real, well-formed, WRONG date).
-  const docStamp = fitStampLine(stampFacts, Math.max(0, budgetChars - resolutionPrefix.length - prefix.length));
+  // resolution note, the stale prefix and the version banner already spent, so a small budget
+  // degrades the stamp to a shorter COMPLETE line rather than leaving it to the final
+  // `clipToBudget` backstop to cut a field in half (measured pre-fix: `maxTokens: 14` rendered
+  // `fetched 2026-09-1` — a real, well-formed, WRONG date).
+  const docStamp = fitStampLine(stampFacts, Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - versionBanner.length));
 
   if (!topic) {
     const headings = doc.content.split("\n").filter((l) => /^#{1,3}\s/.test(l)).slice(0, 60);
@@ -338,7 +395,7 @@ export async function getDocsDetailed(
       }
       toc = next;
     }
-    const header = `${resolutionPrefix}${prefix}${docStamp}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
+    const header = `${resolutionPrefix}${prefix}${versionBanner}${docStamp}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
     // A6 (PAR-719) — the OVERSIGHT FINDING this item exists to close: `head` used to be
     // computed as `doc.content.slice(0, budget * 4)` — the ENTIRE allowance — and the stale
     // prefix, `Source:` line and table of contents were then prepended ON TOP of that, so the
@@ -481,7 +538,7 @@ export async function getDocsDetailed(
     // everywhere else, lowercase inline fragment only here). A18 (PAR-727): the sentence
     // itself is now `retrieval.ts`'s `noMatchNote` — the one grammar shared by both modes,
     // cleaning/clipping `topic`/`entry.name` centrally instead of this file doing it inline.
-    text: `${resolutionPrefix}${prefix}${docStamp}\n${noMatchNote(what, topic ?? "", entry.name)}${
+    text: `${resolutionPrefix}${prefix}${versionBanner}${docStamp}\n${noMatchNote(what, topic ?? "", entry.name)}${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     contentHash,
@@ -510,7 +567,7 @@ export async function getDocsDetailed(
   // price their own join separators AND this reserved amount, so the combined text — header
   // plus body — fits `budget*4` by construction; `clipToBudget` below is the same D-29 backstop
   // the no-topic path uses, for the case a maximal header alone is over budget.
-  const header = `${resolutionPrefix}${prefix}${docStamp}${noteBlock}\n\n`;
+  const header = `${resolutionPrefix}${prefix}${versionBanner}${docStamp}${noteBlock}\n\n`;
 
   // A18 (PAR-727) — the thin-match case: real matches exist (`matchedCount > 0`) but the
   // budget left `assemble`/`assembleSnippets` NOTHING to render once the (full-size) header
@@ -535,6 +592,11 @@ export async function getDocsDetailed(
   // entirely, never rendered as a partial (mid-URL) fragment — the same lesson A17's B2 finding
   // established for the fetched-at date, applied here to the stamp as a whole. D-43's ordering
   // is now genuinely: note first, stamp only if there's room left for the WHOLE thing.
+  // A11/PAR-724: `versionBanner` is deliberately NOT included here, the same D-43 "answer
+  // outranks the accounting" call this closure already makes for `noteBlock` — the thin-match
+  // note is the one thing worth keeping at this budget; a version-fallback sentence competes
+  // with it for the same scarce room `thinMatchNote` itself needs. `matchedVersion` (when set)
+  // still survives inside `stamp` below, exactly as `docStamp` carries it everywhere else.
   const thinMatch = (what: string, matchedCount: number): GetDocsOutcome => {
     const note = thinMatchNote(what, matchedCount);
     const stampRoom = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);

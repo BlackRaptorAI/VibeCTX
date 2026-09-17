@@ -10,7 +10,7 @@ import {
   cleanDescription,
   RESOLVED_SCHEMA_VERSION,
 } from "../src/resolved-store.js";
-import { MAX_URLS_PER_ENTRY, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES } from "../src/limits.js";
+import { MAX_URLS_PER_ENTRY, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES, MAX_VERSIONED_README_CANDIDATES } from "../src/limits.js";
 import type { LibraryEntry } from "../src/registry.js";
 
 let dir: string;
@@ -157,7 +157,8 @@ describe("resolved store (<cacheRoot>/resolved.json)", () => {
   });
 
   it("caps and single-lines the description, and caps the number of urls at the resolver bound (K1)", () => {
-    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
+    // A11/PAR-724: MAX_URLS_PER_ENTRY grew to reserve room for version-tag README candidates too.
+    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES + MAX_VERSIONED_README_CANDIDATES);
     const e = toResolvedEntry({
       name: "hono",
       urls: Array.from({ length: MAX_URLS_PER_ENTRY + 1 }, (_, i) => `https://hono.dev/${i}.txt`),
@@ -169,11 +170,11 @@ describe("resolved store (<cacheRoot>/resolved.json)", () => {
     expect(e?.description?.length).toBeLessThanOrEqual(200);
   });
 
-  it("round-trips an entry with the full 12-URL candidate list intact (K1)", () => {
+  it("round-trips an entry with the full MAX_URLS_PER_ENTRY candidate list intact (K1)", () => {
     const urls = Array.from({ length: MAX_URLS_PER_ENTRY }, (_, i) => `https://hono.dev/c${i}/llms.txt`);
     saveResolvedEntry({ ...hono, urls });
     expect(readResolvedEntries()[0].urls).toEqual(urls);
-    expect(urls).toHaveLength(12);
+    expect(urls).toHaveLength(MAX_URLS_PER_ENTRY);
   });
 
   it("S2: rejects a record whose name is not already trimmed and lower-cased (a planted `React` cannot shadow `react`)", () => {

@@ -7,12 +7,17 @@ import {
   parseNpmMetadata,
   parsePyPiMetadata,
   synthesizeCandidates,
+  versionTagVariants,
+  versionReadmeCandidates,
   resolvePackage,
   resolveToolText,
   couldNotResolveMessage,
   MAX_METADATA_FETCHES,
   MAX_LLMS_CANDIDATES,
   MAX_README_CANDIDATES,
+  MAX_VERSION_TAG_VARIANTS,
+  MAX_VERSIONED_README_CANDIDATES,
+  MAX_VERSION_METADATA_FETCHES,
   MAX_URLS_PER_ENTRY,
   MAX_FETCHES_PER_RESOLUTION,
   MAX_RESOLUTIONS_PER_HOUR,
@@ -433,7 +438,10 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     const out = await resolvePackage("httpx", { ecosystem: "npm" });
     expect(out.ok).toBe(false);
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(out.text).toMatch(/^Could not resolve "httpx": npm: no metadata \(404 or unreachable\); PyPI: not tried \(ecosystem npm\)\. Add it to vibectx\.config\.json like: \{ "name": "httpx", "urls": \["https:\/\/\.\.\."\] \}$/);
+    // A16/PAR-725: the caller deliberately restricted this lookup to npm, so npm's own 404
+    // already answers the (narrower) question in full — "does not exist in npm" is scoped to
+    // just the registry actually checked, never claiming anything about PyPI.
+    expect(out.text).toMatch(/^Could not resolve "httpx": "httpx" does not exist in npm\. npm: no metadata \(404 \(not found\)\); PyPI: not tried \(ecosystem npm\)\. Add it to vibectx\.config\.json like: \{ "name": "httpx", "urls": \["https:\/\/\.\.\."\] \}$/);
   });
 
   it("npm metadata with no usable URL falls through to PyPI (still ≤ 2 metadata fetches)", async () => {
@@ -475,8 +483,11 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     const out = await resolvePackage("zz-no-such-package");
     expect(out.ok).toBe(false);
     expect(spy).toHaveBeenCalledTimes(2);
+    // A16/PAR-725: both ecosystems actually queried, both a genuine 404 — the "does not exist
+    // in npm or PyPI" safety signal applies.
     expect(out.text).toBe(
-      'Could not resolve "zz-no-such-package": npm: no metadata (404 or unreachable); PyPI: no metadata (404 or unreachable). ' +
+      'Could not resolve "zz-no-such-package": "zz-no-such-package" does not exist in npm or PyPI. ' +
+        'npm: no metadata (404 (not found)); PyPI: no metadata (404 (not found)). ' +
         'Add it to vibectx.config.json like: { "name": "zz-no-such-package", "urls": ["https://..."] }',
     );
     expect(existsSync(join(dir, "resolved.json"))).toBe(false);
@@ -487,7 +498,9 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(false);
     expect(spy).toHaveBeenCalledTimes(1 + 6);
-    expect(out.text).toContain('Could not resolve "hono": npm metadata found (homepage https://hono.dev/, repository github.com/honojs/hono); none of 6 candidate URLs served a document: https://hono.dev/llms-full.txt, https://hono.dev/llms.txt, https://raw.githubusercontent.com/honojs/hono/HEAD/README.md, https://raw.githubusercontent.com/honojs/hono/HEAD/readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst. Add it to vibectx.config.json');
+    // A16/PAR-725: npm metadata succeeded — the name is confirmed to exist — so this is the
+    // "exists but no reachable docs" wording, not the "does not exist" one.
+    expect(out.text).toContain('Could not resolve "hono": "hono" exists but publishes no documentation VibeCTX can reach — this is not a sign the package doesn\'t exist. npm metadata found (homepage https://hono.dev/, repository github.com/honojs/hono); none of 6 candidate URLs served a document: https://hono.dev/llms-full.txt, https://hono.dev/llms.txt, https://raw.githubusercontent.com/honojs/hono/HEAD/README.md, https://raw.githubusercontent.com/honojs/hono/HEAD/readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/Readme.md, https://raw.githubusercontent.com/honojs/hono/HEAD/README.rst. Add it to vibectx.config.json');
     expect(existsSync(join(dir, "resolved.json"))).toBe(false);
     expect(existsSync(join(dir, "hono"))).toBe(false);
   });
@@ -496,7 +509,9 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     stubFetch({ [NPM_HONO]: { description: "x" } });
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(false);
-    expect(out.text).toContain('Could not resolve "hono": npm metadata found but it has no https homepage, docs URL or GitHub repository; PyPI: no metadata (404 or unreachable). Add it');
+    // A16/PAR-725: npm metadata was found (just no usable candidates) — not a 404 — so this
+    // does not qualify as "does not exist" even though PyPI did 404.
+    expect(out.text).toContain('Could not resolve "hono": npm metadata found but it has no https homepage, docs URL or GitHub repository; PyPI: no metadata (404 (not found)). Add it');
   });
 
   it("Q2: the fetch bound is exact — npm README-only, PyPI full list, everything fails → 2 + 12 + 4 requests, both ecosystems reported", async () => {
@@ -508,11 +523,14 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     });
     const out = await resolvePackage("httpx");
     expect(out.ok).toBe(false);
-    expect(spy).toHaveBeenCalledTimes(MAX_METADATA_FETCHES + MAX_URLS_PER_ENTRY + MAX_README_CANDIDATES);
+    // A11/PAR-724: no version was requested, so neither ecosystem's candidate list carries the
+    // versioned-README headroom MAX_URLS_PER_ENTRY now reserves — this call's real cost is
+    // still exactly the unversioned chain (npm's 4 README-only + PyPI's 8 llms + 4 README).
+    expect(spy).toHaveBeenCalledTimes(MAX_METADATA_FETCHES + MAX_README_CANDIDATES + MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
     expect(spy).toHaveBeenCalledTimes(18);
     expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_FETCHES_PER_RESOLUTION);
-    expect(MAX_FETCHES_PER_RESOLUTION).toBe(26);
-    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES);
+    expect(MAX_FETCHES_PER_RESOLUTION).toBe(43);
+    expect(MAX_URLS_PER_ENTRY).toBe(MAX_LLMS_CANDIDATES + MAX_README_CANDIDATES + MAX_VERSIONED_README_CANDIDATES);
     // Order: both metadata documents, then the docs-site ecosystem's 12, then npm's 4.
     const urls = spy.mock.calls.map((c) => String(c[0]));
     expect(urls.slice(0, 2)).toEqual([NPM_HTTPX, PYPI_HTTPX]);
@@ -923,5 +941,145 @@ describe("A5 (PAR-718) — resolvePackage never throws, against a real read-only
     } finally {
       restoreWritable();
     }
+  });
+});
+
+describe("versionTagVariants / versionReadmeCandidates (A11/PAR-724)", () => {
+  it("tries v<version> before bare <version>", () => {
+    expect(versionTagVariants("1.2.3")).toEqual(["v1.2.3", "1.2.3"]);
+  });
+
+  it("builds refs/tags/<tag>/<file> for every tag × README variant, tag-major order, capped at MAX_VERSIONED_README_CANDIDATES", () => {
+    const urls = versionReadmeCandidates({ owner: "honojs", repo: "hono" }, "1.2.3");
+    expect(urls).toEqual([
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.2.3/README.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.2.3/readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.2.3/Readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.2.3/README.rst",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/1.2.3/README.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/1.2.3/readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/1.2.3/Readme.md",
+      "https://raw.githubusercontent.com/honojs/hono/refs/tags/1.2.3/README.rst",
+    ]);
+    expect(urls.length).toBe(MAX_VERSIONED_README_CANDIDATES);
+  });
+});
+
+describe("couldNotResolveMessage — the two existence wordings (A16/PAR-725)", () => {
+  it("no existence claim (default): the pre-A16 wording, unchanged", () => {
+    expect(couldNotResolveMessage("foo", ["npm: not tried"])).toBe(
+      'Could not resolve "foo": npm: not tried. Add it to vibectx.config.json like: { "name": "foo", "urls": ["https://..."] }',
+    );
+  });
+
+  it('"not-found": states the single permitted claim, plainly, before the attempts', () => {
+    const text = couldNotResolveMessage("foo", ["npm: 404"], { existence: "not-found" });
+    expect(text).toBe(
+      'Could not resolve "foo": "foo" does not exist in npm or PyPI. npm: 404. Add it to vibectx.config.json like: { "name": "foo", "urls": ["https://..."] }',
+    );
+    // Claim discipline (PAR-725 Shape): never implies hallucination prevention in general.
+    expect(text).not.toMatch(/hallucinat|prevent/i);
+  });
+
+  it('"not-found" scoped to one registry (warm.ts always restricts by the manifest\'s own ecosystem): "does not exist in npm", never claiming anything about PyPI', () => {
+    const text = couldNotResolveMessage("foo", ["npm: 404"], { existence: "not-found", notFoundEcosystems: ["npm"] });
+    expect(text).toContain('"foo" does not exist in npm.');
+    expect(text).not.toContain("PyPI");
+  });
+
+  it('"not-found" scoped to PyPI alone reads symmetrically', () => {
+    const text = couldNotResolveMessage("foo", ["PyPI: 404"], { existence: "not-found", notFoundEcosystems: ["pypi"] });
+    expect(text).toContain('"foo" does not exist in PyPI.');
+  });
+
+  it('"exists": states existence is confirmed, explicitly NOT a sign of non-existence', () => {
+    const text = couldNotResolveMessage("foo", ["npm: no docs"], { existence: "exists" });
+    expect(text).toContain('"foo" exists but publishes no documentation VibeCTX can reach');
+    expect(text).toContain("not a sign the package doesn't exist");
+  });
+
+  it("every variant still starts with 'Could not resolve \"<name>\": ' — the CLI's exit-code check depends on this prefix surviving", () => {
+    for (const existence of [undefined, "not-found", "exists"] as const) {
+      const text = couldNotResolveMessage("foo", [], { existence });
+      expect(text.startsWith('Could not resolve "foo": ')).toBe(true);
+    }
+  });
+});
+
+describe("resolvePackage — version matching (A11/PAR-724)", () => {
+  it("a version-tag README that serves a document is preferred over the unversioned chain, and versionMatched/requestedVersion/the stamp all say so", async () => {
+    const versionUrl = "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.2.3/README.md";
+    const spy = stubFetch({
+      [NPM_HONO]: honoNpm,
+      "https://registry.npmjs.org/hono/1.2.3": honoNpm,
+      [versionUrl]: "# Hono v1.2.3",
+    });
+    const out = await resolvePackage("hono", { version: "1.2.3" });
+    expect(out.ok).toBe(true);
+    expect(out.chosen).toBe(versionUrl);
+    expect(out.requestedVersion).toBe("1.2.3");
+    expect(out.versionMatched).toBe(true);
+    expect(out.text).toContain("version:    1.2.3 (matched)");
+    // The one extra metadata fetch (MAX_VERSION_METADATA_FETCHES) plus the unversioned /latest
+    // fetch, plus the single document fetch that succeeded immediately.
+    expect(spy).toHaveBeenCalledTimes(2 + MAX_VERSION_METADATA_FETCHES - 1 + 1);
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([NPM_HONO, "https://registry.npmjs.org/hono/1.2.3", versionUrl]);
+  });
+
+  it("no version-tag document anywhere → falls back to the unversioned chain; versionMatched is undefined and the fallback is stated, never silent (D-50)", async () => {
+    const spy = stubFetch({
+      [NPM_HONO]: honoNpm,
+      // registry.npmjs.org/hono/9.9.9 deliberately not stubbed: a genuine 404 for this version.
+      // No refs/tags/* URL stubbed either: every version-tag candidate 404s too.
+      "https://hono.dev/llms-full.txt": "# Hono docs (latest)",
+    });
+    const out = await resolvePackage("hono", { version: "9.9.9" });
+    expect(out.ok).toBe(true);
+    expect(out.chosen).toBe("https://hono.dev/llms-full.txt");
+    expect(out.requestedVersion).toBe("9.9.9");
+    expect(out.versionMatched).toBeUndefined();
+    expect(out.text).toContain("version:    9.9.9 (no versioned document found; showing latest)");
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain("https://registry.npmjs.org/hono/9.9.9");
+  });
+
+  it("a version-specific metadata document with a DIFFERENT repository than /latest is preferred for the tag candidates", async () => {
+    const movedUrl = "https://raw.githubusercontent.com/newowner/hono/refs/tags/v2.0.0/README.md";
+    const spy = stubFetch({
+      [NPM_HONO]: honoNpm, // repository: honojs/hono
+      "https://registry.npmjs.org/hono/2.0.0": { ...honoNpm, repository: { type: "git", url: "git+https://github.com/newowner/hono.git" } },
+      [movedUrl]: "# Hono v2.0.0 (moved)",
+    });
+    const out = await resolvePackage("hono", { version: "2.0.0" });
+    expect(out.ok).toBe(true);
+    expect(out.chosen).toBe(movedUrl);
+    expect(out.versionMatched).toBe(true);
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://raw.githubusercontent.com/honojs/hono/refs/tags/v2.0.0/README.md");
+  });
+
+  it("no version given: identical behaviour to before A11 — no version metadata fetch, no version candidates, stamp carries no version field", async () => {
+    const spy = stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono docs" });
+    const out = await resolvePackage("hono");
+    expect(out.ok).toBe(true);
+    expect(out.requestedVersion).toBeUndefined();
+    expect(out.versionMatched).toBeUndefined();
+    expect(out.text).not.toMatch(/version:/);
+    expect(spy).toHaveBeenCalledTimes(2); // metadata + the one document fetch that succeeded
+  });
+
+  it("R2 fallback ecosystem never gets version candidates — only the ecosystem the version metadata fetch actually ran against (order[0]) does", async () => {
+    // npm is README-only (no docs site) so it is HELD while PyPI is consulted; PyPI has a docs
+    // site and wins outright (order = [pypi]) — order[0] is pypi, so only PyPI gets a version
+    // metadata fetch and version-tag candidates; npm's fallback-only README chain (were PyPI to
+    // fail) would get none. This test only needs to confirm PyPI (order[0]) is the one queried.
+    const spy = stubFetch({
+      [NPM_HTTPX]: { repository: "https://github.com/JacksonTian/httpx" },
+      [PYPI_HTTPX]: httpxPyPi,
+      "https://www.python-httpx.org/llms.txt": "# HTTPX",
+    });
+    const out = await resolvePackage("httpx", { version: "1.0.0" });
+    expect(out.ok).toBe(true);
+    expect(out.source).toBe("pypi");
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain("https://pypi.org/pypi/httpx/1.0.0/json");
+    expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://registry.npmjs.org/httpx/1.0.0");
   });
 });

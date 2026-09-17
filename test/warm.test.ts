@@ -78,13 +78,15 @@ describe("runWarm (PAR-656)", () => {
       "denied",
       "total",
     ]);
-    expect(report.schemaVersion).toBe(1);
+    expect(report.schemaVersion).toBe(WARM_SCHEMA_VERSION);
     expect(report.manifests).toEqual(["package.json"]);
     const rows = byName(report);
     expect(rows.react).toEqual({ name: "react", ecosystem: "npm", source: "package.json", library: "react", status: "already fresh", url: REACT_URL });
     expect(rows.hono).toEqual({ name: "hono", ecosystem: "npm", source: "package.json", library: "hono", status: "cached", url: HONO_URL });
     expect(rows.elysia).toMatchObject({ library: "elysia", status: "resolved+cached", url: "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md" });
-    expect(rows["zz-nothing"]).toMatchObject({ status: "unresolved" });
+    // A16/PAR-725: warm always restricts resolvePackage to the manifest's own ecosystem, so
+    // a genuine 404 there already answers "does not exist in npm" in full.
+    expect(rows["zz-nothing"]).toMatchObject({ status: "not found" });
     expect(rows["zz-nothing"].note).toMatch(/npm: no metadata/);
     expect(rows["@types/node"]).toEqual({ name: "@types/node", ecosystem: "npm", source: "package.json", status: "denied (noise list)" });
     expect(report.total).toBe(5);
@@ -271,7 +273,7 @@ describe("runWarm (PAR-656)", () => {
     const report = await runWarm(registry(), { dir: project, warn: (m) => warnings.push(m) });
     expect(warmExitCode(report)).toBe(0); // the docs are cached; only the memo was refused
     expect(report.notes).toContain("project record not written: newer schema on disk");
-    expect(warnings.join("")).toMatch(/newer schemaVersion 2/);
+    expect(warnings.join("")).toMatch(new RegExp(`newer schemaVersion ${PROJECT_RECORD_SCHEMA_VERSION + 1}`));
     expect(formatWarmTable(report)).toContain("note: project record not written: newer schema on disk");
     expect(readFileSync(projectRecordPath(project), "utf8")).toBe(future); // untouched
   });
@@ -354,7 +356,7 @@ describe("formatWarmTable / warmToolText", () => {
     const report = await runWarm(registry(), { dir: project });
     const text = formatWarmTable(report);
     expect(text).toContain("0/1 dependencies cached");
-    expect(text).toContain("✗ zz-nothing: npm: no metadata (404 or unreachable)");
+    expect(text).toContain("✗ zz-nothing: npm: no metadata (404 (not found))");
     expect(text).toContain("note: requirements.txt: -r missing.txt not found; skipped");
   });
 
@@ -453,7 +455,7 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     let t = Date.parse("2026-09-06T10:00:00Z");
     const now = () => new Date(t);
     const first = await runWarm(registry(), { dir: project, now });
-    expect(byName(first)["zz-nothing"]).toMatchObject({ status: "unresolved", failedAt: "2026-09-06T10:00:00.000Z" });
+    expect(byName(first)["zz-nothing"]).toMatchObject({ status: "not found", failedAt: "2026-09-06T10:00:00.000Z" });
     expect(spy).toHaveBeenCalledTimes(1); // npm metadata only (package.json → npm)
     spy.mockClear();
     t += 3 * 3600_000;
@@ -461,19 +463,19 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     const row = byName(second)["zz-nothing"];
     expect(row.status).toBe("unresolved (recent)");
     expect(row.failedAt).toBe("2026-09-06T10:00:00.000Z");
-    expect(row.note).toMatch(/^unresolved 3\.0 h ago \(npm: no metadata \(404 or unreachable\).*\); retried after 24 h, or now with --force$/);
+    expect(row.note).toMatch(/^unresolved 3\.0 h ago \(npm: no metadata \(404 \(not found\)\).*\); retried after 24 h, or now with --force$/);
     expect(spy).not.toHaveBeenCalled();
     expect(warmExitCode(second)).toBe(1);
     // The rewritten record keeps the ORIGINAL failure time, so the window does not slide with every run.
     expect(readProjectRecord(project)?.dependencies[0].failedAt).toBe("2026-09-06T10:00:00.000Z");
     const forced = await runWarm(registry(), { dir: project, now, force: true });
-    expect(byName(forced)["zz-nothing"].status).toBe("unresolved");
+    expect(byName(forced)["zz-nothing"].status).toBe("not found");
     expect(byName(forced)["zz-nothing"].failedAt).toBe(new Date(t).toISOString());
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockClear();
     t += 25 * 3600_000;
     const later = await runWarm(registry(), { dir: project, now });
-    expect(byName(later)["zz-nothing"].status).toBe("unresolved");
+    expect(byName(later)["zz-nothing"].status).toBe("not found");
     expect(spy).toHaveBeenCalledTimes(1);
   });
 
@@ -482,7 +484,7 @@ describe("rework conditions (PAR-656 R1 / R3 / D-10 / K1 / Q1)", () => {
     let t = Date.parse("2026-09-06T10:00:00Z");
     const now = () => new Date(t);
     stubFetch({});
-    expect(byName(await runWarm(registry(), { dir: project, now })).elysia.status).toBe("unresolved");
+    expect(byName(await runWarm(registry(), { dir: project, now })).elysia.status).toBe("not found");
     t += 3600_000;
     // Now the package resolves (published metadata): the memo still holds for 24 h — until --force.
     stubFetch({
@@ -778,5 +780,79 @@ describe("warm leaves a usable cross-library search index behind (PAR-659, D-34)
     stubFetch({});
     await runWarm(registry(), { dir: project, offline: true });
     expect([...readIndex().libraries.keys()]).toEqual(["hono"]);
+  });
+});
+
+describe("A11/PAR-724 — a manifest-pinned exact version threads through to resolvePackage", () => {
+  it("an exact pin (package.json, no range operator) resolves via the version-matched chain; the row carries no fallback note", async () => {
+    const versionUrl = "https://raw.githubusercontent.com/elysiajs/elysia/refs/tags/v1.2.3/README.md";
+    writePackageJson({ elysia: "1.2.3" });
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      "https://registry.npmjs.org/elysia/1.2.3": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      [versionUrl]: "# Elysia v1.2.3",
+    });
+    const report = await runWarm(registry(), { dir: project });
+    const row = byName(report).elysia;
+    expect(row).toMatchObject({ status: "resolved+cached", url: versionUrl });
+    expect(row.note).toBeUndefined();
+  });
+
+  it("a range (^1.2.3) is never treated as a pin — resolvePackage gets no version, identical to before A11", async () => {
+    writePackageJson({ elysia: "^1.2.3" });
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia",
+    });
+    const report = await runWarm(registry(), { dir: project });
+    const row = byName(report).elysia;
+    expect(row).toMatchObject({ status: "resolved+cached", url: "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md" });
+    expect(row.note).toBeUndefined();
+  });
+
+  it("an exact pin with no versioned document anywhere: resolved via the unversioned fallback, and the row's note states the substitution (D-50, never silent)", async () => {
+    writePackageJson({ elysia: "9.9.9" });
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": { homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" },
+      // registry.npmjs.org/elysia/9.9.9 and every refs/tags/* candidate deliberately unstubbed.
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia (latest)",
+    });
+    const report = await runWarm(registry(), { dir: project });
+    const row = byName(report).elysia;
+    expect(row.status).toBe("resolved+cached");
+    expect(row.note).toBe("no versioned document found for 9.9.9; latest cached instead");
+  });
+});
+
+describe("A16/PAR-725 — the 'not found' status is distinct from 'unresolved'", () => {
+  it("both registries genuinely 404 for an unrestricted lookup: 'not found', not 'unresolved' — WARM_STATUSES includes it", async () => {
+    // warm always restricts resolvePackage to the manifest's own ecosystem, so this exercises
+    // the npm-scoped existence claim ("does not exist in npm"), the only one warm can ever reach.
+    writePackageJson({ "zz-genuinely-nothing": "1" });
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project });
+    const row = byName(report)["zz-genuinely-nothing"];
+    // The signal lives in the STATUS column itself (warm's own surface per PAR-725's four
+    // required surfaces) — the row's `note` stays the raw attempt log, same shape as an
+    // "unresolved" row's note always has been.
+    expect(row.status).toBe("not found");
+    expect(row.note).toMatch(/no metadata \(404 \(not found\)\)/);
+    expect(warmExitCode(report)).toBe(1); // a "not found" row is not cached, same as "unresolved"
+  });
+
+  it("--json's schemaVersion reflects the bump this new status required (K3)", async () => {
+    writePackageJson({ "zz-genuinely-nothing": "1" });
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project });
+    expect(report.schemaVersion).toBe(WARM_SCHEMA_VERSION);
+    expect(report.schemaVersion).toBe(PROJECT_RECORD_SCHEMA_VERSION);
+  });
+
+  it("formatWarmTable renders 'not found' in the status column, distinct from 'unresolved'", async () => {
+    writePackageJson({ "zz-genuinely-nothing": "1" });
+    stubFetch({});
+    const report = await runWarm(registry(), { dir: project });
+    const text = formatWarmTable(report);
+    expect(text).toMatch(/zz-genuinely-nothing\s+—\s+not found/);
   });
 });

@@ -1410,8 +1410,10 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     const spy = stubFetch({});
     const reg: Registry = { entries: new Map(registry.entries) };
     const out = await getDocsToolText(reg, { library: "nope", topic: "x" });
+    // A16/PAR-725: both ecosystems queried, both a genuine 404 — the "does not exist" wording.
     expect(out).toBe(
-      'Could not resolve "nope": npm: no metadata (404 or unreachable); PyPI: no metadata (404 or unreachable). ' +
+      'Could not resolve "nope": "nope" does not exist in npm or PyPI. ' +
+        'npm: no metadata (404 (not found)); PyPI: no metadata (404 (not found)). ' +
         'Add it to vibectx.config.json like: { "name": "nope", "urls": ["https://..."] }',
     );
     expect(spy).toHaveBeenCalledTimes(2);
@@ -1464,6 +1466,75 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
     stubFetch({});
     const out = await getDocsToolText(registry, { library: "react", topic: "zzz-unmatched", maxTokens: 10 });
     expect(out).toMatch(/No sections in react docs match "zzz-unmatched"/);
+  });
+});
+
+describe("getDocsToolText — version matching (A11/PAR-724)", () => {
+  const REACT_URL = "https://react.dev/llms-full.txt";
+  const registry: Registry = {
+    entries: new Map([["react", { name: "react", urls: [REACT_URL], aliases: ["reactjs"] }]]),
+  };
+
+  it("an unknown library resolved fresh, with a version: the version-matched chain wins, and the stamp names the version", async () => {
+    const versionUrl = "https://raw.githubusercontent.com/elysiajs/elysia/refs/tags/v1.2.3/README.md";
+    const spy = stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      "https://registry.npmjs.org/elysia/1.2.3": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      [versionUrl]: "# Elysia v1.2.3\n\n## Middleware\n\nUse .onBeforeHandle().",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "1.2.3" });
+    expect(out).toContain(`Source: ${versionUrl}`);
+    expect(out).toContain("· version 1.2.3");
+    expect(out).toContain("onBeforeHandle");
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain(versionUrl);
+  });
+
+  it("an unknown library resolved fresh, no versioned document found: falls back to latest, and the fallback is stated, never silent (D-50)", async () => {
+    const spy = stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      "https://elysiajs.com/llms-full.txt": "# Elysia (latest)\n\n## Middleware\n\nUse .onBeforeHandle().",
+    });
+    const reg: Registry = { entries: new Map(registry.entries) };
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "9.9.9" });
+    expect(out).toContain("No document found for version 9.9.9; showing the latest available instead.");
+    expect(out).toContain("Source: https://elysiajs.com/llms-full.txt");
+    expect(out).not.toContain("· version"); // the stamp never claims a match that did not happen
+    expect(spy.mock.calls.map((c) => String(c[0]))).toContain("https://registry.npmjs.org/elysia/9.9.9");
+  });
+
+  it("a CURATED entry with a version requested: never re-resolved — the response states version-matching does not apply, and serves the existing document", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+    const spy = stubFetch({});
+    const out = await getDocsToolText(registry, { library: "react", topic: "useEffect cleanup", version: "18.2.0" });
+    expect(out).toContain('Version 18.2.0 was requested, but "react" is a curated entry — version-matching applies only to packages resolved automatically.');
+    expect(out).toContain(`Source: ${REACT_URL}`);
+    expect(out).toContain("Return a function from useEffect");
+    expect(spy).not.toHaveBeenCalled(); // no resolution attempted at all
+  });
+
+  it("an already-RESOLVED (non-curated) entry with a version requested: re-resolved against the version-matched chain", async () => {
+    const versionUrl = "https://raw.githubusercontent.com/elysiajs/elysia/refs/tags/v2.0.0/README.md";
+    const reg: Registry = {
+      entries: new Map([
+        ["elysia", { name: "elysia", urls: ["https://elysiajs.com/llms.txt"], resolved: { source: "npm", resolvedAt: "2026-09-01T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest", homepage: "https://elysiajs.com" } }],
+      ]),
+    };
+    stubFetch({
+      "https://registry.npmjs.org/elysia/latest": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      "https://registry.npmjs.org/elysia/2.0.0": JSON.stringify({ homepage: "https://elysiajs.com", repository: "https://github.com/elysiajs/elysia" }),
+      [versionUrl]: "# Elysia v2.0.0\n\n## Middleware\n\nUse .onBeforeHandle().",
+    });
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "2.0.0" });
+    expect(out).toContain(`Source: ${versionUrl}`);
+    expect(out).toContain("· version 2.0.0");
+    expect(reg.entries.get("elysia")?.urls).toContain(versionUrl);
+  });
+
+  it("no version given: identical to before A11 — no version-related text anywhere", async () => {
+    writeCache("react", REACT_URL, "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup.");
+    const out = await getDocsToolText(registry, { library: "react", topic: "useEffect cleanup" });
+    expect(out).not.toMatch(/version/i);
   });
 });
 

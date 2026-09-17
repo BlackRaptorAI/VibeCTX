@@ -9,6 +9,7 @@ import {
   getLibraryDoc,
   getLinkedPage,
   fetchLinkedPage,
+  fetchUrl,
   LINKED_PAGE_MAX_BYTES,
   PRIMARY_DOC_MAX_BYTES,
   MAX_REDIRECT_HOPS,
@@ -636,5 +637,34 @@ describe("hop-by-hop redirects (S1): every Location is checked BEFORE it is requ
       expect(await getLibraryDoc({ name: "evil", urls: [primary], resolved: resolvedMeta }), host).toBeUndefined();
       expect(spy, host).toHaveBeenCalledTimes(1);
     }
+  });
+});
+
+describe("fetchUrl — httpStatus (A16/PAR-725)", () => {
+  it("carries the real HTTP status on an ordinary 404 (the 'http-status' miss reason)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const out = await fetchUrl("https://registry.npmjs.org/does-not-exist/latest", { maxBytes: 1024, publicFinalUrl: true });
+    expect(out).toEqual({ status: "miss", httpStatus: 404 });
+  });
+
+  it("carries a non-404 status too (500) — the caller decides which codes mean 'does not exist'", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("boom", { status: 500 })));
+    const out = await fetchUrl("https://registry.npmjs.org/x/latest", { maxBytes: 1024, publicFinalUrl: true });
+    expect(out).toEqual({ status: "miss", httpStatus: 500 });
+  });
+
+  it("leaves httpStatus undefined for every OTHER miss reason — a thrown network error carries no real status to report", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+    const out = await fetchUrl("https://registry.npmjs.org/x/latest", { maxBytes: 1024, publicFinalUrl: true });
+    expect(out.status).toBe("miss");
+    expect(out.httpStatus).toBeUndefined();
+  });
+
+  it("leaves httpStatus undefined on refused (never reached the network) and on ok", async () => {
+    const refused = await fetchUrl("http://insecure.example.com/x", { maxBytes: 1024, publicFinalUrl: true });
+    expect(refused).toEqual({ status: "refused" });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("# ok", { status: 200, headers: { "content-type": "text/plain" } })));
+    const ok = await fetchUrl("https://registry.npmjs.org/x/latest", { maxBytes: 1024, publicFinalUrl: true });
+    expect(ok.httpStatus).toBeUndefined();
   });
 });
