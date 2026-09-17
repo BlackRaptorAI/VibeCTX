@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, readdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -17,6 +17,7 @@ import {
   type ActivityEntry,
 } from "../src/activity-log.js";
 import { ACTIVITY_LOG_MAX_ENTRIES } from "../src/limits.js";
+import { writeAtomic } from "../src/atomic-store.js";
 
 let dir: string;
 
@@ -67,6 +68,54 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
     expect(raw.entries).toHaveLength(1);
     expect(Object.keys(raw.entries[0])).toEqual(["tool", "library", "query", "url", "contentHash", "fresh", "outcome", "timestamp"]);
     expect(readActivityEntries()).toEqual([{ ...base, timestamp: "2026-09-17T18:00:00.000Z" }]);
+  });
+
+  it("PAR-791: activity.json is written owner-only (0600), and the cache root it creates is 0700", () => {
+    recordActivity(base);
+    expect(statSync(join(dir, "activity.json")).mode & 0o777).toBe(0o600);
+    expect(statSync(dir).mode & 0o777).toBe(0o700);
+  });
+
+  it("PAR-791: the 0700 mode is really applied by recordActivity's own mkdirSync, not merely true of a temp directory that already happened to be 0700", () => {
+    // `dir` (this file's beforeEach fixture) is an mkdtempSync directory, already 0700 by
+    // Node's own default — asserting against it alone cannot tell "recordActivity passed
+    // mode: 0o700" apart from "the directory was 0700 anyway". A nested directory ONLY
+    // recordActivity's mkdirSync can create proves the option is live, not merely believed.
+    const nested = join(dir, "nested-root");
+    process.env.VIBECTX_CACHE_DIR = nested;
+    try {
+      expect(existsSync(nested)).toBe(false);
+      recordActivity(base);
+      expect(statSync(nested).mode & 0o777).toBe(0o700);
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+    }
+  });
+
+  it("PAR-791: a file left world-readable by an older version is corrected to 0600 on its next write (writeAtomic's rename replaces the mode, not just the bytes)", () => {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "activity.json"), JSON.stringify({ schemaVersion: ACTIVITY_LOG_SCHEMA_VERSION, entries: [] }), "utf8");
+    chmodSync(join(dir, "activity.json"), 0o644);
+    expect(statSync(join(dir, "activity.json")).mode & 0o777).toBe(0o644);
+    recordActivity(base);
+    expect(statSync(join(dir, "activity.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("writeAtomic (atomic-store.ts): an explicit mode is applied to the file; omitting it keeps the pre-existing default behaviour unchanged", () => {
+    const withMode = join(dir, "with-mode.json");
+    writeAtomic(withMode, "{}", { mode: 0o600 });
+    expect(statSync(withMode).mode & 0o777).toBe(0o600);
+    // Compared against a CONTROL file written the pre-PR way (plain writeFileSync, no mode
+    // option at all) rather than a hardcoded "not 0600" literal: that literal would falsely
+    // pass under, say, umask 077, where the OS default already yields 0600 with no help from
+    // this option. The control proves "same as before", which is the actual property this
+    // test is for — every other writeAtomic caller (resolved-store.ts, project-store.ts,
+    // etc.) is untouched by this option and must keep getting exactly this file's mode.
+    const control = join(dir, "control.json");
+    writeFileSync(control, "{}", "utf8");
+    const withoutMode = join(dir, "without-mode.json");
+    writeAtomic(withoutMode, "{}");
+    expect(statSync(withoutMode).mode & 0o777).toBe(statSync(control).mode & 0o777);
   });
 
   it("appends in call order (oldest first)", () => {
@@ -172,21 +221,39 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
       expect(e!.version!.length).toBeLessThanOrEqual(100);
     });
 
-    it("an invalid url (not https, or a forbidden host) drops only that FIELD", () => {
+    it("a non-https or malformed url drops only that FIELD", () => {
+      for (const url of ["http://insecure.example.com/x", "not a url at all", "https://u:p@example.com/x", "ftp://example.com/x", ""]) {
+        expect(toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.000Z", url })?.url, url).toBeUndefined();
+      }
+    });
+
+    it("PAR-792: an internal/forbidden-host url is KEPT — validated by shape only, not the fetch-time host allow-list, so an allowInternalHosts entry's consultation is still evidenced", () => {
       const e = toActivityEntry({
-        tool: "get_docs",
-        outcome: "matched",
-        timestamp: "2026-09-17T18:00:00.000Z",
-        url: "http://insecure.example.com/x",
-      });
-      expect(e?.url).toBeUndefined();
-      const e2 = toActivityEntry({
         tool: "get_docs",
         outcome: "matched",
         timestamp: "2026-09-17T18:00:00.000Z",
         url: "https://169.254.169.254/x",
       });
-      expect(e2?.url).toBeUndefined();
+      expect(e?.url).toBe("https://169.254.169.254/x");
+      const e2 = toActivityEntry({
+        tool: "get_docs",
+        outcome: "matched",
+        timestamp: "2026-09-17T18:00:00.000Z",
+        url: "https://docs.internal/llms.txt",
+      });
+      expect(e2?.url).toBe("https://docs.internal/llms.txt");
+    });
+
+    it("PAR-792: the url's query string is stripped (may carry a token/secret); the fragment is stripped too", () => {
+      const e = toActivityEntry({
+        tool: "get_docs",
+        outcome: "matched",
+        timestamp: "2026-09-17T18:00:00.000Z",
+        url: "https://example.com/docs/llms.txt?token=super-secret&x=1#section",
+      });
+      expect(e?.url).toBe("https://example.com/docs/llms.txt");
+      expect(e?.url).not.toContain("token");
+      expect(e?.url).not.toContain("super-secret");
     });
 
     it("contentHash must match documentHash's exact 16-hex shape, or is dropped", () => {

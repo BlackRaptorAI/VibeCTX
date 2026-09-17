@@ -1230,6 +1230,10 @@ One entry per call, never per section or per followed link. Fields, per tool:
 - **url**, **contentHash** — the document actually consulted, and a hash of its
   content (the same 16-hex-character hash `search`'s index uses to detect a changed
   document) — proof of *which* document without a second copy of what it said.
+  `url` has its query string and fragment stripped (a config-authored URL carrying a
+  `?token=…` must not land in a log file in plaintext) and is validated by shape only
+  — `https`, well-formed — not by the fetch-time host allow-list, so a document served
+  from an `allowInternalHosts` entry still shows up here instead of silently vanishing.
 - **fresh** — whether the copy consulted was within its TTL.
 - **outcome** — `matched` (content was found and served), `no-match` (the document was
   consulted but the topic/query found nothing in it), `not-cached` (nothing was
@@ -1248,6 +1252,25 @@ Set `VIBECTX_NO_LOG=1` to turn logging off entirely (no file is even created). A
 corrupt or unwritable `activity.json` never breaks a retrieval — the same D-13
 discipline every store in the cache directory follows — it costs one line on stderr
 and the entry is simply not recorded.
+
+**Owner-only permissions.** `activity.json` is written `0600` (readable and writable
+only by you), self-healing on every write — a copy left world-readable by an older
+vibectx version is corrected the moment the next entry is recorded, not merely held
+steady from then on. **This protection is scoped to the log file itself** — its query
+string stripping and 0600 mode apply to `activity.json` only, not to the rest of the
+cache directory, and not to what vibectx returns to your agent. If a config entry's
+`urls` carries a secret in its query string (an internal docs endpoint behind a
+`?token=…`), that token still appears — unstripped, at default file permissions — in
+cache file names, `.meta.json`, the search index and project records, **and it is
+printed in the `Source:` line of every `get_docs` and `search` response**, so it also
+reaches your agent's context and whatever model provider that agent uses. vibectx has
+no way to send credentials in a request header — it sends a user agent and a
+conditional `If-None-Match`, nothing else — so a token in the URL is the only form it
+can carry one at all. If that applies to you, reach the endpoint by network-level means
+instead (a VPN, a fronting proxy, an IP allow-list) where you can; otherwise treat both
+your agent's transcripts and the whole cache directory as holding that secret (a
+`chmod 700` on the cache directory is on you — vibectx sets that mode only on a cache
+root it creates itself, not one that already existed).
 
 `--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
 contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;

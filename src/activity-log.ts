@@ -2,7 +2,6 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot } from "./cache.js";
-import { sanitizeRemoteUrl } from "./link-policy.js";
 import { ACTIVITY_LOG_MAX_ENTRIES } from "./limits.js";
 import { cleanText, clipText } from "./text.js";
 
@@ -109,7 +108,9 @@ export interface ActivityEntry {
    *  text itself. */
   query?: string;
   /** The document URL actually consulted, when there is exactly one (absent for a
-   *  multi-library `search` and a full `refresh`, for the same reason as `library`). */
+   *  multi-library `search` and a full `refresh`, for the same reason as `library`).
+   *  Validated by SHAPE only, not the fetch-time host allow-list, and with its query string
+   *  stripped — see `sanitizeLoggedUrl`'s own comment (PAR-792). */
   url?: string;
   /** `documentHash` (`search-index.ts`) of the document's content — proves WHICH document
    *  without storing what it said (D-33's own boundary, reused here). */
@@ -164,6 +165,51 @@ function cleanField(value: unknown, max: number): string | undefined {
   return clipText(value, max);
 }
 
+/** Longest raw URL string this module will attempt to parse — a guard before `new URL()`
+ *  runs, independent of `MAX_URL_CHARS`'s post-sanitization storage clip. Mirrors
+ *  `link-policy.ts`'s own bound for `sanitizeRemoteUrl` (private there, so restated here
+ *  rather than exported solely for this one reuse). */
+const MAX_RAW_URL_CHARS = 2048;
+
+/**
+ * D-51/PAR-792 (security-architect): the persisted `url` is only ever DISPLAYED — `vibectx
+ * log` never fetches it, and `test/import-graph.test.ts`'s done-when (c) pins that
+ * `activity-log.ts` cannot even reach `fetcher.ts` transitively, so this premise cannot go
+ * stale silently — so it is validated by SHAPE (https, well-formed, no userinfo), not by the
+ * fetch-time host allow-list `sanitizeRemoteUrl` (`link-policy.ts`) applies. Structurally the
+ * same move `cache-meta.ts`'s own `validMetaUrl` makes (its own stated reason is narrower —
+ * "the trust decision was already made when the document was written" — but the effect is
+ * the same: no host check on a value nothing here re-fetches). Without it, an internal/
+ * air-gapped library's document URL (`allowInternalHosts: true`) fails `sanitizeRemoteUrl`'s
+ * `isForbiddenHost` check and is silently dropped from the one place meant to evidence it was
+ * consulted — exactly the air-gapped deployment this tool's own README courts.
+ *
+ * Also strips the QUERY STRING, not only the fragment `sanitizeRemoteUrl` already strips: a
+ * config-authored `urls` entry carrying `?token=…`/`?api_key=…` (a realistic internal-docs
+ * pattern) must not be written into a log file in plaintext. DISCLOSED COST, not costless:
+ * the cache key is the FULL url including its query (`urlSlug`, `cache-meta.ts`), so two
+ * requests differing only in query (`?v=2` vs `?v=3`) are genuinely different documents that
+ * this field can no longer tell apart by `url` alone — `contentHash` still distinguishes
+ * them, but a reader scanning by `url` sees one string for two sources, with nothing marking
+ * that a query was ever present and removed.
+ */
+function sanitizeLoggedUrl(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const raw = value.trim();
+  if (raw.length === 0 || raw.length > MAX_RAW_URL_CHARS) return undefined;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== "https:") return undefined;
+  if (url.username !== "" || url.password !== "") return undefined;
+  url.hash = "";
+  url.search = "";
+  return url.href;
+}
+
 /**
  * Validate one persisted row (K1, mirroring `project-store.ts`'s own `toWarmRow`): `tool`
  * and `outcome` must be in their closed vocabularies and `timestamp` a strict ISO instant —
@@ -181,7 +227,7 @@ export function toActivityEntry(raw: unknown): ActivityEntry | undefined {
   if (!validIsoInstant(timestamp)) return undefined;
   const cleanedLibrary = cleanField(library, MAX_LIBRARY_CHARS);
   const cleanedQuery = cleanField(query, MAX_QUERY_CHARS);
-  const sanitizedUrl = sanitizeRemoteUrl(url);
+  const sanitizedUrl = sanitizeLoggedUrl(url);
   const cleanedVersion = cleanField(version, MAX_VERSION_CHARS);
   // Built in this exact field order (K1): tool, library, query, url, contentHash, version,
   // fresh, outcome, timestamp. This is the ONE place an `ActivityEntry` is ever constructed
@@ -245,7 +291,18 @@ export function recordActivity(
     const entry = toActivityEntry({ ...input, timestamp: now().toISOString() });
     if (!entry) return; // the caller handed this module a value its own fields cannot hold
     const dir = cacheRoot();
-    mkdirSync(dir, { recursive: true });
+    // PAR-791 (security-architect): this file holds what the user asked about — the first
+    // thing in the cache directory that does. 0o700 here only takes effect the moment this
+    // call is what CREATES the cache root (mkdirSync on an already-existing directory does
+    // not retroactively chmod it, a real but disclosed limitation, not a silent one — most
+    // cache roots already exist by the time a retrieval logs its first entry, since get_docs/
+    // warm's own cache.ts almost always creates it first, with no mode); the file's own mode
+    // below is what actually matters and applies on every write, not only the first.
+    // With `recursive: true`, 0o700 also applies to any INTERMEDIATE parent directories this
+    // call is what creates (e.g. a `VIBECTX_CACHE_DIR` pointed at a not-yet-existing nested
+    // path) — a side effect of `recursive: true`, not requested per-level, but harmless: a
+    // parent more restrictive than its default would have been is never a regression here.
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const path = activityLogPath();
     const newer = newerSchemaVersion(path, ACTIVITY_LOG_SCHEMA_VERSION);
     if (newer !== undefined) {
@@ -255,7 +312,10 @@ export function recordActivity(
     const entries = readActivityEntries();
     entries.push(entry);
     const bounded = entries.length > ACTIVITY_LOG_MAX_ENTRIES ? entries.slice(entries.length - ACTIVITY_LOG_MAX_ENTRIES) : entries;
-    writeAtomic(path, JSON.stringify({ schemaVersion: ACTIVITY_LOG_SCHEMA_VERSION, entries: bounded }, null, 2));
+    // PAR-791: owner-only — self-healing across every write (writeAtomic's own comment), so a
+    // file left world-readable by a vibectx version older than this fix is corrected on its
+    // very next entry, not merely held steady from here on.
+    writeAtomic(path, JSON.stringify({ schemaVersion: ACTIVITY_LOG_SCHEMA_VERSION, entries: bounded }, null, 2), { mode: 0o600 });
   } catch (e) {
     warn(`vibectx: activity not logged: ${cleanText(e instanceof Error ? e.message : String(e))}`);
   }
