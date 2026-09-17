@@ -909,27 +909,50 @@ describe("--help / -h (PAR-780)", () => {
   /** The usage text lists every command and matches the README (Done-when, PAR-780): the
    *  README's own "## Command line" section is read and checked against every exported
    *  per-command USAGE string, the same drift guard test/debug.test.ts uses for its README
-   *  section. */
+   *  section. Bounded to the NEXT heading of any level (not just another "## "), so the slice
+   *  can't silently swallow unrelated sections below it. */
   describe("the README's \"Command line\" section matches the shipped usage text", () => {
     const README = readFileSync(fileURLToPath(new URL("../README.md", import.meta.url)), "utf8");
     const start = README.indexOf("## Command line");
-    const section = README.slice(start, README.indexOf("\n## ", start + 1));
+    const afterHeading = README.slice(start + "## Command line".length);
+    const nextHeading = afterHeading.search(/\n#{1,6} /);
+    const section = afterHeading.slice(0, nextHeading === -1 ? undefined : nextHeading);
 
     it("found the section", () => {
       expect(start).toBeGreaterThan(-1);
       expect(section.length).toBeGreaterThan(200);
+      expect(section.length).toBeLessThan(2000); // caught the over-capture bug this guards against
     });
 
-    it("names every subcommand GLOBAL_USAGE lists", () => {
-      for (const name of ["doctor", "resolve", "warm", "search", "log"]) {
-        expect(section).toContain(`vibectx ${name} `);
+    /** Each table row's inline-code cell — `| \`vibectx <name> ...\` |` — parsed back to a
+     *  bare usage string ("vibectx <name> ..."), unescaping the "\|" a markdown table cell
+     *  needs for a literal pipe (`resolve`'s `--npm | --pypi`). */
+    function readmeUsage(name: string): string | undefined {
+      const row = section.split("\n").find((line) => line.startsWith(`| \`vibectx ${name} `) || line.startsWith(`| \`vibectx ${name}[`) || line.startsWith(`| \`vibectx ${name}\``));
+      const m = row?.match(/^\| `(vibectx [^`]*)` \|/);
+      return m?.[1].replace(/\\\|/g, "|");
+    }
+
+    it("each command's table row is exactly its own usage: <line>, not just present somewhere in the section", () => {
+      const cases: [string, string][] = [
+        ["doctor", DOCTOR_USAGE],
+        ["resolve", RESOLVE_USAGE],
+        ["warm", WARM_USAGE],
+        ["search", SEARCH_USAGE],
+        ["log", LOG_USAGE],
+      ];
+      for (const [name, usage] of cases) {
+        expect(readmeUsage(name)).toBe(usage.replace(/^usage: /, ""));
       }
     });
 
     it("documents --help / -h and the exit codes", () => {
       expect(section).toContain("--help");
-      expect(section).toContain("-h");
-      expect(section).toMatch(/exits? `?0`?/);
+      // Not just .toContain("-h") — that's trivially true of "--help" itself. Requires -h as
+      // its own token (preceded by non-"-", followed by a non-word character), so deleting the
+      // README's separate "vibectx -h" mention would actually fail this.
+      expect(section).toMatch(/(?<!-)-h\b/);
+      expect(section).toMatch(/exits? `0`/);
       expect(section).toMatch(/exits `2`/);
     });
   });

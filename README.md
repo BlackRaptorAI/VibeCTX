@@ -106,15 +106,15 @@ return, without a client:
 
 | Command | What it does |
 |---|---|
-| `vibectx doctor [--library <name>] [--offline] [--json] [--config <path>]` | Prove retrieval works per library — see [Checking coverage: `vibectx doctor`](#checking-coverage-vibectx-doctor) |
+| `vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]` | Prove retrieval works per library — see [Checking coverage: `vibectx doctor`](#checking-coverage-vibectx-doctor) |
 | `vibectx resolve <package> [--npm \| --pypi] [--config <path>]` | Turn a package name into a docs source — see [Any library, no config](#any-library-no-config) |
 | `vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]` | Cache a project's dependency docs — see [Warm your project's docs](#warm-your-projects-docs) |
 | `vibectx search <query> [--library <name>]… [--max-tokens <n>] [--json] [--config <path>]` | Search every cached library at once — see [Don't know which library? `search`](#dont-know-which-library-search) |
 | `vibectx log [--json]` | Show recorded tool activity — see [Activity log: `vibectx log`](#activity-log-vibectx-log) |
 
 `vibectx --help` and `vibectx -h` print this list and exit `0`; `vibectx <command> --help`
-(or `-h`) prints that command's own usage and exits `0`. An unknown option still exits `2`
-with one line on stderr.
+(or `-h`) prints that command's own usage and exits `0`. An unknown option still exits `2`,
+printing the error and that command's usage as two lines on stderr.
 
 ### How ranking works
 

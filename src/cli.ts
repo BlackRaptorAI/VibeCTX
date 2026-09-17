@@ -229,9 +229,13 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-/** PAR-780: `--help`/`-h` anywhere in a command's own arguments short-circuits parsing —
- *  the same convention git/npm follow — so it wins over a missing flag value or an unknown
- *  option rather than being rejected as one. */
+/** PAR-780: `--help`/`-h` anywhere in a command's own arguments short-circuits parsing — the
+ *  same "help always wins" convention git/npm follow — so it wins over a missing flag value or
+ *  an unknown option rather than being rejected as one. Position-blind (checked before any
+ *  option-with-value pairing is resolved), so a value slot that happens to hold the literal
+ *  text "-h" (e.g. `--config -h`) also triggers help rather than being read as that value —
+ *  harmless in practice (nothing is ever really named "-h") but worth knowing when reading
+ *  the callers below. */
 function isHelpFlag(args: string[]): boolean {
   return args.includes("--help") || args.includes("-h");
 }
