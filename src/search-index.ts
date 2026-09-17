@@ -528,6 +528,13 @@ export function openIndexSession(
 ): IndexSession {
   let snapshot: Map<string, IndexedDocument> | undefined;
   const pending = new Map<string, { doc: IndexedDocument; hash: string } | "remove">();
+  // PAR-746 (F-9, SF-3) — the matching-`existing` fast path below used to call `memo.set`
+  // immediately, before this session even knew whether ITS OWN `flush()` would shed the entry
+  // (D-40, largest-first, over the whole re-read map, not just `pending`). `confirmed` defers
+  // that: a key lands here instead of in `memo` directly, and `flush()` — the one place that
+  // actually knows what got shed — is what commits it to `memo`, exactly the same way it
+  // already does for `pending`. See `flush()` for the other half.
+  const confirmed = new Map<string, string>();
   return {
     add(library, url, text, fetchedAt) {
       const key = library.trim().toLowerCase();
@@ -541,31 +548,38 @@ export function openIndexSession(
         if (existing && existing.hash === hash && existing.url === url) {
           // Round 1 (code-reviewer, S5): the on-disk entry already matches — cancel a pending
           // removal rather than rebuilding an identical posting list. A refresh that finds
-          // nothing changed across the whole loop ends this call with `pending` empty, so
-          // `flush()` below returns before its own re-read: one read, zero writes, not three
-          // and a 16.9 MB rewrite for a no-op.
+          // nothing changed across the whole loop ends this call with `pending` AND
+          // `confirmed` both empty, so `flush()` below returns before its own re-read: one
+          // read, zero writes, not three and a 16.9 MB rewrite for a no-op.
           //
-          // Round 2 (code-reviewer, SF-3, named as a gap not fixed here): `memo.set` below is
-          // set UNCONDITIONALLY, including when `supersedesRemoval` is true and this key is
-          // about to leave `pending` — so if THIS SAME flush()'s write ends up shedding this
-          // entry (D-40, largest-first, over the whole re-read map, not just `pending`),
-          // nothing corrects `memo` afterward: `flush()`'s post-write shed-exclusion loop only
-          // walks `pending`, and this key is no longer in it. A pre-existing class, not a new
-          // one — the ORIGINAL matching-`existing` fast path this cancel branch extends has
-          // carried the identical gap since before this item, for the plain (non-remove())
-          // `add()` path every caller of `indexCachedDocument`/`openIndexSession` already
-          // uses. Bounded, not silent: `writeIndex`'s own `shedMemo` records the shed hash
-          // separately and `search.ts:484` tokenizes a shed library at query time regardless
-          // of what `memo` claims — so the cost is a slower search until the document changes
-          // (a new hash no longer matches `memo`) or the library is refreshed (`remove()`
-          // clears `memo` for it) — nothing re-offers the SAME hash in this process otherwise.
-          // Never a wrong answer. Fixing it for real means changing what the shared `add()`
-          // fast path does for EVERY caller (`warm`, `autowarm`, `get_docs`, `resolve`), which
-          // is bigger than this item's scope — named here rather than fixed.
-          if (supersedesRemoval) pending.delete(key);
-          memo.set(key, hash);
+          // PAR-746 (F-9, round 2, SF-3 — was "named as a gap not fixed here", now fixed):
+          // `memo` is no longer set here directly. Recorded into `confirmed` instead, so
+          // `flush()` can correct it if THIS SAME flush's write ends up shedding the entry —
+          // the fix applies equally to the plain (non-`remove()`) fast path every caller of
+          // `indexCachedDocument`/`openIndexSession` already uses, not only this cancel
+          // branch, per the issue's own scope (fixing one and not the other would leave the
+          // larger, older instance live).
+          //
+          // PAR-746 round 2 (code-reviewer, B1) — `pending` is cleared UNCONDITIONALLY here,
+          // not only when it held "remove": the on-disk entry matches what is offered NOW, so
+          // any EARLIER pending build for this same key in this session (a prior `add()` call
+          // that computed different content before this one) is superseded and must not survive
+          // to `flush()`. Before this, only the removal case cleared `pending` — a same-session
+          // `add(K, textA)` (→ `pending`) followed by `add(K, textB)` matching the on-disk entry
+          // (→ `confirmed`) left BOTH maps holding `K`, and `flush()`'s two commit loops (pending
+          // first, confirmed second) let `confirmed`'s hash win in `memo` even though `pending`'s
+          // content was what actually got written to disk — a `memo` entry pointing at a hash
+          // the file never held under that key. MEASURED not reachable by any current caller
+          // (each call site offers one document per library per session), but reachable through
+          // the exported `IndexSession` API, and the fix is one unconditional delete.
+          pending.delete(key);
+          confirmed.set(key, hash);
           return;
         }
+        // A key that previously took the fast path in THIS session (recorded into `confirmed`)
+        // is about to get REAL new content instead — drop the stale confirmation so `flush()`
+        // doesn't later overwrite the correct hash `pending` just wrote with this old one.
+        confirmed.delete(key);
         // `fetchedAt` is provenance only — it is never rendered and never gates anything (the
         // HASH does). A caller that has the cache meta to hand passes it; one that does not
         // (get_docs, which holds the document but not its meta) lets it default to the indexing
@@ -586,13 +600,34 @@ export function openIndexSession(
       if (!validLibraryKey(key)) return;
       // Same reason `invalidateIndex` clears both (D-42): a memo entry from BEFORE this
       // removal must not let a later `add()` in this or a future session believe the hash it
-      // is offering is already on disk when this session is about to delete it.
+      // is offering is already on disk when this session is about to delete it. `confirmed`
+      // gets the same treatment (PAR-746): a fast-path confirmation from EARLIER in this same
+      // session must not survive a `remove()` for the same key — flush() would otherwise
+      // re-add a `memo` entry for a library this very flush is about to delete.
       memo.delete(key);
       shedMemo.delete(key);
+      confirmed.delete(key);
       pending.set(key, "remove");
     },
     flush() {
-      if (pending.size === 0) return false;
+      if (pending.size === 0) {
+        // This SESSION has nothing to write, so ITS OWN flush could not have just shed a
+        // `confirmed` entry — safe to commit every one of them to `memo`. (Round 2,
+        // code-reviewer, S3: a DIFFERENT, concurrently-open session in this same process could
+        // still shed or delete one of these keys via its own write between this session's
+        // `add()` calls and this `flush()` — `refresh.ts` holds a session open across a nested
+        // `resolvePackage` call that writes independently. That residual is real but pre-existing
+        // and not particular to this branch: nothing here reads the file to check, by design —
+        // the whole point of this early return is to cost zero I/O when there is nothing to
+        // write.) Skipping this commit entirely (returning early the way this function used to,
+        // with `confirmed` left unset) would silently undo the whole point of the fast path:
+        // every future `add()` for these keys would re-pay the "does the existing entry already
+        // match" check this session already did, defeating the memo for the common
+        // all-cache-warm case its own module comment describes.
+        for (const [key, hash] of confirmed) memo.set(key, hash);
+        confirmed.clear();
+        return false;
+      }
       try {
         // Re-read rather than reusing the snapshot: between the first `add` and here, another
         // process may have written entries this run knows nothing about, and the index is a
@@ -609,17 +644,39 @@ export function openIndexSession(
         // hold. Whether an entry sheds depends on what else is in the file, so it is offered
         // again — the per-process shed memo above is what keeps the SEARCH path from paying
         // for that on every call.
+        //
+        // PAR-746 (F-9): `shed` is built from `writeIndex`'s own callback, which reports shed
+        // names from the WHOLE re-read `libraries` map — including a `confirmed` entry that was
+        // never touched by `pending` at all. `confirmed` is checked against it exactly the same
+        // way `pending` is, which is the actual fix: before this, only `pending` was checked,
+        // so a `confirmed` (fast-path) entry shed by this same write had nothing to catch it.
         const shed = new Set<string>();
         const written = writeIndex(libraries, warn, (names) => {
           for (const name of names) shed.add(name);
           onShed?.(names);
         });
-        if (written) for (const [key, value] of pending) if (value !== "remove" && !shed.has(key)) memo.set(key, value.hash);
+        if (written) {
+          for (const [key, value] of pending) if (value !== "remove" && !shed.has(key)) memo.set(key, value.hash);
+          // Round 2 (security-architect + code-reviewer, S3): `!shed.has(key)` alone answers
+          // "did THIS write's own shed decision drop it", not "is `hash` actually what the file
+          // now holds for `key`". `confirmed` was built from `snapshot` — a read taken BEFORE
+          // this flush — so between that read and this write, ANOTHER session in this same
+          // process could have changed or deleted this key entirely (`writeIndex` does not
+          // mutate the map it is handed — `serialiseIndex` only splices its own local copy — so
+          // `libraries` here is still exactly what was just serialised, making this a direct
+          // check against reality, not a second guess). `pending`'s own entries need no such
+          // check: they were written INTO `libraries` by the loop just above, synchronously,
+          // with nothing able to run between that and `writeIndex`, so they are what they claim
+          // to be by construction.
+          for (const [key, hash] of confirmed) if (!shed.has(key) && libraries.get(key)?.hash === hash) memo.set(key, hash);
+        }
         pending.clear();
+        confirmed.clear();
         return written;
       } catch (e) {
         warn(`vibectx: search index not updated: ${e instanceof Error ? e.message : String(e)}\n`);
         pending.clear();
+        confirmed.clear();
         return false;
       }
     },
