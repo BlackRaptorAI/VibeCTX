@@ -181,24 +181,62 @@ describe('get_docs mode over the transport (D-26)', () => {
 });
 
 describe("startServer + autowarm over an in-memory transport", () => {
-  it("autowarm starts only after connect; a tool call answers while its fetch is held open and shows warming…", async () => {
-    writeCache("react", REACT_URL, "# React fresh");
-    const { spy, release } = heldFetch();
-    expect(autowarmStatus().started).toBe(false);
-    const { client, started, notes, call } = await connect(registry());
-    expect(autowarmStatus().started).toBe(true);
-    expect(started.autowarm).toBeDefined();
-    // The autowarm is holding zod's fetch; list_libraries must still answer, and mark it.
-    const list = await Promise.race([call("list_libraries"), new Promise<string>((_, rej) => setTimeout(() => rej(new Error("list_libraries blocked")), 1000))]);
-    expect(list).toMatch(/\*\*zod\*\* — Zod \[not cached, warming…\]/);
-    expect(list).toMatch(/\*\*react\*\* — React \[cached [^\]]*\] \[full-text\]/);
-    expect(spy).toHaveBeenCalledTimes(1);
-    release();
-    expect(await started.autowarm).toEqual({ attempted: 1, cached: 1, failed: [], aborted: 0 });
-    expect(await call("list_libraries")).not.toContain("warming…");
-    expect(notes.join("")).toBe("vibectx: autowarm cached 1/1 configured libraries\n");
-    await client.close();
-  });
+  it(
+    "autowarm starts only after connect; a tool call answers while its fetch is held open and shows warming…",
+    async () => {
+      writeCache("react", REACT_URL, "# React fresh");
+      const { spy, release } = heldFetch();
+      expect(autowarmStatus().started).toBe(false);
+      const { client, started, notes, call } = await connect(registry());
+      expect(autowarmStatus().started).toBe(true);
+      expect(started.autowarm).toBeDefined();
+      // The autowarm is holding zod's fetch; list_libraries must still answer, and mark it.
+      //
+      // F-2 / PAR-733: this is a LIVENESS check, not a performance bound — the property is
+      // "does not block behind autowarm's held fetch" (i.e. does not hang), and 1000 ms is a
+      // stand-in for "forever", not a budget being measured against. It was previously an
+      // unmeasured Promise.race with no [MEASURED] print and no per-test timeout of its own,
+      // so under load it could die inside vitest's implicit 5000 ms default with a generic
+      // "Test timed out" message rather than this test's own, more informative one — unmeasured
+      // risk, never exercised under load (not a confirmed flake, unlike Target 1). Fixed by:
+      // (a) an explicit per-test timeout below, well over vitest's 5000 ms default, so the test
+      //     fails at ITS OWN boundary with ITS OWN message instead of vitest's generic one;
+      // (b) a [MEASURED] print of the real elapsed time on every run, pass or fail;
+      // (c) a failure message that says plainly this is a liveness timeout, not a proof the call
+      //     would never have completed — it only proves it did not complete within the budget.
+      const listStart = performance.now();
+      const LIST_LIBRARIES_LIVENESS_MS = 1000;
+      let list: string;
+      try {
+        list = await Promise.race([
+          call("list_libraries"),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `list_libraries did not answer within ${LIST_LIBRARIES_LIVENESS_MS} ms while autowarm's fetch was held open ` +
+                      `(liveness timeout: it may still be running, not proven hung forever)`,
+                  ),
+                ),
+              LIST_LIBRARIES_LIVENESS_MS,
+            ),
+          ),
+        ]);
+      } finally {
+        console.log(`[F-2 MEASURED] list_libraries while a fetch is held open: ${(performance.now() - listStart).toFixed(1)} ms`);
+      }
+      expect(list).toMatch(/\*\*zod\*\* — Zod \[not cached, warming…\]/);
+      expect(list).toMatch(/\*\*react\*\* — React \[cached [^\]]*\] \[full-text\]/);
+      expect(spy).toHaveBeenCalledTimes(1);
+      release();
+      expect(await started.autowarm).toEqual({ attempted: 1, cached: 1, failed: [], aborted: 0 });
+      expect(await call("list_libraries")).not.toContain("warming…");
+      expect(notes.join("")).toBe("vibectx: autowarm cached 1/1 configured libraries\n");
+      await client.close();
+    },
+    30_000,
+  );
 
   it("S-C: startServer sweeps orphan temp files out of the cache directories before anything else writes", async () => {
     writeCache("react", REACT_URL, "# React fresh");
