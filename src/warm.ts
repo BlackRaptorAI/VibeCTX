@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, resolve, sep } from "node:path";
-import { DEFAULT_REGISTRY, installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
+import { installResolvedEntry, type LibraryEntry, type Registry } from "./registry.js";
 import { lookupLibrary, resolvePackage, MAX_RESOLUTIONS_PER_HOUR } from "./resolve.js";
 import { getLibraryDoc } from "./fetcher.js";
 import { readCache, cacheRoot, type CacheHit } from "./cache.js";
@@ -40,11 +40,10 @@ export type { WarmRow, WarmStatus } from "./project-store.js";
  *      memo never applies to a name the registry now knows.
  *
  * D-11 (2026-09-06): registry entries match by name regardless of ecosystem.
- * When the manifest's ecosystem differs from the entry's evident one — a default entry is
- * the npm package by the NAMING RULE; a resolved entry is `resolved.source`; a config entry
- * has none — the row carries `curated entry is the <npm|pypi> package` (or `resolved entry
- * is …`), so a Python project asking for `stripe` sees it got stripe-node. An `ecosystem`
- * field on entries is a queued follow-up.
+ * When the manifest's ecosystem differs from the entry's evident one — a default entry's is
+ * its `ecosystem` field (set by the NAMING RULE); a resolved entry's is `resolved.source`; a
+ * config entry has none — the row carries `curated entry is the <npm|pypi> package` (or
+ * `resolved entry is …`), so a Python project asking for `stripe` sees it got stripe-node.
  *
  * D-10 (2026-09-06, amended): the MCP tool (`warmToolText`) accepts only the
  * server's working directory or a directory beneath it, decided on REAL paths — a symlink
@@ -163,13 +162,12 @@ type RunState = { entryJobs: Map<string, Promise<Outcome>>; recent: Map<string, 
 
 const memoKey = (ecosystem: DependencyEcosystem, name: string) => `${ecosystem}:${name}`;
 
-/** D-11: the ecosystem an entry evidently belongs to, when that can be known. */
+/** D-11: the ecosystem an entry evidently belongs to, when that can be known. The entry's own
+ *  `ecosystem` field — set on shipped defaults by the NAMING RULE, never on a resolved or
+ *  config entry — wins; a resolved entry falls back to `resolved.source`. A config entry has
+ *  neither (D-63: `ecosystem` is never config-settable, stripped even so — see `normaliseLayer`). */
 function evidentEcosystem(entry: LibraryEntry): DependencyEcosystem | undefined {
-  if (entry.resolved) return entry.resolved.source;
-  // A shipped default (or its D-06 alias-trimmed copy, which shares the same `urls` array) is
-  // the npm package by the NAMING RULE; a config entry — even one overriding a default's
-  // name — brings its own urls and has no evident ecosystem.
-  return DEFAULT_REGISTRY.some((d) => d.urls === entry.urls) ? "npm" : undefined;
+  return entry.ecosystem ?? entry.resolved?.source;
 }
 
 function ecosystemNote(entry: LibraryEntry, dep: ProjectDependency): string | undefined {

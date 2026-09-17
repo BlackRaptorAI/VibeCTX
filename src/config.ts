@@ -330,7 +330,8 @@ function whyUrlRefused(err: unknown, raw: unknown): string {
 }
 
 /** Unknown ENTRY keys are stripped, not rejected (forward-compatible): a config written for a
- *  later version still loads here. `resolved` goes with them — only the resolver may set it. */
+ *  later version still loads here. `resolved` and `ecosystem` go with them — only the resolver
+ *  may set the former, and only a shipped default carries the latter (D-63). */
 const EntrySchema = z
   .object({
     name: z.custom<string>(isNonEmptyString, "must be a non-empty string"),

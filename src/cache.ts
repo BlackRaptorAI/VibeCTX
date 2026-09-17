@@ -361,33 +361,47 @@ export function writeCache(
  *
  * Scope: only pages, keyed by URL, other than one of `keepUrls` — the primary document just
  * written, PLUS every other candidate URL still on the entry (round 1, code-reviewer, S2):
- * `entry.urls[1..n]` are `getLibraryDoc`'s own fallback chain (fetcher.ts:289-299), not
- * followed pages, and deleting them turned a future primary-candidate outage into a hard
- * FAILED where the stale fallback used to serve a flagged document. Callers pass the full
- * candidate list, not just the one URL that was just fetched.
+ * `entry.urls[1..n]` are `getLibraryDoc`'s own fallback chain (its "network failed everywhere"
+ * loop, `fetcher.ts`), not followed pages, and deleting them turned a future primary-candidate
+ * outage into a hard FAILED where the stale fallback used to serve a flagged document. Callers
+ * pass the full candidate list, not just the one URL that was just fetched.
  *
- * Called only after a refetch that changed something (both `refresh.ts` call sites): the
- * direct-fetch path additionally guards on `doc.staleNote === undefined` — round 1 found a
- * failed-network stale-cache fallback carries no `staleNote` distinction from a fresh 304
- * revalidation, so BOTH a genuine failure-fallback and an unchanged-content revalidation reach
- * here as a "success". The 304 case still drops followed pages even though the primary is
- * byte-identical — disclosed, not fixed: propagating that distinction needs a `fetcher.ts`
- * change (a Tier-2/3 gated path this item does not otherwise touch, and touching it would pull
- * in a Change Record this item does not otherwise need). The resolved-entry re-resolution path
- * (`resolvePackage`) has NO equivalent guard at all — `ResolveOutcome` carries no staleness
- * signal, so a resolved library's followed pages are dropped on every successful re-resolution,
- * including one that only reached a stale-cache fallback.
+ * Called only after a refetch that actually changed something (both `refresh.ts` call sites):
+ * the direct-fetch path guards on `fetcher.ts`'s `isDocUnchanged(doc)`, and the
+ * resolved-entry re-resolution path guards on `!out.unchanged` (`resolve.ts`'s
+ * `ResolveOutcome.unchanged`, itself derived from the same two `DocResult` fields). Before
+ * PAR-744 (F-7), NEITHER guard could tell a byte-identical 304 revalidation apart from a
+ * genuine fresh fetch — `doc.staleNote` only ever distinguished a failed-network stale-cache
+ * fallback, and the resolved-entry path had no staleness signal at all — so an unchanged
+ * primary dropped its followed pages on every revalidated refresh. Fixed by adding
+ * `DocResult.notModified` (`fetcher.ts`) and threading it through both call sites. ETag-only
+ * (round 2, code-reviewer, S3): `fetchUrl` sends `if-none-match` and nothing else, so this only
+ * helps a docs site that actually serves an `etag` — a site with no validator at all still
+ * drops its followed pages on every scheduled refresh, exactly as before this item.
  *
- * THE COST IS REAL, NOT ONLY A WASTED RE-FETCH (round 2, code-reviewer, SF-1 — the earlier
- * wording here claimed the dropped pages are "simply re-fetched next time, never served
- * wrong"; MEASURED false for the offline path and corrected). A dropped page that used to be
- * served flagged `STALE:` during an upstream outage or under `offline` now reports "Could not
- * fetch N index links" instead — `fetchLinkedPage`'s offline/unavailable branch
- * (fetcher.ts:330-331) has nothing to fall back to once the cached copy is gone. This is a
- * genuine, disclosed cost against this project's offline-first convention, on the common path
- * (a 304 revalidation, per the paragraph above) — not a correctness bug, because nothing is
- * ever served WRONG, but not free either. Never fixed here: it needs the same `fetcher.ts`
- * change the 304 case does.
+ * THE COST WAS REAL, NOT ONLY A WASTED RE-FETCH (round 2, code-reviewer, SF-1, on the
+ * now-fixed ETag-revalidation case — the earlier wording here claimed the dropped pages are
+ * "simply re-fetched next time, never served wrong"; MEASURED false for the offline path and
+ * corrected). A page dropped on an unchanged refresh, that used to be served flagged `STALE:`
+ * during an upstream outage or under `offline`, reported "Could not fetch N index links"
+ * instead — `fetchLinkedPage`'s offline/unavailable branch (its `offline && !hit` case,
+ * `fetcher.ts`) had nothing to fall back to once the cached copy was gone. Never a correctness
+ * bug (nothing was ever served WRONG), but a real cost against this project's offline-first
+ * convention, and it landed on the common ETag-revalidated case above — which is why this was
+ * worth fixing rather than merely disclosing.
+ *
+ * RESIDUAL, disclosed rather than fixed here (round 2, code-reviewer, S6; filed PAR-788):
+ * `notModified`/`staleNote` mean "this URL's bytes are unchanged", not "the library's PRIMARY
+ * document is unchanged" — `getLibraryDoc` probes `entry.urls` in order and returns the first
+ * candidate that succeeds, so if candidate A (long cached, still carrying a valid etag) was
+ * failing and candidate B became the primary `get_docs` actually served and followed links
+ * from, then A later recovers and revalidates via 304, `doc.url` is A, `notModified` is true,
+ * and this function is skipped — leaving B's followed pages attributed to a primary that is no
+ * longer A's (or B's) current one. Narrow, and not new IN KIND: the pre-existing `staleNote`
+ * fallback has the identical exposure (it also takes the first cached candidate, never
+ * specifically the previously-chosen one) — this item adds a second door to the same room, not
+ * a new room. No cheap fix: `refresh.ts` does not know which URL was previously primary, and
+ * followed pages are not keyed by which primary they were followed from.
  *
  * Best effort (D-13): an unreadable directory or an unremovable file costs a page that
  * outlives its purpose, never a throw — refresh's own result is not this function's to fail.

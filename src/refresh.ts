@@ -1,5 +1,5 @@
 import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
-import { getLibraryDoc } from "./fetcher.js";
+import { getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { resolvePackage } from "./resolve.js";
 import { invalidateIndex, openIndexSession } from "./search-index.js";
 import { dropFollowedPageCache } from "./cache.js";
@@ -75,12 +75,11 @@ export async function refreshToolText(registry: Registry, library?: string, opts
           // Round 1 (code-reviewer, S2/S3): keeps every remaining candidate URL, not just the
           // chosen one — `out.entry.urls` is the fallback chain `getLibraryDoc` would use on a
           // future outage, not a followed page, and must not be deleted alongside them.
-          // UNGUARDED, unlike the direct-fetch branch below: `ResolveOutcome` carries no
-          // staleness signal (no `staleNote` equivalent), so a re-resolution that only reached
-          // a stale-cache fallback still drops followed pages here — disclosed, not fixed (see
-          // `dropFollowedPageCache`'s own doc comment); fixing it needs a `resolve.ts` change
-          // out of this item's scope.
-          if (out.chosen) dropFollowedPageCache(entry.name, [out.chosen, ...out.entry.urls]);
+          // PAR-744 (F-7): guarded on `out.unchanged`, the resolved-branch twin of the
+          // direct-fetch guard below — before this, `ResolveOutcome` carried no staleness
+          // signal at all, so a re-resolution that only reached a 304 or a stale-cache
+          // fallback still dropped followed pages here.
+          if (out.chosen && !out.unchanged) dropFollowedPageCache(entry.name, [out.chosen, ...out.entry.urls]);
           results.push(
             `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${out.chosen} (${(out.chars ?? 0).toLocaleString()} chars)`,
           );
@@ -100,27 +99,24 @@ export async function refreshToolText(registry: Registry, library?: string, opts
         // A3: the pages followed from the document just replaced no longer describe anything
         // this refresh knows to be current — drop them (and every OTHER candidate URL's cache
         // — round 1, S2) so the next get_docs re-follows fresh links instead of blending old
-        // followed pages with the new primary document. Guarded on `staleNote`, but only
-        // PARTIALLY (round 1, S1): when every candidate URL is unreachable, `getLibraryDoc`
-        // re-serves the SAME cached primary with `staleNote` SET, and this correctly skips the
-        // drop. A 304 Not-Modified revalidation, though, returns the SAME content with NO
-        // `staleNote` — indistinguishable here from a genuine fresh fetch — so an unchanged
-        // primary still drops its followed pages on every revalidated refresh, which is the
-        // COMMON case for a scheduled full refresh against docs sites that mostly haven't
-        // changed. Disclosed, not fixed: distinguishing the two needs a `DocResult` field this
-        // item does not add, because `fetcher.ts` is a Tier-2/3 gated path this item does not
-        // otherwise touch and touching it would pull in a Change Record this item does not
-        // otherwise need. Round 2 (code-reviewer, SF-1): this is a REAL cost, not only a
-        // wasted re-fetch — MEASURED, a dropped page that used to be served flagged `STALE:`
-        // during an upstream outage or under `offline` now reports "Could not fetch N index
-        // links" instead (fetcher.ts:330-331 has nothing left to fall back to). Never served
-        // WRONG, so not a correctness bug, but not free, and it lands on the COMMON case above
-        // — see `dropFollowedPageCache`'s own doc comment for the full disposition.
-        if (doc.staleNote === undefined) dropFollowedPageCache(entry.name, [doc.url, ...entry.urls]);
+        // followed pages with the new primary document. Guarded on `isDocUnchanged` (PAR-744,
+        // F-7): `staleNote` catches the case where every candidate URL is unreachable and
+        // `getLibraryDoc` re-serves the SAME cached primary; `notModified` catches the case
+        // this item fixes — a 304 Not-Modified revalidation, which returns the SAME content
+        // with no `staleNote` and used to be indistinguishable here from a genuine fresh
+        // fetch, dropping followed pages even on an ETag-serving site's ordinary "nothing
+        // changed" refresh (round 2, code-reviewer, SF-1 — the dropped page's real cost: one
+        // previously served flagged `STALE:` during an upstream outage now reports "Could not
+        // fetch N index links" instead, once its cache is gone).
+        if (!isDocUnchanged(doc)) dropFollowedPageCache(entry.name, [doc.url, ...entry.urls]);
       }
       results.push(
         doc
-          ? `${entry.name}: refreshed from ${doc.url} (${doc.content.length.toLocaleString()} chars)`
+          ? // PAR-744 (F-7, security-architect round 1, L1): a 304 revalidation says so — the
+            // whole point of this item is that "unchanged" and "refreshed" are now DIFFERENT,
+            // internally distinguishable outcomes, and reporting them identically would hide
+            // that from the one place a human actually reads the result.
+            `${entry.name}: ${doc.notModified ? "unchanged (304 revalidated)" : "refreshed"} from ${doc.url} (${doc.content.length.toLocaleString()} chars)`
           : `${entry.name}: FAILED — all candidate URLs unreachable`,
       );
     }
