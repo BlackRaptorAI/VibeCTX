@@ -560,7 +560,7 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       writeCache("react", "https://react.dev/streaming.md", "# Streaming");
       const slug = urlSlug("https://react.dev/streaming.md");
       // Oversized but otherwise well-formed JSON, so a failure here can only be the size guard.
-      const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(5000) });
+      const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(9000) });
       writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), oversized, "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
@@ -670,6 +670,80 @@ describe("D-71 (PAR-749, Root 1) — readCache/touchCache verify the record's ow
   it("a genuine round trip (writeCache's own meta) still matches, so this check costs the good case nothing", () => {
     writeCache("react", REQUESTED, "# React");
     expect(readCache("react", REQUESTED, 168)?.content).toBe("# React");
+  });
+});
+
+describe("PAR-776 (D-74) — writeCache/touchCache's finalUrl", () => {
+  const CANDIDATE = "https://react.dev/llms.txt";
+  const FINAL = "https://docs.react.dev/llms.txt";
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(CANDIDATE)}.meta.json`);
+
+  it("writeCache stores finalUrl only when it actually differs from the candidate url", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  it("writeCache stores no finalUrl at all when it equals the candidate url — same file shape as a plain write", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+    expect(JSON.parse(readFileSync(metaPath(), "utf8"))).not.toHaveProperty("finalUrl");
+  });
+
+  it("writeCache stores no finalUrl when the caller never passed one", () => {
+    writeCache("react", CANDIDATE, "# React");
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("touchCache sets finalUrl on an existing entry that redirects for the first time", () => {
+    writeCache("react", CANDIDATE, "# React");
+    touchCache("react", CANDIDATE, FINAL);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  it("touchCache clears a stale finalUrl once a revalidation stops redirecting", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    touchCache("react", CANDIDATE, CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("touchCache leaves finalUrl untouched when called without one (unrelated refresh path)", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    touchCache("react", CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  /** security-architect, PAR-776 round 1, B-1: an oversized `finalUrl` (a long redirect
+   *  `Location`) must never reach disk raw — large enough (well past MAX_META_FILE_BYTES,
+   *  8192, on its own), it would push this single entry's `.meta.json` past that bound,
+   *  making `readMetaFile` refuse to even PARSE the file — the WHOLE entry, not just its
+   *  redirect awareness, permanently unreadable, `readCache` reporting it uncached forever and
+   *  defeating offline fallback for it. `writeCache`/`touchCache` drop the oversized value
+   *  before it ever reaches disk instead: the entry still caches, just without the
+   *  redirect-aware extra — the same degradation an invalid `etag` already gets. Sized well
+   *  past 8192 alone (not just past finalUrl's own 2048-char bound) so this test actually
+   *  proves the file-size DoS is closed, not merely that an over-2048 value is rejected. */
+  it("(security-architect, PAR-776 round 1, B-1) writeCache drops a finalUrl too large to ever fit in .meta.json, rather than writing an entry too large to read back", () => {
+    const oversized = "https://docs.react.dev/" + "a".repeat(9000);
+    writeCache("react", CANDIDATE, "# React", undefined, oversized);
+    const hit = readCache("react", CANDIDATE, 168);
+    expect(hit?.content).toBe("# React"); // the entry itself is still readable — not lost entirely
+    expect(hit?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("(security-architect, PAR-776 round 1, B-1) touchCache drops the same oversized finalUrl on a revalidation, not just on first write", () => {
+    writeCache("react", CANDIDATE, "# React");
+    const oversized = "https://docs.react.dev/" + "a".repeat(9000);
+    touchCache("react", CANDIDATE, oversized);
+    const hit = readCache("react", CANDIDATE, 168);
+    expect(hit?.content).toBe("# React");
+    expect(hit?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("(code-reviewer/security-architect, PAR-776 round 1, B1/B-1) writeCache/touchCache drop a finalUrl carrying userinfo or a forbidden host, not just an oversized one", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, "https://user:pass@docs.react.dev/llms.txt");
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+    touchCache("react", CANDIDATE, "https://127.0.0.1/llms.txt");
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
   });
 });
 

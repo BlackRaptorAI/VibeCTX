@@ -286,7 +286,13 @@ describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
       ]),
     };
     await startAutowarm(reg, {
-      fetchDoc: async (entry) => ({ content: `# ${entry.name}\n\n## Streaming\n\nserver-sent events`, url: entry.urls[0] }),
+      fetchDoc: async (entry) => ({
+        content: `# ${entry.name}\n\n## Streaming\n\nserver-sent events`,
+        url: entry.urls[0],
+        finalUrl: entry.urls[0],
+        fetchedAt: "2026-01-01T00:00:00.000Z",
+        stale: false,
+      }),
     });
     expect([...readIndex().libraries.keys()].sort()).toEqual(["hono", "react"]);
     expect(runSearch(reg, { query: "server-sent events" }).tokenized).toBe(0);
@@ -301,7 +307,13 @@ describe("autowarm leaves a usable search index behind (PAR-659, D-34)", () => {
     const notes: string[] = [];
     const summary = await startAutowarm(reg, {
       warn: (m) => notes.push(m),
-      fetchDoc: async (entry) => ({ content: "# React", url: entry.urls[0] }),
+      fetchDoc: async (entry) => ({
+        content: "# React",
+        url: entry.urls[0],
+        finalUrl: entry.urls[0],
+        fetchedAt: "2026-01-01T00:00:00.000Z",
+        stale: false,
+      }),
     });
     expect(summary.cached).toBe(1);
     expect(summary.failed).toEqual([]);
@@ -485,7 +497,13 @@ describe("enforcement liveness (A1, PAR-714): a committed config's forbidden url
     // fetchDoc stubbed here (not the real network): the real TLS handshake against a plain
     // http.Server is a separate concern from A1, which is about ADMISSION into the registry —
     // that admission is what this asserts, via the exact entry startAutowarm hands to fetchDoc.
-    const fetchDoc = vi.fn(async (entry: { name: string; urls: string[] }) => ({ content: "# docs", url: entry.urls[0] }));
+    const fetchDoc = vi.fn(async (entry: { name: string; urls: string[] }) => ({
+      content: "# docs",
+      url: entry.urls[0],
+      finalUrl: entry.urls[0],
+      fetchedAt: "2026-01-01T00:00:00.000Z",
+      stale: false,
+    }));
     const summary = await startAutowarm(registry, { warn: () => {}, fetchDoc });
 
     expect(summary.attempted).toBe(1);
