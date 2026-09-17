@@ -36,6 +36,17 @@ export interface CacheMeta {
   url: string;
   fetchedAt: string; // ISO
   etag?: string;
+  /** PAR-776 (D-1) — the URL the content actually came from, when a redirect moved it away
+   *  from `url` (the candidate URL this entry is keyed and requested by). Absent when there
+   *  was no redirect, or when the writer never observed one (a cache-only path with nothing to
+   *  report). `url` above stays the CANDIDATE throughout — the lookup key `readCache`/
+   *  `touchCache` verify against and the identity `search-index.ts` correlates against — never
+   *  overloaded to mean "wherever this ended up"; this field exists precisely so callers that
+   *  need to resolve relative links or apply the host policy against the document's real
+   *  origin (`get-docs.ts`) have a persisted answer on a CACHE HIT, not only on the live fetch
+   *  that first observed it. Never gates anything on read — a stale or missing `finalUrl` costs
+   *  a caller its redirect-aware behaviour, never a wrong document served. */
+  finalUrl?: string;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -64,13 +75,19 @@ const MAX_META_URL = 2048;
 /** Longest `etag` — an HTTP validator token, not free text; well past anything real. */
 const MAX_META_ETAG = 512;
 /** Round 2 (security-architect, R3) — longest `.meta.json` file this cache will read before
- *  parsing it. A real one is a URL, an ISO instant and an optional etag; this is generous
- *  headroom over `MAX_META_URL` + `MAX_META_ETAG` plus JSON overhead, not a measured figure.
+ *  parsing it. A real one is a URL, an ISO instant, an optional etag and (PAR-776) an optional
+ *  SECOND url (`finalUrl`); this is generous headroom over `MAX_META_URL` × 2 + `MAX_META_ETAG`
+ *  plus JSON overhead, not a measured figure — bumped from the original 4096 when `finalUrl`
+ *  was added, since two 2048-character URL fields plus a 512-character etag no longer fit
+ *  inside the old bound even before JSON overhead (round 1 self-review, before this shipped:
+ *  4096 was sized for exactly one `MAX_META_URL`, and adding a second field without revisiting
+ *  it would have made every real redirected entry with a long candidate AND a long final URL
+ *  silently unreadable — the same class of self-inflicted bound this file exists to avoid).
  *  Enforced inside `readMetaFile` itself (D-71 round 2, code-reviewer/security-architect B1/S1)
  *  rather than left to each caller to apply separately — every `.meta.json` reader in the
  *  cache layer gets the bound this way, not just the one (`dropFollowedPageCache`) that used
  *  to apply it by hand against a `Stats` it happened to already have. */
-export const MAX_META_FILE_BYTES = 4096;
+export const MAX_META_FILE_BYTES = 8192;
 /** Deliberately a STRICT SUBSET of RFC 9110 §5.5's field-value grammar (`field-vchar = VCHAR
  *  / obs-text`, `obs-text = %x80-FF`, leading/trailing whitespace excluded) — printable ASCII
  *  only, no HTAB, no high-byte `obs-text`, no leading or trailing space (security-architect,
@@ -131,6 +148,13 @@ export function validEtag(value: string | undefined): value is string {
  *              back as `If-None-Match`), not part of the entry's identity — but a shape check
  *              is not optional here (see `ETAG_SHAPE`'s comment for the stale-forever failure
  *              mode a merely-length-bounded etag still allows).
+ *   finalUrl   (PAR-776) the same shape `url` requires — a parseable URL string, ≤ 2048
+ *              characters — when present. Dropped alone, not the whole record, for the same
+ *              reason `etag` is: it is provenance about where the fetch landed, not part of
+ *              this entry's identity (`url`, the CANDIDATE, is what `readCache`/`touchCache`
+ *              verify against). A wrong or hostile `finalUrl` costs a caller its redirect-aware
+ *              relative-link/host-policy behaviour for this one read, never a wrong document
+ *              served — that guarantee still rests entirely on `url`.
  */
 export function toCacheMeta(raw: unknown): CacheMeta | undefined {
   if (!isRecord(raw)) return undefined;
@@ -140,6 +164,7 @@ export function toCacheMeta(raw: unknown): CacheMeta | undefined {
   }
   const meta: CacheMeta = { url: raw.url, fetchedAt: raw.fetchedAt };
   if (typeof raw.etag === "string" && validEtag(raw.etag)) meta.etag = raw.etag;
+  if (typeof raw.finalUrl === "string" && validMetaUrl(raw.finalUrl)) meta.finalUrl = raw.finalUrl;
   return meta;
 }
 

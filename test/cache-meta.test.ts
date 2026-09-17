@@ -47,6 +47,28 @@ describe("D-71 (PAR-749, Root 1) — libDirName is injective", () => {
   });
 });
 
+describe("PAR-776 (D-1) — toCacheMeta's finalUrl", () => {
+  const url = "https://react.dev/llms.txt";
+  const fetchedAt = "2026-01-01T00:00:00.000Z";
+
+  it("is absent when the raw record never had one", () => {
+    expect(toCacheMeta({ url, fetchedAt })!.finalUrl).toBeUndefined();
+  });
+
+  it("round-trips a valid, parseable finalUrl", () => {
+    const finalUrl = "https://docs.react.dev/llms.txt";
+    expect(toCacheMeta({ url, fetchedAt, finalUrl })!.finalUrl).toBe(finalUrl);
+  });
+
+  it("is dropped alone — not the whole record — when unparseable, oversized, or the wrong type", () => {
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "not a url" })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "https://x.dev/" + "a".repeat(2048) })!.finalUrl).toBeUndefined();
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: 12345 })!.finalUrl).toBeUndefined();
+    // None of these malformed finalUrl values invalidate the record as a whole.
+    expect(toCacheMeta({ url, fetchedAt, finalUrl: "not a url" })!.url).toBe(url);
+  });
+});
+
 describe("D-71 (PAR-749, Root 1) — metaMatchesSlug", () => {
   const url = "https://react.dev/llms.txt";
   const meta = toCacheMeta({ url, fetchedAt: "2026-01-01T00:00:00.000Z" })!;

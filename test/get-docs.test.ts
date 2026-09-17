@@ -975,6 +975,39 @@ describe("getDocs index following", () => {
     expect(await getDocs(withHosts, { topic: "request hostname" })).toContain("redirected body");
   });
 
+  it("PAR-776 (D-1): a primary document that redirects cross-host resolves its OWN relative links against the final host, not the candidate host", async () => {
+    // Nothing seeded — the primary document itself must go over the network so it can
+    // redirect. No allowedHosts entry names docs.fastify.dev: the only way the followed
+    // link can be allowed is the same-origin-as-source rule matching against doc.finalUrl.
+    const spy = vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url === INDEX_URL) {
+        const res = new Response(
+          ["# Fastify", "- [Request](/docs/Request.md)"].join("\n"),
+          { status: 200, headers: { "content-type": "text/plain" } },
+        );
+        Object.defineProperty(res, "url", { value: "https://docs.fastify.dev/llms.txt" });
+        return res;
+      }
+      if (url === "https://docs.fastify.dev/docs/Request.md") {
+        return new Response("# Request\n\n## request.hostname\n\nfinal-host body", {
+          status: 200,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      // The pre-redirect (candidate) host is never requested for the relative link — if it
+      // were, this 404 would surface as "Could not fetch" and the test would catch the bug.
+      return new Response("not found", { status: 404 });
+    });
+    vi.stubGlobal("fetch", spy);
+    const out = await getDocs(entry, { topic: "request hostname" });
+    expect(spy).toHaveBeenCalledWith("https://docs.fastify.dev/docs/Request.md", expect.anything());
+    expect(out).toContain("final-host body");
+    expect(out).toContain("Followed index links: https://docs.fastify.dev/docs/Request.md");
+    // The Source: line names the final URL and states where it redirected from.
+    expect(out).toContain("Source: https://docs.fastify.dev/llms.txt (redirected from https://fastify.dev/llms.txt)");
+  });
+
   it("Q1: a RESOLVED entry with derived allowedHosts: the derived-host link is fetched, off-policy links are skipped, never fetched and never consume the budget", async () => {
     const primary = "https://raw.githubusercontent.com/acme/acme/HEAD/README.md";
     const resolvedEntry = {

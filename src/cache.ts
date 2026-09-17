@@ -278,8 +278,15 @@ export function readCache(
 /** Returns the `fetchedAt` it wrote, or `undefined` on any of the best-effort no-op paths
  *  (A17/PAR-726: callers that need to report exactly when a revalidated document was fetched
  *  read it from here rather than calling `new Date()` a second time, which could disagree
- *  with what actually landed on disk by the width of that second call). */
-export function touchCache(library: string, url: string): string | undefined {
+ *  with what actually landed on disk by the width of that second call).
+ *
+ *  `finalUrl` (PAR-776, D-1): a 304 revalidation still follows redirects to reach the server
+ *  that answered it, and that final URL can change between fetches even though the CONTENT
+ *  (per the etag) has not — a site's redirect target moving is not a content change. Passing
+ *  the newly observed value here keeps a long-lived, repeatedly-revalidated entry's `finalUrl`
+ *  from going stale itself. `undefined` (the caller observed no redirect, or has nothing new
+ *  to report) leaves whatever was already persisted untouched rather than erasing it. */
+export function touchCache(library: string, url: string, finalUrl?: string): string | undefined {
   const dir = libDir(library);
   const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
   if (!existsSync(metaPath)) return undefined;
@@ -292,6 +299,14 @@ export function touchCache(library: string, url: string): string | undefined {
   // name says. Refreshing it anyway would extend the TTL of a mismatched record.
   if (meta.url !== url) return undefined;
   meta.fetchedAt = new Date().toISOString();
+  // Stored only when it actually differs from `url` (matching `writeCache`'s own rule below) —
+  // an entry that has never redirected stays byte-for-byte the same file shape it always was,
+  // and a redirect that stops happening on this revalidation correctly clears the old value
+  // rather than leaving a now-false "redirected from" fact behind.
+  if (finalUrl !== undefined) {
+    if (finalUrl !== url) meta.finalUrl = finalUrl;
+    else delete meta.finalUrl;
+  }
   writeAtomic(metaPath, JSON.stringify(meta, null, 2));
   return meta.fetchedAt;
 }
@@ -310,12 +325,23 @@ export function touchCache(library: string, url: string): string | undefined {
  * reader ever observes a partially written file.
  */
 /** Returns the `fetchedAt` it wrote (A17/PAR-726 — see `touchCache`'s doc comment; the same
- *  reasoning applies here: report the timestamp actually persisted, not a freshly-taken one). */
+ *  reasoning applies here: report the timestamp actually persisted, not a freshly-taken one).
+ *
+ *  `finalUrl` (PAR-776, D-1): the URL the content was ACTUALLY fetched from, when `fetchUrl`
+ *  followed a redirect away from `url` (the candidate this write is keyed by). Persisted only
+ *  when it differs from `url` — the common, non-redirected case writes exactly the same file
+ *  shape it always did — so a later CACHE HIT (no network call at all) can still tell `readCache`
+ *  callers where the document's relative links and host policy should resolve against, not only
+ *  the live fetch that first observed the redirect. No write-side validation beyond that
+ *  comparison: unlike `etag` (an untrusted HTTP response header), `finalUrl` comes from
+ *  `fetchUrl`'s own internal redirect-following, which already held every hop to the same
+ *  host-policy checks `url` itself was subject to before this call was ever made. */
 export function writeCache(
   library: string,
   url: string,
   content: string,
   etag?: string,
+  finalUrl?: string,
 ): string {
   const dir = libDir(library);
   mkdirSync(dir, { recursive: true });
@@ -329,6 +355,7 @@ export function writeCache(
   // silently dropped again on the very next read anyway.
   const meta: CacheMeta = { url, fetchedAt: new Date().toISOString() };
   if (validEtag(etag)) meta.etag = etag;
+  if (finalUrl !== undefined && finalUrl !== url) meta.finalUrl = finalUrl;
   const contentTmp = tempPathFor(contentPath);
   const metaTmp = tempPathFor(metaPath);
   try {

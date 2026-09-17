@@ -560,7 +560,7 @@ describe("A3 (PAR-716) · dropFollowedPageCache", () => {
       writeCache("react", "https://react.dev/streaming.md", "# Streaming");
       const slug = urlSlug("https://react.dev/streaming.md");
       // Oversized but otherwise well-formed JSON, so a failure here can only be the size guard.
-      const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(5000) });
+      const oversized = JSON.stringify({ url: "https://react.dev/streaming.md", fetchedAt: "2026-01-01T00:00:00.000Z", etag: "x".repeat(9000) });
       writeFileSync(join(dir, libDirName("react"), `${slug}.meta.json`), oversized, "utf8");
 
       dropFollowedPageCache("react", ["https://react.dev/llms.txt"]);
@@ -670,6 +670,46 @@ describe("D-71 (PAR-749, Root 1) — readCache/touchCache verify the record's ow
   it("a genuine round trip (writeCache's own meta) still matches, so this check costs the good case nothing", () => {
     writeCache("react", REQUESTED, "# React");
     expect(readCache("react", REQUESTED, 168)?.content).toBe("# React");
+  });
+});
+
+describe("PAR-776 (D-1) — writeCache/touchCache's finalUrl", () => {
+  const CANDIDATE = "https://react.dev/llms.txt";
+  const FINAL = "https://docs.react.dev/llms.txt";
+  const metaPath = () => join(dir, libDirName("react"), `${urlSlug(CANDIDATE)}.meta.json`);
+
+  it("writeCache stores finalUrl only when it actually differs from the candidate url", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  it("writeCache stores no finalUrl at all when it equals the candidate url — same file shape as a plain write", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+    expect(JSON.parse(readFileSync(metaPath(), "utf8"))).not.toHaveProperty("finalUrl");
+  });
+
+  it("writeCache stores no finalUrl when the caller never passed one", () => {
+    writeCache("react", CANDIDATE, "# React");
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("touchCache sets finalUrl on an existing entry that redirects for the first time", () => {
+    writeCache("react", CANDIDATE, "# React");
+    touchCache("react", CANDIDATE, FINAL);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  it("touchCache clears a stale finalUrl once a revalidation stops redirecting", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    touchCache("react", CANDIDATE, CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBeUndefined();
+  });
+
+  it("touchCache leaves finalUrl untouched when called without one (unrelated refresh path)", () => {
+    writeCache("react", CANDIDATE, "# React", undefined, FINAL);
+    touchCache("react", CANDIDATE);
+    expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
   });
 });
 

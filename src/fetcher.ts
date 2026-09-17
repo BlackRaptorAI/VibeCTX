@@ -8,7 +8,24 @@ export { isAllowedLink, type LinkPolicy } from "./link-policy.js";
 
 export interface DocResult {
   content: string;
+  /** The CANDIDATE URL this document was requested under — one of `entry.urls`, or the link
+   *  extracted from an index page. Stays the cache/search-index key throughout (D-1, PAR-776):
+   *  `writeCache`/`readCache` are keyed by this value, and `search-index.ts`'s hash+url gate
+   *  correlates against it, so it must never be silently replaced by `finalUrl` below — doing
+   *  so would make every redirected document's index entry permanently "not this URL" and
+   *  force a full re-tokenization on every search, forever. */
   url: string;
+  /** PAR-776 (D-1) — the URL this content was ACTUALLY served from: `url` above unless a
+   *  redirect moved the fetch elsewhere, in which case this is where it landed. `get-docs.ts`
+   *  uses THIS, not `url`, to resolve the document's own relative links and to decide which
+   *  hosts its followed links may reach — a primary document that redirects cross-host used to
+   *  resolve its relative links against the ORIGINAL host, which is wrong (they were never
+   *  served from there) and could refuse a link that is actually same-origin with the document
+   *  as fetched, or (less likely, but not excluded) allow one that is not. Equal to `url` when
+   *  there was no redirect, including every cache-hit path that never asked the network at all
+   *  and has no live `fetchUrl` result to consult — see `cache-meta.ts`'s `CacheMeta.finalUrl`
+   *  for how this survives past the fetch that first observed it. */
+  finalUrl: string;
   /** A17/PAR-726: when this document's cache meta was last written, ISO — the exact value
    *  persisted by `writeCache`/`touchCache`, not a freshly-taken `new Date()` that could
    *  disagree with it. */
@@ -64,6 +81,13 @@ export interface FetchOutcome {
   status: "ok" | "not-modified" | "miss" | "refused" | "too-large";
   body?: string;
   etag?: string;
+  /** PAR-776 (D-1) — the URL this request actually landed on after following redirects
+   *  (`final` below), present whenever a response was actually obtained (`ok` and
+   *  `not-modified` — a 304 still follows redirects to reach whichever server answered it).
+   *  Equal to the requested `url` when nothing redirected. Absent on `refused`/`too-large`/
+   *  `miss`: no content was ever accepted from those, so there is nothing for a caller to
+   *  attribute to a "final" URL. */
+  finalUrl?: string;
 }
 
 export interface FetchOptions {
@@ -225,7 +249,7 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       debugEvent("fetch.refused", { url, reason: "not-public", to: final, status: res.status, ms: Date.now() - startedAt });
       return { status: "refused" };
     }
-    if (res.status === 304) return { status: "not-modified" };
+    if (res.status === 304) return { status: "not-modified", finalUrl: final };
     if (!res.ok) {
       debugEvent("fetch.miss", { url, reason: "http-status", status: res.status, ms: Date.now() - startedAt });
       return { status: "miss" };
@@ -261,7 +285,7 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       debugEvent("fetch.miss", { url, reason: "empty-body", status: res.status, ms: Date.now() - startedAt });
       return { status: "miss" };
     }
-    return { status: "ok", body, etag: res.headers.get("etag") ?? undefined };
+    return { status: "ok", body, etag: res.headers.get("etag") ?? undefined, finalUrl: final };
   } catch (e) {
     // The one place a 404, a timeout and a DNS failure stop being distinguishable. They stay
     // one `miss` to the caller — the diagnostic line is what tells them apart.
@@ -292,7 +316,10 @@ export async function getLibraryDoc(
   if (!opts.forceRefresh) {
     for (const url of entry.urls) {
       const hit = readCache(entry.name, url, ttl);
-      if (hit && !hit.stale) return { content: hit.content, url, fetchedAt: hit.meta.fetchedAt, stale: false };
+      // PAR-776 (D-1): `hit.meta.finalUrl` is the redirect target this same document last
+      // landed on, PERSISTED from whichever fetch first observed it — a fresh cache hit makes
+      // no network call at all, so this is the only way it can still be reported here.
+      if (hit && !hit.stale) return { content: hit.content, url, finalUrl: hit.meta.finalUrl ?? url, fetchedAt: hit.meta.fetchedAt, stale: false };
     }
   }
 
@@ -313,13 +340,15 @@ export async function getLibraryDoc(
       if (out.status === "not-modified" && cached) {
         // content unchanged upstream: refresh the TTL. touchCache can no-op (a concurrent
         // evict/corruption between the read above and here) — cached.meta.fetchedAt is the
-        // last value this process actually knows to be true in that case.
-        const touchedAt = touchCache(entry.name, url) ?? cached.meta.fetchedAt;
-        return { content: cached.content, url, fetchedAt: touchedAt, stale: false, notModified: true };
+        // last value this process actually knows to be true in that case. `out.finalUrl` is
+        // passed through so a redirect target that changed since the last fetch (or newly
+        // appeared/disappeared) is re-persisted on every revalidation, not just the first fetch.
+        const touchedAt = touchCache(entry.name, url, out.finalUrl) ?? cached.meta.fetchedAt;
+        return { content: cached.content, url, finalUrl: out.finalUrl ?? cached.meta.finalUrl ?? url, fetchedAt: touchedAt, stale: false, notModified: true };
       }
       if (out.status === "ok" && out.body !== undefined) {
-        const fetchedAt = writeCache(entry.name, url, out.body, out.etag);
-        return { content: out.body, url, fetchedAt, stale: false };
+        const fetchedAt = writeCache(entry.name, url, out.body, out.etag, out.finalUrl);
+        return { content: out.body, url, finalUrl: out.finalUrl ?? url, fetchedAt, stale: false };
       }
     }
   }
@@ -331,6 +360,7 @@ export async function getLibraryDoc(
       return {
         content: hit.content,
         url,
+        finalUrl: hit.meta.finalUrl ?? url,
         fetchedAt: hit.meta.fetchedAt,
         stale: true,
         staleNote: opts.offline
@@ -367,7 +397,7 @@ export async function fetchLinkedPage(
 ): Promise<LinkedPageResult> {
   if (!isAllowedLink(url, sourceUrl, policy)) return { status: "refused" };
   const hit = readCache(library, url, ttlHours);
-  if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url, fetchedAt: hit.meta.fetchedAt, stale: false } };
+  if (hit && !hit.stale) return { status: "ok", page: { content: hit.content, url, finalUrl: hit.meta.finalUrl ?? url, fetchedAt: hit.meta.fetchedAt, stale: false } };
   if (offline) {
     if (!hit) return { status: "unavailable" };
     return {
@@ -375,6 +405,7 @@ export async function fetchLinkedPage(
       page: {
         content: hit.content,
         url,
+        finalUrl: hit.meta.finalUrl ?? url,
         fetchedAt: hit.meta.fetchedAt,
         stale: true,
         staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.`,
@@ -390,18 +421,19 @@ export async function fetchLinkedPage(
   if (out.status === "too-large") return { status: "too-large" };
   if (out.status === "not-modified" && hit) {
     // See getLibraryDoc's identical comment: touchCache's no-op fallback is hit.meta.fetchedAt.
-    const touchedAt = touchCache(library, url) ?? hit.meta.fetchedAt;
+    // `out.finalUrl` re-persists a redirect target that may have changed since the last fetch.
+    const touchedAt = touchCache(library, url, out.finalUrl) ?? hit.meta.fetchedAt;
     // PAR-744 (F-7, code-reviewer round 1, S5): no production caller reads `notModified` on a
     // followed page today — `get-docs.ts`'s only consumer of a `LinkedPageResult` reads
     // `.page.content`, never `.page.notModified`. Set anyway for `DocResult` symmetry with
     // `getLibraryDoc`, so a future caller that DOES need "was this followed page actually
     // re-fetched" does not have to add a fifth status variant to get it. Covered by
     // `test/fetcher.test.ts`.
-    return { status: "ok", page: { content: hit.content, url, fetchedAt: touchedAt, stale: false, notModified: true } };
+    return { status: "ok", page: { content: hit.content, url, finalUrl: out.finalUrl ?? hit.meta.finalUrl ?? url, fetchedAt: touchedAt, stale: false, notModified: true } };
   }
   if (out.status === "ok" && out.body !== undefined) {
-    const fetchedAt = writeCache(library, url, out.body, out.etag);
-    return { status: "ok", page: { content: out.body, url, fetchedAt, stale: false } };
+    const fetchedAt = writeCache(library, url, out.body, out.etag, out.finalUrl);
+    return { status: "ok", page: { content: out.body, url, finalUrl: out.finalUrl ?? url, fetchedAt, stale: false } };
   }
   if (hit) {
     return {
@@ -409,6 +441,7 @@ export async function fetchLinkedPage(
       page: {
         content: hit.content,
         url,
+        finalUrl: hit.meta.finalUrl ?? url,
         fetchedAt: hit.meta.fetchedAt,
         stale: true,
         staleNote: `STALE: served from cache fetched ${hit.meta.fetchedAt}.`,
