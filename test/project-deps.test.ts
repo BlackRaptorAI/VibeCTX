@@ -364,6 +364,16 @@ local-lib = { path = "../local-lib", develop = true }
   it("returns an empty map for a file with none of the tables", () => {
     expect(parsePyprojectVersions("[tool.black]\nline-length = 88\n").size).toBe(0);
   });
+
+  it("(security-architect, A11/PAR-724 round 1 S-2 / round 2 T-1) rejects a path-traversal or slash-bearing Poetry version string — this is the manifest path that bypasses the MCP schema entirely, so the shape gate must hold here on its own", () => {
+    const versions = parsePyprojectVersions(`
+[tool.poetry.dependencies]
+evil = "../../../../evil/repo/HEAD"
+alsoevil = "1.2/3"
+backslash = "1.2\\\\3"
+`);
+    expect(versions.size).toBe(0);
+  });
 });
 
 describe("lockfile fallbacks (names only, used when the manifest is absent)", () => {

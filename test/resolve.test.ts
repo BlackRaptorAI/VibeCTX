@@ -414,6 +414,11 @@ describe("resolvePackage (chain: registry metadata → llms probes → README; s
     const none = await resolvePackage("django");
     expect(none.ok).toBe(false);
     expect(none.text).toContain("npm: name is held by npm's security-holder placeholder");
+    // (code-reviewer round 1 nit, closed round 2) — a placeholder is a real, registered npm
+    // record, not a genuine 404: it must NOT contribute to the "does not exist" claim, even
+    // when the OTHER ecosystem also fails outright.
+    expect(none.notFound).toBeUndefined();
+    expect(none.text).not.toContain("does not exist in npm");
   });
 
   it("ecosystem: 'pypi' forces PyPI and skips npm entirely; a later explicit resolution replaces the persisted record", async () => {
@@ -1193,15 +1198,30 @@ describe("resolvePackage — B1 (code-reviewer round 1): a version-pinned resolu
     expect(persisted.urls).not.toContain(versionUrl);
   });
 
-  it("no version, or a version that never matched: persistedEntry is undefined — entry is already what should be installed", async () => {
+  it("no version at all: persistedEntry is undefined — entry is already what should be installed", async () => {
     stubFetch({ [NPM_HONO]: honoNpm, "https://hono.dev/llms-full.txt": "# Hono" });
     const out = await resolvePackage("hono");
     expect(out.ok).toBe(true);
     expect(out.persistedEntry).toBeUndefined();
   });
+
+  it("(code-reviewer round 2 nit) a version was ATTEMPTED but never matched (fell back to unversioned): persistedEntry is still DEFINED and stripped — the failed version-tag candidates must not linger at the front of the installed entry's urls either", async () => {
+    stubFetch({
+      [NPM_HONO]: honoNpm,
+      "https://registry.npmjs.org/hono/9.9.9": honoNpm,
+      // every refs/tags/* candidate deliberately unstubbed: falls back to the unversioned chain
+      "https://hono.dev/llms-full.txt": "# Hono (latest)",
+    });
+    const out = await resolvePackage("hono", { version: "9.9.9" });
+    expect(out.ok).toBe(true);
+    expect(out.versionMatched).toBeUndefined();
+    expect(out.persistedEntry).toBeDefined();
+    expect(out.persistedEntry?.urls.some((u) => u.includes("refs/tags"))).toBe(false);
+    expect(out.entry?.urls.some((u) => u.includes("refs/tags"))).toBe(true); // entry (this call's) still tried them
+  });
 });
 
-describe("cache isolation across pinned versions (D-74; security-architect + code-reviewer round 1, B3)", () => {
+describe("cache isolation across pinned versions (D-76; security-architect + code-reviewer round 1, B3)", () => {
   it("two different pinned versions of the same library land in distinct cache entries; the unversioned fallback is shared, on purpose", async () => {
     const v1Url = "https://raw.githubusercontent.com/honojs/hono/refs/tags/v1.0.0/README.md";
     const v2Url = "https://raw.githubusercontent.com/honojs/hono/refs/tags/v2.0.0/README.md";

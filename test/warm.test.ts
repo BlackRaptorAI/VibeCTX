@@ -798,6 +798,23 @@ describe("A11/PAR-724 — a manifest-pinned exact version threads through to res
     expect(row.note).toBeUndefined();
   });
 
+  it("(security-architect, A11/PAR-724 round 2, T-2) a hostile path-traversal version in a COMMITTED pyproject.toml — the one path that bypasses the MCP schema entirely — never produces a refs/tags fetch; warm proceeds as if unpinned", async () => {
+    writeFileSync(
+      join(project, "pyproject.toml"),
+      '[tool.poetry.dependencies]\nelysia = "../../../../evil/repo/HEAD"\n',
+      "utf8",
+    );
+    const spy = stubFetch({
+      "https://pypi.org/pypi/elysia/json": { info: { project_urls: { Source: "https://github.com/elysiajs/elysia" } } },
+      "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md": "# Elysia",
+    });
+    const report = await runWarm(registry(), { dir: project });
+    const row = byName(report).elysia;
+    expect(row).toMatchObject({ status: "resolved+cached", url: "https://raw.githubusercontent.com/elysiajs/elysia/HEAD/README.md" });
+    const urls = spy.mock.calls.map((c) => String(c[0]));
+    expect(urls.some((u) => u.includes("refs/tags") || u.includes("/evil/repo/"))).toBe(false);
+  });
+
   it("a range (^1.2.3) is never treated as a pin — resolvePackage gets no version, identical to before A11", async () => {
     writePackageJson({ elysia: "^1.2.3" });
     stubFetch({

@@ -414,8 +414,10 @@ const MAX_NOTE_LIBRARY_CHARS = 300;
  *  ambiguous between "I looked and it isn't here" and "I didn't really look," and a quiet gap
  *  is what invites an agent to invent an answer instead (the problem this item exists to
  *  close). Deliberately does NOT say "this package does not exist" or anything that could be
- *  read that way — that is A16's (not-yet-built) claim, a different fact from "this document
- *  does not cover the topic," and the two must stay visibly distinct once A16 lands. */
+ *  read that way — that is A16's claim (`resolve.ts`'s `couldNotResolveMessage`, "does not
+ *  exist in npm or PyPI"), a different fact from "this document does not cover the topic," and
+ *  the two stay visibly distinct: a name that resolved successfully enough to reach this note
+ *  is, by construction, one A16 has already confirmed exists. */
 export function noMatchNote(what: string, topic: string, library: string): string {
   return `No ${what} in ${clipText(library, MAX_NOTE_LIBRARY_CHARS)} docs match "${clipText(topic, MAX_NOTE_TOPIC_CHARS)}".`;
 }

@@ -25,7 +25,7 @@ export {
 } from "./limits.js";
 import { fetchUrl, getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
-import { npmNameError, normalisePyPiName, pypiNameError, VERSION_SHAPE, MAX_VERSION_LENGTH } from "./package-names.js";
+import { npmNameError, normalisePyPiName, pypiNameError, versionShapeError, MAX_VERSION_LENGTH } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { classifySourceKind, type SourceKind } from "./source-kind.js";
@@ -48,16 +48,21 @@ import { clipText } from "./text.js";
  *      `<origin>/llms-full.txt`, `<origin>/llms.txt` on the docs URL (if any), then
  *      on the homepage; deduplicated; at most MAX_LLMS_CANDIDATES.
  *   4. GitHub README: `raw.githubusercontent.com/<o>/<r>/HEAD/<README variant>` — HEAD is
- *      the default branch, so no main/master guess; see README_VARIANTS.
+ *      the default branch, so no main/master guess; see README_VARIANTS. With a pinned
+ *      version (A11/PAR-724), `refs/tags/v<version>/<variant>` and `refs/tags/<version>/
+ *      <variant>` are tried FIRST, ahead of step 3, for the preferred ecosystem only.
  *   5. nothing usable → one plain line saying what was tried and how to pin it in config.
  *
- * Fetch bound per name (src/limits.ts): MAX_METADATA_FETCHES (2) + the preferred
- * ecosystem's candidates (≤ 8 llms + 4 README = 12) + — only if none of those served —
- * the other found ecosystem's (≤ 12): MAX_FETCHES_PER_RESOLUTION = 26 (R2). In
- * practice the second list is 4 (an ecosystem held back as README-only has no llms
- * candidates), so the reachable maximum is 18. Candidates are probed by getLibraryDoc,
- * which stops at the first usable document and caches it under the entry name, so
- * get_docs serves it immediately afterwards. A process may start at most
+ * Fetch bound per name (src/limits.ts): MAX_METADATA_FETCHES (2) + one version metadata
+ * fetch when a version is pinned (MAX_VERSION_METADATA_FETCHES, 1) + the preferred
+ * ecosystem's candidates (≤ 8 versioned README + 8 llms + 4 README = 20 with a version, 12
+ * without) + — only if none of those served — the other found ecosystem's (≤ 4, README-only
+ * by construction: only the docs-site ecosystem is ever `order[0]`, so a second ecosystem in
+ * `order` never has llms candidates): MAX_FETCHES_PER_RESOLUTION = 43 with a version, 26
+ * without (R2). The version-tag candidates are never offered to a fallback ecosystem, so the
+ * reachable maximum is 27 with a version pinned, 18 without. Candidates are probed by
+ * getLibraryDoc, which stops at the first usable document and caches it under the entry
+ * name, so get_docs serves it immediately afterwards. A process may start at most
  * MAX_RESOLUTIONS_PER_HOUR resolutions (L2).
  *
  * Everything a registry returns is attacker-influenced (anyone can publish a package):
@@ -173,10 +178,11 @@ const LABEL: Record<Ecosystem, string> = { npm: "npm", pypi: "PyPI" };
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 const REPO_SEGMENT = /^[A-Za-z0-9_.-]+$/;
 
-// A11/PAR-724 (security-architect finding S-1/S-2) — `VERSION_SHAPE`/`MAX_VERSION_LENGTH` are
-// imported from `./package-names.js`, the one place a version/ref shape is defined (D-48: a
-// shared fact belongs in exactly one place, never a local variant per module). See that
-// module's own comment for the full rationale.
+// A11/PAR-724 (security-architect finding S-1/S-2) — `versionShapeError`/`MAX_VERSION_LENGTH`
+// are imported from `./package-names.js`, the one place a version/ref shape is defined (D-48: a
+// shared fact belongs in exactly one place, never a local variant per module, and the reporter
+// is the gate — round 2's N-1 finding — not a second string a caller could drift from). See
+// that module's own comment for the full rationale.
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -463,7 +469,15 @@ function formatResolved(out: ResolveOutcome): string {
     ? `  NOT saved: ${out.saveNote ?? "resolved.json could not be written"} — this resolution lives in memory until restart; get_docs("${out.entry?.name}") works now.`
     : `  saved to ${resolvedStorePath()} — get_docs("${out.entry?.name}") works now; pin or override it in vibectx.config.json.`;
   // A11/PAR-724 — non-silent per D-50: whenever a version was requested, say plainly whether
-  // it was matched or the resolution fell back to the latest available document.
+  // it was matched or the resolution fell back to the latest available document. Not reachable
+  // from any current production caller (code-reviewer round 2, should-fix #6): neither
+  // `resolve_library` (`resolveToolText`) nor `vibectx resolve` accepts a `version` argument
+  // today (a deliberate A11 scope decision — see the PR record — not an oversight), and the
+  // two `resolvePackage` callers that DO pass one (`get-docs.ts`, `warm.ts`) never render
+  // `out.text` on a success path. Kept, not removed: `resolvePackage`'s own contract is
+  // version-aware regardless of which caller exercises it, `formatResolved` is its one
+  // rendering of that contract, and this line is real, tested behaviour for any direct caller
+  // (including a future `resolve_library`/`--version` addition) — not a placeholder.
   const version = out.requestedVersion
     ? [`  version:    ${out.requestedVersion} (${out.versionMatched ? "matched" : "no versioned document found; showing latest"})`]
     : [];
@@ -535,13 +549,11 @@ export async function resolvePackage(
   // URL from or fetch with; `safeRequestedVersion` is the ONE value it is allowed to render —
   // both are computed here, once, rather than trusting every downstream site to remember to
   // gate or clip `opts.version` itself.
-  const versionShapeOk = opts.version === undefined || VERSION_SHAPE.test(opts.version);
-  const version = versionShapeOk ? opts.version : undefined;
+  const versionError = opts.version !== undefined ? versionShapeError(opts.version) : undefined;
+  const version = versionError === undefined ? opts.version : undefined;
   const safeRequestedVersion = opts.version !== undefined ? clipText(opts.version, MAX_VERSION_LENGTH) : undefined;
-  if (opts.version !== undefined && !versionShapeOk) {
-    attempts.push(
-      `version "${safeRequestedVersion}" is not a valid version/ref (letters, digits, "." "+" "_" "-" only, up to ${MAX_VERSION_LENGTH} characters); ignored`,
-    );
+  if (versionError !== undefined) {
+    attempts.push(`version "${safeRequestedVersion}" is ${versionError}; ignored`);
   }
   // A16/PAR-725 — `existence` names which of the two distinct wordings applies; undefined makes
   // no claim either way (see `couldNotResolveMessage`'s own comment for the three cases). When

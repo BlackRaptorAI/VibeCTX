@@ -631,8 +631,11 @@ stops as soon as one document is usable (in practice the worst case is 18, since
 ecosystem held back as README-only has no llms.txt probes). A version-pinned resolution
 adds one more metadata fetch and up to 8 more README probes (2 tag spellings × 4
 filenames) for the preferred ecosystem only — the version-tag candidates are never tried
-against a fallback ecosystem — raising the ceiling to **43 requests** and the reachable
-worst case to 35 (2 + 1 + 20 + 12). Metadata responses over 8 MiB are treated as absent;
+against a fallback ecosystem — raising the ceiling to **43 requests**. The preferred
+ecosystem is always the one WITH a docs site when either has one (up to 20: 8 versioned +
+8 llms.txt + 4 README), and a fallback ecosystem, when there is one, is by construction
+always README-only (≤ 4) — so the reachable worst case is 27 (2 + 1 + 20 + 4), not the
+full 43. Metadata responses over 8 MiB are treated as absent;
 documents keep the normal 25 MiB cap. A process starts at most **100 resolutions per
 hour**; beyond that, unknown names get a "resolution limit reached" line until the window
 slides (pin the library in config if you hit it).
@@ -707,7 +710,7 @@ into fetches. Every URL is checked by name (https only; no IP literals, `localho
 `.local`, `.internal`, single-label or trailing-dot hosts; GitHub repositories only via
 `raw.githubusercontent.com`; redirects checked hop by hop), and per-name and per-hour
 bounds cap the volume (up to 26 requests per unknown name, 43 when a version is pinned,
-100 resolutions per hour per process, so *N* unknown names can mean up to 26·*N* requests
+100 resolutions per hour per process, so *N* unknown names can mean up to 43·*N* requests
 to the registries, docs hosts and GitHub). Name-based checks cannot see through DNS: a hostname such as
 `127.0.0.1.nip.io` resolves to a loopback address and the connection will be attempted;
 TLS certificate-name verification then prevents a body from being read from a host that

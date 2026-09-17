@@ -1385,7 +1385,7 @@ describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was sear
     expect(noMatchNote("code snippets", "streaming", "fastify")).toBe('No code snippets in fastify docs match "streaming".');
   });
 
-  it("never phrases this as the package not existing -- A16 (not yet built) owns that different claim", () => {
+  it("never phrases this as the package not existing -- A16's couldNotResolveMessage owns that different claim", () => {
     const line = noMatchNote("sections", "streaming", "fastify");
     expect(line).not.toMatch(/exist|unknown package|unknown library/i);
   });

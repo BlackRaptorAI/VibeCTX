@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, chmodSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
+import { resolvePackage, resetResolutionWindow, MAX_RESOLUTIONS_PER_HOUR } from "../src/resolve.js";
 import { writeCache, urlSlug, libDirName } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
@@ -16,6 +17,7 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "docs-cache-getdocs-"));
   process.env.VIBECTX_CACHE_DIR = dir;
+  resetResolutionWindow();
 });
 
 afterEach(() => {
@@ -1610,6 +1612,49 @@ describe("getDocsToolText — version matching (A11/PAR-724)", () => {
     expect(out.split("\n").some((line) => line.startsWith("Source:"))).toBe(false);
     expect(out.split("\n").some((line) => line.startsWith("#"))).toBe(false);
     expect(spy.mock.calls.map((c) => String(c[0]))).not.toContain("https://registry.npmjs.org/elysia/" + encodeURIComponent(hostile));
+  });
+
+  it("(code-reviewer, A11/PAR-724 round 2, should-fix #1) B2: a re-resolution that fails outright (network down) never claims a version was checked — distinct, honest wording, not the ordinary fallback note", async () => {
+    const reg: Registry = {
+      entries: new Map([
+        ["elysia", { name: "elysia", urls: ["https://elysiajs.com/llms.txt"], resolved: { source: "npm", resolvedAt: "2026-09-01T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest", homepage: "https://elysiajs.com" } }],
+      ]),
+    };
+    writeCache("elysia", "https://elysiajs.com/llms.txt", "# Elysia (cached)\n\n## Middleware\n\nUse .onBeforeHandle().");
+    stubFetch({}); // the re-resolution's own /latest metadata fetch 404s: nothing was checked
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "2.0.0" });
+    expect(out).toContain("Could not check version 2.0.0 — the check failed; showing the previously cached document instead.");
+    expect(out).not.toContain("No document found for version"); // the DIFFERENT, "genuinely checked" wording
+    expect(out).toContain("Source: https://elysiajs.com/llms.txt"); // the cached document is still served
+    expect(out).toContain("Use .onBeforeHandle()");
+  });
+
+  it("(code-reviewer, A11/PAR-724 round 2, should-fix #1) B2: a re-resolution refused by the per-hour resolution cap gets its own honest wording too", async () => {
+    // Exhaust the process-wide resolution window with cheap, fast-failing calls (invalid-shaped
+    // names never even reach it, so these must be validly-shaped names that simply 404).
+    stubFetch({});
+    for (let i = 0; i < MAX_RESOLUTIONS_PER_HOUR; i++) await resolvePackage(`filler-pkg-${i}`);
+    const reg: Registry = {
+      entries: new Map([
+        ["elysia", { name: "elysia", urls: ["https://elysiajs.com/llms.txt"], resolved: { source: "npm", resolvedAt: "2026-09-01T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest", homepage: "https://elysiajs.com" } }],
+      ]),
+    };
+    writeCache("elysia", "https://elysiajs.com/llms.txt", "# Elysia (cached)\n\n## Middleware\n\nUse .onBeforeHandle().");
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "2.0.0" });
+    expect(out).toContain("Could not check version 2.0.0 — the resolution limit was reached; showing the previously cached document instead.");
+  });
+
+  it("(code-reviewer, A11/PAR-724 round 1, #4) offline + a version on an already-resolved entry: never touches the network, and says why", async () => {
+    const reg: Registry = {
+      entries: new Map([
+        ["elysia", { name: "elysia", urls: ["https://elysiajs.com/llms.txt"], resolved: { source: "npm", resolvedAt: "2026-09-01T00:00:00.000Z", metadataUrl: "https://registry.npmjs.org/elysia/latest", homepage: "https://elysiajs.com" } }],
+      ]),
+    };
+    writeCache("elysia", "https://elysiajs.com/llms.txt", "# Elysia (cached)\n\n## Middleware\n\nUse .onBeforeHandle().");
+    const spy = stubFetch({});
+    const out = await getDocsToolText(reg, { library: "elysia", topic: "middleware", version: "2.0.0", offline: true });
+    expect(out).toContain("Version 2.0.0 was requested, but this call is offline — version-matching needs the network. Showing the cached document instead.");
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
