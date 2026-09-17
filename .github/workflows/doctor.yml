@@ -1,6 +1,6 @@
 # doctor — weekly retrieval-coverage check (PAR-707)
 #
-# Action versions mirror .github/workflows/ci.yml, pinned to commit SHAs (PAR-779, D-4) rather
+# Action versions mirror .github/workflows/ci.yml, pinned to commit SHAs (PAR-779) rather
 # than the mutable major-version tags they were on before.
 #
 # WHAT IT DOES
