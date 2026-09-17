@@ -1,10 +1,11 @@
 import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import { getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { resolvePackage } from "./resolve.js";
-import { invalidateIndex, openIndexSession } from "./search-index.js";
+import { invalidateIndex, openIndexSession, documentHash } from "./search-index.js";
 import { dropFollowedPageCache } from "./cache.js";
 import { MAX_FULL_REFRESHES_PER_HOUR } from "./limits.js";
 import { createSlidingWindowLimiter } from "./rate-limit.js";
+import { recordActivity } from "./activity-log.js";
 
 // A3 (PAR-716): the no-argument ("full") form iterates the whole registry — up to thirty
 // upstream fetches per call — and is model-callable with no cap before this. Single-library
@@ -22,21 +23,37 @@ export function resetFullRefreshWindow(): void {
  *  nothing (refresh never resolves new names — get_docs and resolve_library do that).
  *  A resolved entry (PAR-655) is re-resolved through its ecosystem, so a project that
  *  has since published llms.txt or moved its homepage is picked up; on failure the
- *  old entry stays. */
+ *  old entry stays.
+ *
+ *  A20/PAR-729 (D-51): one activity-log entry per CALL — not per target — matching the
+ *  Done-when's own wording. A single-library refresh's entry carries that library's own
+ *  `url`/`contentHash` and `fresh` (code-reviewer round 1, B1: NOT unconditionally true —
+ *  `forceRefresh: true` can still fall back to a stale cached copy when the network is down,
+ *  so `fresh` reflects `single.stale`, tracked per branch below); a full (no-argument)
+ *  refresh's entry carries neither `library` nor `url` — no ONE document is "the" one a
+ *  caller can cite, the same reasoning `search`'s multi-library case applies (see
+ *  search.ts's `runSearch`). `outcome` is `matched` when at least one target actually
+ *  refreshed, `not-cached` otherwise (including the rate-limited and unresolved-name cases). */
 export async function refreshToolText(registry: Registry, library?: string, opts: { now?: () => Date } = {}): Promise<string> {
   let targets: LibraryEntry[];
   if (library !== undefined) {
     const entry = resolveLibrary(registry, library);
-    if (!entry) return unknownLibraryMessage(registry, library);
+    if (!entry) {
+      recordActivity({ tool: "refresh", library, outcome: "unresolved" });
+      return unknownLibraryMessage(registry, library);
+    }
     targets = [entry];
   } else {
     const now = opts.now ?? (() => new Date());
     if (!fullRefreshLimiter.take(now().getTime())) {
+      recordActivity({ tool: "refresh", outcome: "not-cached" });
       return `refresh limit reached (${MAX_FULL_REFRESHES_PER_HOUR} full refreshes per hour per process); try again later, or refresh one library at a time`;
     }
     targets = [...registry.entries.values()];
   }
   const results: string[] = [];
+  let succeeded = 0;
+  let single: { url?: string; contentHash?: string; stale?: boolean } | undefined;
   // R2 (A3, PAR-716): ONE session for the whole loop, not one read-then-write per library —
   // the same fix `warm` and `autowarm` already have (`IndexSession`'s own doc comment in
   // search-index.ts). Scoped to the direct-fetch path below; a RESOLVED entry's indexing is
@@ -81,6 +98,11 @@ export async function refreshToolText(registry: Registry, library?: string, opts
           // signal at all, so a re-resolution that only reached a 304 or a stale-cache
           // fallback still dropped followed pages here.
           if (out.chosen && !out.unchanged) dropFollowedPageCache(entry.name, [out.chosen, ...out.entry.urls]);
+          // A20/PAR-729: "matched" either way — a 304-confirmed document is as current as a
+          // freshly fetched one, and the activity log records what is now known-current, not
+          // whether bytes moved on the wire.
+          succeeded += 1;
+          single = { url: out.chosen, contentHash: out.contentHash, stale: out.stale };
           results.push(
             `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${out.chosen} (${(out.chars ?? 0).toLocaleString()} chars)`,
           );
@@ -110,6 +132,10 @@ export async function refreshToolText(registry: Registry, library?: string, opts
         // previously served flagged `STALE:` during an upstream outage now reports "Could not
         // fetch N index links" instead, once its cache is gone).
         if (!isDocUnchanged(doc)) dropFollowedPageCache(entry.name, [doc.url, ...entry.urls]);
+        // A20/PAR-729: "matched" either way — see the same note on the resolved-entry branch
+        // above.
+        succeeded += 1;
+        single = { url: doc.url, contentHash: documentHash(doc.content), stale: doc.staleNote !== undefined };
       }
       results.push(
         doc
@@ -132,5 +158,16 @@ export async function refreshToolText(registry: Registry, library?: string, opts
     // ordinary path.
     session.flush();
   }
+  recordActivity({
+    tool: "refresh",
+    library: library !== undefined ? targets[0].name : undefined,
+    url: library !== undefined ? single?.url : undefined,
+    contentHash: library !== undefined ? single?.contentHash : undefined,
+    // code-reviewer, A20/PAR-729 round 1, B1: NOT unconditionally true on success —
+    // `forceRefresh: true` can still fall back to a stale cached copy when the network is
+    // down (both branches above track it in `single.stale`, from `out.stale` / `doc.staleNote`).
+    fresh: library !== undefined && single ? !single.stale : undefined,
+    outcome: succeeded > 0 ? "matched" : "not-cached",
+  });
   return results.join("\n");
 }
