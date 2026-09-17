@@ -303,9 +303,14 @@ export function formatDoctorTable(report: DoctorReport): string {
   // this run actually evicted something, so a healthy cache says nothing about it.
   const eviction = lastEvictionSummary();
   if (eviction !== undefined && eviction.evicted.length > 0) {
+    // D-71 (PAR-749, code-reviewer round 2, S1) — `e.library` is `libDirName`'s on-disk
+    // directory name, hash-suffixed since D-71 for collision resistance; the suffix is load-
+    // bearing on disk and meaningless to a person reading this table, so it is stripped here,
+    // display-only. Cosmetic: `e.document` (a URL slug) keeps its own suffix — it was already
+    // an opaque folded URL before D-71, not a name a user would recognize either way.
     const named = eviction.evicted
       .slice(0, 5)
-      .map((e) => `${e.library}/${e.document}`)
+      .map((e) => `${e.library.replace(/_[0-9a-f]{12}$/, "")}/${e.document}`)
       .join(", ");
     lines.push(
       `cache: evicted ${eviction.evicted.length} least-recently-fetched document(s), ` +

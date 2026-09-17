@@ -24,7 +24,7 @@ import {
 import { writeFileSync, readFileSync } from "node:fs";
 import { RESOLVED_SCHEMA_VERSION, readResolvedEntries } from "../src/resolved-store.js";
 import { readIndex, resetSearchIndexMemo } from "../src/search-index.js";
-import { readCache } from "../src/cache.js";
+import { readCache, libDirName } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 
 let dir: string;
@@ -797,14 +797,14 @@ describe("A5 (PAR-718) — resolvePackage never throws, against a real read-only
    *  left behind would make that cleanup itself throw and cascade into every later test. */
   function restoreWritable(): void {
     chmodSync(dir, 0o700);
-    const libDir = join(dir, "hono");
+    const libDir = join(dir, libDirName("hono"));
     if (existsSync(libDir)) chmodSync(libDir, 0o700);
   }
 
   it("saveResolvedEntry throws (root read-only, this library's directory pre-existing): caught, ok:true, saved:false, saveNote carries the real EACCES, the document is still usable", async () => {
     resetSearchIndexMemo();
-    mkdirSync(join(dir, "hono"), { recursive: true });
-    chmodSync(join(dir, "hono"), 0o700);
+    mkdirSync(join(dir, libDirName("hono")), { recursive: true });
+    chmodSync(join(dir, libDirName("hono")), 0o700);
     chmodSync(dir, 0o500);
     try {
       const warns: string[] = [];

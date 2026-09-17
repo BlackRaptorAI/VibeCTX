@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, chmodSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getDocs, getDocsDetailed, getDocsToolText } from "../src/get-docs.js";
-import { writeCache } from "../src/cache.js";
+import { writeCache, urlSlug, libDirName } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { MAX_FOLLOWED_BYTES } from "../src/retrieval.js";
 import { LINKED_PAGE_MAX_BYTES } from "../src/fetcher.js";
@@ -485,26 +485,16 @@ describe("getDocs index following", () => {
      * 1000 that either constant produces a truncated, D-url-missing result).
      */
     it("the note block itself is capped, not exempt, for a document whose LINK URLS are far longer than the fixture above", async () => {
-      // The distinguishing letter sits at the START of the path, not the end: `urlSlug`
-      // (src/cache.ts, `url.replace(/[^a-z0-9]/gi,"_").slice(0,120)`, no hash) truncates at
-      // 120 characters with no collision check, and `readCache` never compares the requested
-      // URL against the `url` field the meta file itself carries — so four URLs sharing a
-      // 600-character COMMON PREFIX before a distinguishing suffix would all truncate to the
-      // SAME slug and alias to the SAME cache file. This is a genuine, pre-existing PRODUCT
-      // defect in src/cache.ts (round 2, code-reviewer: correcting round 1's own
-      // characterization here, which called it "a test-construction hazard" — it is that too,
-      // for THIS test, but the underlying defect lives in product code, not test scaffolding),
-      // low practical reachability (real documentation URLs rarely share a 120-character
-      // prefix), out of A6's scope (A6's own product files never call `urlSlug` DIRECTLY —
-      // `get-docs.ts` still reaches it transitively through `getLibraryDoc` -> `readCache` /
-      // `writeCache`, round 4, code-reviewer N4), and already flagged once before: independently
-      // by security-architect during A3's review. It has NOT been assigned a PAR number or
-      // filed anywhere durable (round 4, code-reviewer N5 — a grep of `.vibectx-plan/` finds no
-      // record of it) — this comment and the A3 handoff report to Tom are, as of A6, the only
-      // record. Not filing one here either: per the go-card, PAR numbers are oversight's to
-      // assign, not a producer's to invent. Worked around here by putting the distinguishing
-      // letter early, so this test's own three later "fetches" don't silently short-circuit on
-      // a cache hit from the first one instead of exercising distinct code paths.
+      // FIXED by D-71 (PAR-749): four URLs sharing a 600-character common prefix used to
+      // truncate to the SAME `urlSlug` (120 characters, no hash) and alias to the SAME cache
+      // file — a genuine product defect, flagged independently during A3's review and again
+      // here at A6, never filed with its own PAR number. `urlSlug` now appends a short hash of
+      // the FULL url to the folded, truncated form, so distinct URLs never alias regardless of
+      // a shared prefix, and `readCache` additionally compares the requested URL against the
+      // `url` field the meta file itself carries. The distinguishing letter is kept at the
+      // START of each path below anyway — harmless, and it still documents intent: this test's
+      // three later "fetches" must exercise distinct code paths, not a cache hit from the
+      // first one.
       const longPath = "a".repeat(600);
       const urlA = `/docs/A-${longPath}.md`;
       const urlB = `https://mirror.example.net/B-${longPath}.md`;
@@ -1056,7 +1046,7 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
 
   it("A4: a corrupt .meta.json on the requested entry no longer crashes get_docs — it falls through to a fresh fetch instead", async () => {
     writeCache("react", REACT_URL, "# React old\n\n## useEffect cleanup\n\nStale text.");
-    const metaPath = join(dir, "react", `${REACT_URL.replace(/[^a-z0-9]/gi, "_")}.meta.json`);
+    const metaPath = join(dir, libDirName("react"), `${urlSlug(REACT_URL)}.meta.json`);
     writeFileSync(metaPath, "{ not json", "utf8");
     stubFetch({ [REACT_URL]: "# React\n\n## useEffect cleanup\n\nReturn a function from useEffect to run cleanup." });
     const out = await getDocsToolText(registry, { library: "reactjs", topic: "useEffect cleanup" });
@@ -1088,8 +1078,8 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
   });
 
   it("A5 (PAR-718): with the cache directory read-only, get_docs on an unknown package still returns the resolved document, plus a 'resolution not saved: <reason>' note — real directory, real EACCES, not a mocked failure", async () => {
-    mkdirSync(join(dir, "elysia"), { recursive: true });
-    chmodSync(join(dir, "elysia"), 0o700);
+    mkdirSync(join(dir, libDirName("elysia")), { recursive: true });
+    chmodSync(join(dir, libDirName("elysia")), 0o700);
     chmodSync(dir, 0o500);
     try {
       stubFetch({
@@ -1117,7 +1107,7 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
       expect(reg.entries.get("elysia")?.resolved?.source).toBe("npm");
     } finally {
       chmodSync(dir, 0o700);
-      if (existsSync(join(dir, "elysia"))) chmodSync(join(dir, "elysia"), 0o700);
+      if (existsSync(join(dir, libDirName("elysia")))) chmodSync(join(dir, libDirName("elysia")), 0o700);
     }
   });
 

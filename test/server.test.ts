@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { writeCache } from "../src/cache.js";
+import { writeCache, libDirName } from "../src/cache.js";
 import type { Registry } from "../src/registry.js";
 import { autowarmStatus, resetAutowarm } from "../src/autowarm.js";
 import { buildServer, startServer } from "../src/server.js";
@@ -253,7 +253,7 @@ describe("startServer + autowarm over an in-memory transport", () => {
   it("S-C: startServer sweeps orphan temp files out of the cache directories before anything else writes", async () => {
     writeCache("react", REACT_URL, "# React fresh");
     mkdirSync(join(dir, "projects"), { recursive: true });
-    const orphans = [join(dir, "resolved.json.4242.1757000000000.tmp"), join(dir, "projects", "abc.json.4242.1757000000000.tmp"), join(dir, "react", "page.md.4242.1757000000000.tmp")];
+    const orphans = [join(dir, "resolved.json.4242.1757000000000.tmp"), join(dir, "projects", "abc.json.4242.1757000000000.tmp"), join(dir, libDirName("react"), "page.md.4242.1757000000000.tmp")];
     for (const o of orphans) writeFileSync(o, "half a file", "utf8");
     writeFileSync(join(dir, "keep.tmp"), "not ours", "utf8");
     heldFetch();
