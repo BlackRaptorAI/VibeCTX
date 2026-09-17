@@ -432,3 +432,26 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
   **Limit, stated plainly.** Reading a grant proves what a seat *can* run. It does not prove the
   seat *will* run it, nor that the step is the right one. | A8 / PAR-721 · PAR-750
+
+---
+
+## D-70 — decided 2026-09-17 by Tom
+
+- **D-70** 2026-09-17 — **Lean process for the rest of 0.2.0.** Each Linear issue is built in
+  one Claude Code session on Tom's Mac: branch off `main`, tests first, lint + tests green, one
+  `code-reviewer` pass on the diff (plus one `security-architect` pass when the change touches
+  URL/host policy, fetching, redirects, config URL handling, the on-disk cache or search index,
+  or any file delete/rename), then a PR whose description carries the done-when status and the
+  review findings. Tom squash-merges. `main` is protected on GitHub (PR required, `test` check
+  required, branch up to date, no bypass); that protection plus the deny rules in
+  `.claude/settings.json` replace the no-push rule and the bundle handoff. One Change Record per
+  release, signed by Tom. Full 0.2.0 scope is unchanged.
+  **Supersedes:** D-01; D-52 (verdict-enforcement clause only — the packs are still consumed as
+  plugins); D-53; D-54; D-57 (test-count clause only — CI is now the record); D-66; D-67; D-68;
+  D-69. **Amends D-64:** `CLAUDE.md` and `.claude/settings.json` are now tracked.
+  **Unchanged:** D-02, D-58, D-59, D-65.
+  **Retired for this repo:** the oversight seat, phase gates, go blocks, handoff bundles,
+  per-item Change Records, verdict blocks and the verdict Stop hook, test-count baselines, and
+  MEASURED annotations. The old process documents are in `.vibectx-plan/archive/`.
+
+---
