@@ -1132,9 +1132,9 @@ it is where design questions are already answered:
   `D-nn` cited in a code comment or issue resolves here.
 - **[`.vibectx-plan/change-records/`](.vibectx-plan/change-records/)** — Change Records with their
   gate verdicts.
-- **[`.vibectx-plan/VibeCTX-audit-2026-09-08.md`](.vibectx-plan/VibeCTX-audit-2026-09-08.md)** —
+- **[`.vibectx-plan/archive/VibeCTX-audit-2026-09-08.md`](.vibectx-plan/archive/VibeCTX-audit-2026-09-08.md)** —
   the audit the current release remediates, with file:line evidence.
-- **[`.vibectx-plan/README.md`](.vibectx-plan/README.md)** — the index, including which documents
+- **[`.vibectx-plan/archive/README.md`](.vibectx-plan/archive/README.md)** — the index, including which documents
   are retired and what replaced them.
 
 Some documents there carry retirement banners. They are kept so past reasoning stays readable;
