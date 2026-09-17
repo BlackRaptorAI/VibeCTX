@@ -97,7 +97,8 @@ describe("fetchUrl diagnostics: a 404, a timeout and a DNS failure are three dif
   it("a 404 logs reason=http-status with the status, and still returns miss", async () => {
     process.env.VIBECTX_DEBUG = "1";
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
-    expect(await fetchOnce()).toEqual({ status: "miss" });
+    // A16/PAR-725: httpStatus is now carried on the outcome too, not just the debug line.
+    expect(await fetchOnce()).toEqual({ status: "miss", httpStatus: 404 });
     expect(loggedReason()).toBe("http-status");
     expect(lines.join("")).toContain("status=404");
   });
@@ -138,7 +139,7 @@ describe("fetchUrl diagnostics: a 404, a timeout and a DNS failure are three dif
   it("logs nothing at all when VIBECTX_DEBUG is not set, and the outcome is identical", async () => {
     delete process.env.VIBECTX_DEBUG;
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
-    expect(await fetchOnce()).toEqual({ status: "miss" });
+    expect(await fetchOnce()).toEqual({ status: "miss", httpStatus: 404 });
     expect(lines).toEqual([]);
   });
 
@@ -357,6 +358,6 @@ describe("a diagnostic can never change what a caller sees", () => {
       throw new Error("EPIPE: broken pipe");
     });
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
-    await expect(fetchOnce()).resolves.toEqual({ status: "miss" });
+    await expect(fetchOnce()).resolves.toEqual({ status: "miss", httpStatus: 404 });
   });
 });

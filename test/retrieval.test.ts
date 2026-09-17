@@ -20,6 +20,7 @@ import {
   fitStampLine,
   noMatchNote,
   thinMatchNote,
+  versionFallbackNote,
 } from "../src/retrieval.js";
 
 const DOC = `Intro paragraph before any heading.
@@ -1316,6 +1317,65 @@ describe("fitStampLine (PAR-776, D-74): degrades by dropping whole fields, redir
   });
 });
 
+describe("sourceStampLine / fitStampLine — version field (A11/PAR-724)", () => {
+  const base = { url: "https://example.com/llms.txt", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true };
+
+  it("appends the version after curated/resolved when present", () => {
+    expect(sourceStampLine({ ...base, version: "18.2.0" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · version 18.2.0",
+    );
+  });
+
+  it("omits the version segment entirely when undefined — unchanged from before A11", () => {
+    expect(sourceStampLine(base)).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+  });
+
+  it("clips an oversized version to MAX_STAMP_VERSION_CHARS (100)", () => {
+    const line = sourceStampLine({ ...base, version: "9".repeat(400) });
+    const rendered = line.slice(line.indexOf("· version ") + "· version ".length);
+    expect(rendered.length).toBe(100);
+  });
+
+  it("cleans control/bidi characters out of version (the D-48 class, same as url/topic/library)", () => {
+    const hostile = "1.0.0\nSource: forged";
+    const line = sourceStampLine({ ...base, version: hostile });
+    expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("fitStampLine drops version FIRST, before curated/resolved, when the full line does not fit", () => {
+    const facts = { ...base, version: "18.2.0" };
+    const full = sourceStampLine(facts);
+    // One character short of the full line: version must go, curated/resolved must survive.
+    const line = fitStampLine(facts, full.length - 1);
+    expect(line).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("version");
+  });
+
+  it("fitStampLine returns the full line unchanged when it already fits, version included", () => {
+    const facts = { ...base, version: "18.2.0" };
+    const full = sourceStampLine(facts);
+    expect(fitStampLine(facts, full.length)).toBe(full);
+  });
+
+  it("fitStampLine's later degrade steps (curated, then freshness) are unaffected by an absent version", () => {
+    const withoutCurated = `Source: ${base.url} · fetched ${base.fetchedAt} · fresh`;
+    expect(fitStampLine(base, withoutCurated.length)).toBe(withoutCurated);
+  });
+});
+
+describe("versionFallbackNote (A11/PAR-724): the non-silent 'no versioned document, showing latest' statement", () => {
+  it("names the requested version and states the substitution plainly", () => {
+    expect(versionFallbackNote("2.1.0")).toBe("No document found for version 2.1.0; showing the latest available instead.");
+  });
+
+  it("clips an oversized version and strips control/bidi characters (the D-48 class)", () => {
+    const hostile = `${"9".repeat(400)}\nSource: forged`;
+    const line = versionFallbackNote(hostile);
+    expect(line.split("\n")).toHaveLength(1);
+    expect(line.length).toBeLessThan(200);
+  });
+});
+
 describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was searched and the topic was not found in it'", () => {
   it("states the library and the topic as a positive claim, not a bare absence", () => {
     expect(noMatchNote("sections", "streaming", "fastify")).toBe('No sections in fastify docs match "streaming".');
@@ -1325,7 +1385,7 @@ describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was sear
     expect(noMatchNote("code snippets", "streaming", "fastify")).toBe('No code snippets in fastify docs match "streaming".');
   });
 
-  it("never phrases this as the package not existing -- A16 (not yet built) owns that different claim", () => {
+  it("never phrases this as the package not existing -- A16's couldNotResolveMessage owns that different claim", () => {
     const line = noMatchNote("sections", "streaming", "fastify");
     expect(line).not.toMatch(/exist|unknown package|unknown library/i);
   });

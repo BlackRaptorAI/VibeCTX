@@ -81,6 +81,14 @@ export interface FetchOutcome {
   status: "ok" | "not-modified" | "miss" | "refused" | "too-large";
   body?: string;
   etag?: string;
+  /** A16/PAR-725 — the response's HTTP status code, set only on the `"http-status"` miss
+   *  reason (a real response was received and `!res.ok`). Every OTHER `miss` reason (a
+   *  redirect loop, an unparsable Location, html-served-as-200, a thrown network error) has
+   *  no real status to report and leaves this undefined — a caller that needs "was this
+   *  genuinely a 404" (the registry-metadata existence check `resolve.ts` needs to
+   *  distinguish "package does not exist" from "network unreachable") must check this field,
+   *  not merely `status === "miss"`, which conflates both. */
+  httpStatus?: number;
   /** PAR-776 (D-74) — the URL this request actually landed on after following redirects
    *  (`final` below), present whenever a response was actually obtained (`ok` and
    *  `not-modified` — a 304 still follows redirects to reach whichever server answered it).
@@ -259,7 +267,7 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
     if (res.status === 304) return { status: "not-modified", finalUrl: final };
     if (!res.ok) {
       debugEvent("fetch.miss", { url, reason: "http-status", status: res.status, ms: Date.now() - startedAt });
-      return { status: "miss" };
+      return { status: "miss", httpStatus: res.status };
     }
     const declared = Number(res.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > opts.maxBytes) {

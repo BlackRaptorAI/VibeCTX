@@ -231,16 +231,33 @@ async function warmOneUnguarded(registry: Registry, dep: ProjectDependency, opts
     });
   }
 
-  const out = await resolvePackage(dep.name, { ecosystem: dep.ecosystem, now: opts.now, warn: opts.warn });
+  // A11/PAR-724 — pass the manifest-pinned version, when one was captured, so a resolution
+  // through `warm` gets the same version-matched chain `get_docs` does; `dep.version` is
+  // absent whenever only a range was declared (see `ProjectDependency.version`'s own comment),
+  // in which case this is identical to the pre-A11 call.
+  const out = await resolvePackage(dep.name, { ecosystem: dep.ecosystem, version: dep.version, now: opts.now, warn: opts.warn });
   if (out.ok && out.entry) {
     // S2: a resolved entry never displaces a curated one; the lookup above missed, so this installs.
-    installResolvedEntry(registry, out.entry);
-    return makeWarmRow({ ...base, library: out.entry.name, status: "resolved+cached", url: out.chosen });
+    installResolvedEntry(registry, out.persistedEntry ?? out.entry);
+    // A11/PAR-724 (D-50): a version was requested but no versioned document was found — the
+    // fallback-to-latest must be stated here too, not just in get_docs' own stamp, since this
+    // row is the one place a `warm` run's own text ever reports it.
+    const versionNote = out.requestedVersion && !out.versionMatched ? `no versioned document found for ${out.requestedVersion}; latest cached instead` : undefined;
+    return makeWarmRow({ ...base, library: out.entry.name, status: "resolved+cached", url: out.chosen, note: versionNote });
   }
   if (out.limited) {
     return makeWarmRow({ ...base, status: "skipped (rate cap)", note: `resolution limit reached (${MAX_RESOLUTIONS_PER_HOUR} per hour per process); run warm again later` });
   }
-  return makeWarmRow({ ...base, status: "unresolved", note: out.attempts.join("; "), failedAt: new Date(run.nowMs).toISOString() });
+  // A16/PAR-725 — `out.notFound` is the structured existence signal `resolvePackage` computed
+  // (both npm and PyPI genuinely 404'd): a distinct status, not folded into the general
+  // `unresolved` bucket, so the difference is visible in the table's status COLUMN, not just
+  // buried in the free-text note.
+  return makeWarmRow({
+    ...base,
+    status: out.notFound ? "not found" : "unresolved",
+    note: out.attempts.join("; "),
+    failedAt: new Date(run.nowMs).toISOString(),
+  });
 }
 
 /** One dependency's row. Never throws: an unexpected error (EACCES on the cache, a corrupt
@@ -260,7 +277,12 @@ function recentFailures(dir: string, nowMs: number): Map<string, WarmRow> {
   const record = readProjectRecord(dir);
   if (!record) return memo;
   for (const row of record.dependencies) {
-    if (row.status !== "unresolved" && row.status !== "unresolved (recent)") continue;
+    // A16/PAR-725: "not found" is a resolution failure too (both registries genuinely 404'd) —
+    // memoized the same way "unresolved" already is, so a confirmed-nonexistent name does not
+    // spend a fresh resolution slot on every run. The short-circuited row still reports
+    // "unresolved (recent)" below (R3's existing memo grammar), not a distinct "not found
+    // (recent)" — a deliberately scoped simplification, noted rather than silently accepted.
+    if (row.status !== "unresolved" && row.status !== "unresolved (recent)" && row.status !== "not found") continue;
     if (row.failedAt === undefined) continue;
     const age = nowMs - Date.parse(row.failedAt);
     if (age >= 0 && age < RECENT_FAILURE_HOURS * 3600_000) memo.set(memoKey(row.ecosystem, row.name), row);

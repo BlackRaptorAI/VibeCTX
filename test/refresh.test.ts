@@ -98,7 +98,9 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     const reg: Registry = { entries: new Map([["hono", resolvedHono]]) };
     stubFetch({});
     const out = await refreshToolText(reg, "hono");
-    expect(out).toMatch(/^hono: FAILED — Could not resolve "hono": npm: no metadata/);
+    // A16/PAR-725: refresh re-resolves against the entry's own ecosystem only (npm here), so a
+    // genuine 404 there is the ecosystem-scoped "does not exist in npm" claim.
+    expect(out).toMatch(/^hono: FAILED — Could not resolve "hono": "hono" does not exist in npm\. npm: no metadata/);
     expect(reg.entries.get("hono")).toBe(resolvedHono);
   });
 

@@ -162,6 +162,15 @@ describe('get_docs mode over the transport (D-26)', () => {
     await client.close();
   });
 
+  it("A11/PAR-724: the version param reaches getDocsToolText over the transport (a curated entry's explicit skip note is the observable proof)", async () => {
+    writeCache("stripe", STRIPE_URL, STRIPE_DOC);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 404 })));
+    const { client, call } = await connect(stripeRegistry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("get_docs", { library: "stripe", topic: "checkout session create", version: "9.9.9" });
+    expect(out).toContain('Version 9.9.9 was requested, but "stripe" is a curated entry');
+    await client.close();
+  });
+
   it("get_docs advertises mode as an enum of exactly sections and snippets, and maxTokens as a bounded integer", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const server = buildServer(stripeRegistry());
@@ -170,7 +179,8 @@ describe('get_docs mode over the transport (D-26)', () => {
     await client.connect(clientTransport);
     const getDocs = (await client.listTools()).tools.find((t) => t.name === "get_docs")!;
     const props = getDocs.inputSchema.properties as Record<string, { enum?: string[]; type?: string; exclusiveMinimum?: number; maximum?: number }>;
-    expect(Object.keys(props).sort()).toEqual(["library", "maxTokens", "mode", "topic"]);
+    // A11/PAR-724: "version" added for version-matched documentation.
+    expect(Object.keys(props).sort()).toEqual(["library", "maxTokens", "mode", "topic", "version"]);
     expect(props.mode.enum).toEqual(["sections", "snippets"]);
     // A2 (PAR-715): this is what a conforming client actually reads — if the cap ever moved
     // out of the schema (into a `.refine()` or a handler-side clamp), this is the assertion
