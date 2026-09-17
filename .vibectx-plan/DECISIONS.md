@@ -788,3 +788,40 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `package.json`, `package-lock.json`, `README.md`, `CONTRIBUTING.md` (PAR-778).
 
 ---
+
+## D-78 — decided 2026-09-17, executing PAR-777
+
+- **D-78** 2026-09-17 — **Two spellings of a name that differ only by PEP 503 punctuation
+  folding (`foo-bar` / `foo_bar` / `Foo.Bar`) are the SAME package for registry identity —
+  applied with no ecosystem check — but remain DISTINCT for cache-directory key derivation
+  (D-71).** `normalisePyPiName` (`src/package-names.ts`) already existed and was already used,
+  with no ecosystem check, at three read-only/fail-safe call sites (`resolveLibrary`'s lookup
+  fallback; `curatedKeys`/`isTaken`'s resolved-record guard) — this item extends the SAME rule
+  to `validateAliases` and `applyLayer`'s config-layer merge, the two places PAR-777's own
+  Problem statement named as still comparing by exact case-fold only.
+  **The two decisions are not in tension, though they look it side by side:** D-71 calls
+  `foo.bar`/`foo_bar` "two DISTINCT, independently valid npm names" for `urlSlug`/`libDirName`
+  — a cache key only needs to be collision-RESISTANT (every key is hash-suffixed regardless of
+  spelling), so folding punctuation there would buy nothing and cost the human-readable prefix
+  its meaning. A REGISTRY name needs the opposite property: recognising that two spellings name
+  the SAME PyPI project is the entire point (that recognition is what PAR-777 was filed to
+  restore). Two different questions, each answered consistently on its own terms.
+  **Accepted, examined risk, not an unexamined one:** unlike the three precedent call sites
+  (which only ever find-or-refuse, never remove anything), `applyLayer`'s merge can DELETE an
+  existing canonical entry and replace it with a different one under a twin spelling. If two
+  genuinely unrelated packages ever shared a PEP 503 form, a config entry for one would
+  silently evict the other from the registry — the shipped defaults contain no such pair
+  (checked by hand and pinned by test), and npm's own registry has rejected new names differing
+  only by punctuation runs since well before this was written, but a pair predating that rule
+  is not impossible. Accepted for the same reason the three precedent sites already accepted
+  the parallel risk: the failure costs a confusing override or config error to diagnose, never
+  a wrong document silently served through a hijacked cache entry.
+  **A related, adjacent gap NOT closed by this item:** `resolved-store.ts`'s persisted
+  `resolved.json` still dedupes by exact name only, so it can hold both `typing-extensions` and
+  `typing_extensions` on disk (the in-memory `installResolvedEntry` guard catches it at use
+  time; the file itself does not). Filed separately as a Linear follow-up — PAR-777's own
+  Problem statement names only `validateAliases` and the config merge.
+  Ref: `src/registry.ts` (`validateAliases`, `applyLayer`), `src/package-names.ts`
+  (`normalisePyPiName`) (PAR-777).
+
+---
