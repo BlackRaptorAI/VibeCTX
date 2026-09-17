@@ -396,7 +396,7 @@ describe("rankSections — performance bound (D-24)", () => {
     return lines.join("\n");
   }
 
-  it("ranks a 5 MB corpus with a 4-term query well inside the budget, and stays linear in size", () => {
+  it("ranks a 5 MB corpus with a 4-term query well inside the budget, and a 16 MB corpus inside its own absolute ceiling (growth is MEASURED and printed, not asserted as linear)", () => {
     // this test is timed on purpose, so an explicit per-test timeout (rather than vitest's
     // default 5000 ms testTimeout) is the hang-detector budget, not a performance assertion —
     // round-4 review measured this test taking 4121-4958 ms under 4x-core CPU load (11/11
@@ -424,21 +424,30 @@ describe("rankSections — performance bound (D-24)", () => {
     t = performance.now();
     rankSections(large, query);
     const largeMs = performance.now() - t;
-    // F-1 / D-37 / round-3 review: a ratio between two independently-timed runs is the
-    // flakiest shape in the suite. The original 1000-vs-4000-section sizing (with the `< 10`
-    // bound this replaced) reproducibly failed under 2x-core CPU load — 2 failures in 11 runs,
-    // observed ratios 12.94 and 10.87 against an idle baseline of 4.07-4.35 — because at those
-    // sizes both timings are small enough that scheduler jitter is a large fraction of either
-    // one. A min-of-3-per-size retry was tried and rejected: it still hit a 10.50 max ratio
-    // under the same load, no better than single-shot. What actually fixes it is scaling BOTH
-    // corpora ~4x larger (4000/16000 sections here, up from 1000/4000): with timings large
-    // enough that jitter is proportionally small, [MEASURED] 10 iterations under identical
-    // 2x-core load gave ratio 3.35-6.55 (small 122-219 ms, large 708-799 ms) — real separation
-    // restored. The ratio bound is loosened from main's original `< 6` to `< 10` (still catches
-    // ~2.5x quadratic blowup over the true ~4x linear scaling measured here): both corpus sizes
-    // were widened 4x to keep real ratio separation from a 16x quadratic-regression signal under
-    // load, per the round-2/round-3 investigation above, and `< 10` gives that a real margin
-    // instead of the tighter bound failing outright.
+    // F-2 / PAR-733: the ratio assertion that stood here (`expect(largeMs / smallMs)
+    // .toBeLessThan(10)`) is deleted outright, per CONTRIBUTING.md:75-77 — "No assertion may
+    // compare two wall-clock measurements... print a [MEASURED] line and assert an absolute
+    // ceiling instead". The `expect(largeMs).toBeLessThan(10_000)` ceiling below and the
+    // [MEASURED] print immediately above it (which still reports the ratio as a NUMBER, not a
+    // threshold) already satisfy that rule; this was the exact violating shape sitting one line
+    // past its own prescribed replacement.
+    //
+    // KNOWN GAP, not closed here: an O(n)->O(n^2) regression multiplies the large/small ratio
+    // ~4x->~16x independent of the per-op constant, which is exactly what the deleted assertion
+    // caught; the surviving absolute ceiling only catches it once the constant is large enough
+    // to push largeMs itself past 10_000 ms (idle largeMs is ~300-350 ms here, per the recorded
+    // margin figures below, so there is real headroom for a quadratic regression to hide in).
+    // CONTRIBUTING.md:78-79's prescribed alternative for exactly this ("spy on real call
+    // counts... rather than asserting on elapsed time") is available — rankSections calls
+    // tokenize a number of times that scales deterministically, not by the clock, with section
+    // count — but adding that coverage means a new test (this file has no tokenize mock today,
+    // and adding one file-wide is not a small change), which moves this item's done-when rule 5
+    // baseline (1271/40) and is out of the "exactly as written" scope this dispatch authorized.
+    // Reported to be filed as a follow-up, not closed quietly.
+    // Corpus sizing (4000/16000 sections) is unchanged — that choice predates and is independent
+    // of the deleted assertion, made to keep both timings large enough that scheduler jitter is
+    // a small fraction of either one (a prior 1000/4000 sizing produced timings too small for
+    // that, and is why round-3 review widened it 4x before this item touched the file).
     //
     // The absolute ceiling on `largeMs` does NOT mirror bigMs's own margin — round-4 review
     // measured them separately: bigMs's `< 5000` ceiling carries ~46x margin idle and ~4.1x
@@ -449,7 +458,6 @@ describe("rankSections — performance bound (D-24)", () => {
     // trades one flaky shape for another (see A10).
     console.log(`[D-24 MEASURED] rankSections linearity: small(4000-section) ${smallMs.toFixed(1)} ms, large(16000-section) ${largeMs.toFixed(1)} ms, ratio ${(largeMs / smallMs).toFixed(2)}`);
     expect(largeMs).toBeLessThan(10_000);
-    expect(largeMs / smallMs).toBeLessThan(10);
   }, 30_000);
 });
 
