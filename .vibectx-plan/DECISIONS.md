@@ -1197,10 +1197,11 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ## D-82 — decided 2026-09-18, executing PAR-832a (Accept-header negotiation only)
 
-- **D-82** 2026-09-18 — **A followed index link that comes back `text/html` is asked once for
-  markdown via `Accept: text/markdown, text/plain;q=0.9, */*;q=0.1`; if it is STILL `text/html`,
-  it is simply `unavailable` — no retry. Scoped to followed index links only; the
-  primary-document fetch path is unchanged.**
+- **D-82** 2026-09-18 — **Every followed index link is asked for markdown up front, on its one
+  and only request, via `Accept: text/markdown, text/plain;q=0.9, */*;q=0.1` — not as a
+  follow-up after seeing an HTML response. If the site ignores that and answers `text/html`
+  anyway, the result is simply `unavailable` — there is no second request. Scoped to followed
+  index links only; the primary-document fetch path is unchanged.**
   **What this entry originally proposed, and why it was cut down:** the first version of this
   fix ALSO retried a still-HTML response once more with a `.md`-suffixed url (closes
   ui.shadcn.com and nextjs.org's `/learn/*` tutorial pages, neither of which negotiates on
@@ -1216,7 +1217,9 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   a non-2xx to an absurdly long path. code-reviewer additionally confirmed such links are LIVE
   on the shipped registry today — 31 fragment-carrying same-host links in hono's own cached
   index alone — and that no existing test caught the bug: a candidate fix applied and reverted
-  left the suite 1637/1637 either way, because every fixture used a bare-path URL. Tom's
+  left the suite passing identically either way (1637/1637 on the with-retry tree; the shipped
+  tree without the retry is 45 files / 1636 tests), because every fixture used a bare-path URL.
+  Tom's
   decision: ship the negotiation half now; the retry half defers to 0.2.1 with this bug as the
   stated reason, not merged behind a flag — dead code carrying a known unbounded-request defect
   is worse than no code. `withMdSuffix`, the retry guard, and the retry's own `fetchUrl` call
@@ -1227,12 +1230,22 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   primary-document fetches stay byte-for-byte unchanged; content negotiation there would risk
   changing what gets cached for a library that already works today, a far larger blast radius
   than this item's own scope. Verified, not merely asserted: a test pins that `getLibraryDoc`
-  against an HTML response sends no `accept` header and performs exactly one request. MEASURED
+  against an HTML response sends no `accept` header and performs exactly one request. The
+  followed-link path is NOT unchanged for libraries that already worked before this item: every
+  library whose index has followable links (react, stripe, expo, convex, anthropic-sdk, supabase,
+  tanstack-query, and others) now sends `Accept` on those requests too — the scope constraint is
+  "primary path untouched," not "no other library's behaviour changes." The cache key is
+  `(library, url)` with no representation discriminator, so a server that varies its response on
+  `Accept` without varying its ETag could serve a different cached representation than before.
+  code-reviewer's own full-registry run (below) shows every one of those libraries still healthy,
+  which is the actual evidence this is benign — not the scope framing above, which was too narrow
+  to make that claim on its own. Filed as PAR-842 rather than fixed here: add a `Vary`-aware or
+  accept-scoped cache key if a real site is ever found to need it. MEASURED
   directly against the real sites (2026-09-18): hono.dev and motion.dev honour `Accept:
   text/markdown` on the same URL; nextjs.org's `/docs/` and `/blog/` pages do too; nextjs.org's
   `/learn/*` tutorial pages and ui.shadcn.com do not negotiate under any `Accept` value and stay
   `unavailable` — no vibectx defect on those two, a real gap in what those sites serve (or, for
-  shadcn, a convention — the `.md`-suffix retry — that this item does not ship.
+  shadcn, a convention — the `.md`-suffix retry — that this item does not ship).
   **Security, corrected from this entry's earlier text (code-reviewer/security-architect,
   independently, on the version WITH the retry):** the original text framed the recursive
   call's own `isAllowedLink` re-check as "the retry is re-validated, not trusted because its
@@ -1256,9 +1269,13 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `healthy: false, followed: 0, dropped: 5` — unchanged from before ANY PAR-832 work, exactly as
   expected, since it needs the deferred retry; clerk `healthy: true` — PAR-832's OTHER root
   cause, fixed by the separate D-81/PR #30, already on `main` before this branch last merged it.
-  A full-registry `doctor --json` run: **28/30** — composition changed (clerk flipped healthy,
-  shadcn flipped unhealthy relative to the CR-20260917 baseline) but the total count is
-  unchanged from the version WITH the retry, because shadcn was the only one of the four root-A
-  libraries that specifically needed the now-deferred half. tailwindcss remains its own
-  pre-existing, unrelated gap.
+  A full-registry `doctor --json` run: **28/30** — up from the CR-20260917 baseline of 24/30
+  (clerk was unhealthy there; shadcn was already unhealthy there too, so it does not "flip"
+  relative to that baseline). The more informative comparison is to the version WITH the retry,
+  measured at `cc0c8ab` before D-81's clerk fix had merged: that tree was also 28/30, but with
+  shadcn healthy and clerk not yet fixed. With the retry AND D-81 both in, this would be 29/30.
+  The deferral's real cost is exactly one library — shadcn — and the total here reads 28/30
+  instead of 29/30 because of it; the two counts land on the same number only because losing
+  shadcn (this item's scope cut) and gaining clerk (D-81, an unrelated fix merged from `main`)
+  happen to offset by one each. tailwindcss remains its own pre-existing, unrelated gap.
   Ref: `src/fetcher.ts`, `test/fetcher.test.ts`, `test/debug.test.ts` (PAR-832a, PAR-832).

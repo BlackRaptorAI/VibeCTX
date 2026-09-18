@@ -404,15 +404,13 @@ export type LinkedPageResult =
   /** Network / HTTP failure with nothing cached to fall back on. */
   | { status: "unavailable" };
 
-/** PAR-832a — sent on the FIRST attempt only (see `fetchLinkedPage`): several doc-site
- *  frameworks serve raw markdown for exactly this header on a page whose default response is
- *  the rendered HTML (MEASURED against hono.dev, motion.dev and nextjs.org's own non-tutorial
- *  pages, 2026-09-18) — the `.md`-suffix retry below is a second, independent convention
- *  (MEASURED against ui.shadcn.com, which does not negotiate on `Accept` but does serve
- *  markdown at the same path plus `.md`) for sites that use that one instead. Neither is
- *  universal; together they cover every site convention found in the PAR-832 investigation
- *  except next.js's own `/learn/*` interactive-tutorial pages, which have no markdown form on
- *  next.js's own site under either convention — not a gap either strategy can close. */
+/** PAR-832a — the Accept header sent on the single request `fetchLinkedPage` makes: several
+ *  doc-site frameworks serve raw markdown for exactly this header on a page whose default
+ *  response is the rendered HTML (MEASURED against hono.dev, motion.dev and nextjs.org's own
+ *  non-tutorial pages, 2026-09-18). This does NOT cover every convention found in the PAR-832
+ *  investigation: ui.shadcn.com ignores Accept entirely and serves markdown only at the same
+ *  path plus `.md`, and nextjs.org's `/learn/*` tutorial pages have no markdown form at all.
+ *  The `.md`-suffix convention is deferred to 0.2.1 — see `fetchLinkedPage` below and D-82. */
 const LINKED_PAGE_ACCEPT = "text/markdown, text/plain;q=0.9, */*;q=0.1";
 
 /** Fetch a single linked page (for llms.txt index files), cache-backed with the
