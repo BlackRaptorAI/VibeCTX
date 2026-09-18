@@ -940,110 +940,48 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-80 — decided 2026-09-18, executing R-1 / PAR-829
+## D-80 — decided 2026-09-18, executing R-1 / PAR-829 (supersedes this entry's own prior text)
 
-- **D-80** 2026-09-18 — **CI proves `package.json`'s `engines.node` floor (`>=20.19.0`, D-3/
-  PAR-778) directly: a matrix job runs the full suite on `20.19.x` alongside the version CI
-  already ran, on every PR and push to `main`.** Before this the floor was stated, never
-  exercised — CI, the 2026-09-17 release pre-flight and the final pre-release test run had all
-  been on a NEWER Node (v22 in CI, v26.0.0 locally) than the declared floor.
-  **Premise check against the tree first — and code-reviewer round 1's B-1 correction to it:**
-  the issue expected an existing accepted-risk row in `CR-20260917-release-0.2.0.md` §5 to
-  rewrite. Checked against `main` only (this branch's base), no such row existed there — but
-  round 1 review caught that this check was incomplete: a MORE COMPLETE row, twice
-  code-reviewed, already exists on the unmerged `release-0.2.0` branch (`cf610d6`, sharpened by
-  `5715301`/`7c4af55`), which was never checked. That row makes a finding this item does NOT
-  close — see below — so the CR row here is written narrowly, as partial progress against
-  `release-0.2.0`'s existing row rather than as its (nonexistent-on-`main`) replacement, noting
-  the two rows must be reconciled when `release-0.2.0` merges (`git merge-tree` confirms they
-  conflict textually in this exact table, so the merge will force a resolution). This is a
-  sharper version of the same lesson D-73 recorded: a premise check is only as good as the ref
-  it's checked against, and "the committed tree" can mean more than one unmerged branch at once
-  — a lesson round 1's OWN fix then repeated once more (code-reviewer round 2, B-2): the first
-  draft of this correction named `par-831-pretag-reconciliation` as "branched from
-  `release-0.2.0`, already touching the same file," asserted without checking. Checked: it is
-  branched from `main` (same merge-base as `release-0.2.0`'s own base, `032549b`), touches only
-  `CLAUDE.md`/`CONTRIBUTING.md`/`RELEASING.md`, and its `RELEASING.md` checklist has no step
-  covering §5 row deduplication — it is not where this gets handled, and the record no longer
-  claims it is.
-  **What this item actually closes, and what it does not:** `release-0.2.0`'s row observes that
-  `vite`'s own declared range is `^20.19.0 || >=22.12.0` — a disjunction — so `engines.node
-  >=20.19.0` silently admits Node 21.x and 22.0.0–22.11.x, neither of which `vite` itself
-  supports. This item's matrix (`20.19.x`, and `22` which resolves to the latest ≥22.12) sits
-  entirely inside vite's own supported range on both legs — it proves the floor's LOWER bound,
-  20.19.0, but does not touch the silently-admitted gap band at all. The floor holds; nothing in
-  `package.json` needed raising; the gap is unclosed and stays `release-0.2.0`'s own open item
-  (tighten `engines.node` to the disjunctive form, or add a third matrix leg inside the gap).
-  **Branch protection, the item's own stated constraint:** the required status check is the
-  literal string `test`. A job carrying `strategy.matrix` itself reports under a name GitHub
-  suffixes per combination (`test (20.19.x)`, `test (22)`) — not the string `test` — which would
-  silently stop matching and make every PR unmergeable until someone updated the repo's
-  required-checks setting. Solved with the standard "required-check aggregator" shape rather
-  than by touching that setting: the matrix runs in a new `test-matrix` job (no branch-protection
-  claim on it), and a thin `test` job — carrying no matrix, so its own check name is unchanged —
-  depends on it (`needs: test-matrix`) and fails only if the matrix as a whole did not succeed.
-  `if: always()` here is LOAD-BEARING, not defensive (code-reviewer round 1, S-1): without it
-  this job is SKIPPED when `test-matrix` fails, and GitHub reports a skipped job as check-run
-  conclusion `skipped` — which branch protection treats as PASSING, the opposite of "no status."
-  Removing `always()` would make this gate green exactly when the matrix is red (confirmed
-  against GitHub's own documented required-status-check behaviour, not assumed). No repo
-  settings change needed; branch protection is unaffected.
-  **Both ends verified before this shipped, not just configured:** locally, on the closest
-  obtainable build to the CI matrix's own `20.19.x` leg (Homebrew's `node@20`, 20.20.2 — not
-  `20.19.x` itself: Node 20's own upstream end-of-life was 2026-04-30 (nodejs.org), separate
-  from Homebrew's own `node@20` formula-removal date of 2026-10-28, and the `20.19.z` patch line
-  is no longer separately distributed by either) — `npm ci`, lint, the full 1,626-test suite and
-  the build all passed, unchanged from the default Node. This local run is a proxy, not the
-  proof — held provisional until this PR's own CI matrix reports `20.19.x` green, at which point
-  the CR row should be updated with that run's URL. `CLAUDE.md` and `README.md`'s own "CI runs
-  Node 22" claims (now stale the moment a second version joined the matrix) are corrected in the
-  same change.
-  Ref: `.github/workflows/ci.yml`, `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`,
-  `CLAUDE.md`, `README.md` (R-1 / PAR-829).
-
-  **Round 1 review (code-reviewer), one blocking finding fixed before push:**
-  - **B-1 (BLOCKING):** the premise-check above had only been run against `main`; a more
-    complete, twice-reviewed Node-floor row already existed on the unmerged `release-0.2.0`
-    branch, dropping a real finding (the vite-disjunction gap) and setting up a guaranteed
-    conflicting duplicate row at merge/tag time. Fixed: both the CR row and this record now cite
-    `release-0.2.0`'s row explicitly, narrow the disposition to "the floor's lower bound is
-    measured, the disjunction gap is not," and name a reconciliation venue — round 2 (below)
-    found that venue claim itself unchecked and wrong; see there for the corrected version.
-  - **Should-fix, applied:** the `if: always()` rationale was backwards (it said a skipped
-    dependent leaves "no status," when GitHub actually reports `skipped` and branch protection
-    treats that as passing — the opposite risk); corrected in both the workflow comment and
-    above, cited against GitHub's own documented behaviour. The CR/DECISIONS Node-20-EOL date
-    was wrong (2026-10-28, actually Homebrew's own `node@20` formula-removal date, not Node's
-    upstream EOL of 2026-04-30 per nodejs.org) — corrected, both dates now stated and
-    attributed. The CR's disposition is now explicitly provisional on this PR's own CI run
-    rather than resting on the local Node 20.20.2 proxy alone. `README.md`'s Install-section
-    PAR reference was dropped (internal tracker jargon in user-facing text) in favour of keeping
-    that traceability in this record and the CR. `ci.yml` gained `permissions: contents: read`
-    (matching `doctor.yml`'s own existing convention), `timeout-minutes: 15` on `test-matrix`,
-    the `needs.test-matrix.result` comparison moved out of inline `${{ }}` interpolation into an
-    `env:` var (house style for shell steps, even though this particular value is a
-    GitHub-controlled enum with no injection risk), and a one-line forward-guard comment noting
-    the gate's correctness depends on `test-matrix` never gaining `continue-on-error` or a
-    per-leg `if:`.
-  Ref (round 1 fixes): `.github/workflows/ci.yml`,
-  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`.
-
-  **Round 2 review (code-reviewer, a genuine re-verification since round 1 found a blocking
-  issue — D-70's own rule), one blocking finding fixed before push:**
-  - **B-2 (BLOCKING):** round 1's own fix for B-1 named `par-831-pretag-reconciliation` as
-    "branched from `release-0.2.0`, already touching the same file" — the exact same failure
-    B-1 was about (a branch-state claim asserted without running the check), re-committed
-    inside the fix for it. Checked: `git merge-base par-831-pretag-reconciliation release-0.2.0`
-    equals `git merge-base par-831-pretag-reconciliation main` (`032549b`) — it is branched from
-    `main`, not `release-0.2.0` — and `git diff --name-only origin/main..par-831-pretag-reconciliation`
-    touches only `CLAUDE.md`/`CONTRIBUTING.md`/`RELEASING.md`, never the CR file; its
-    `RELEASING.md` checklist has no step covering §5 row deduplication. Fixed: both the CR row
-    and this record now say only what `git merge-tree 032549b HEAD release-0.2.0` actually shows
-    — the two rows conflict textually in this exact table, so `release-0.2.0`'s eventual merge
-    will force a human to resolve it — without claiming any specific existing branch already
-    handles that.
-  - **Nits, applied:** the CR row's editorial note pointed at "Why acceptable" for where the
-    vite-disjunction finding lives; it is actually in the Decision cell — corrected. `test`
-    (the gate job) had no `timeout-minutes` while `test-matrix` gained one — added, matching.
-  Ref (round 2 fixes): `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`,
-  `.github/workflows/ci.yml`.
+- **D-80** 2026-09-18 — **`package.json`'s `engines.node` is `^20.19.0 || >=22.12.0` — `vite`'s
+  own exact declared range, read directly from `node_modules/vite/package.json` (v7.3.6) rather
+  than trusted from any prior record — not a plain `>=20.19.0` floor approximating it.**
+  **What this entry originally recorded, and why that was wrong to leave standing:** this
+  entry first recorded CI proving the floor's LOWER bound only, leaving `engines.node
+  >=20.19.0` in place and noting (via two rounds of code-reviewer correction — see git history
+  for that discussion, now superseded) that the field silently admitted Node 21.x and
+  22.0.0–22.11.x, versions `vite`'s own range excludes. Tom's decision (2026-09-18): a field
+  that states something false should be corrected, not documented around. A user on Node 21
+  passed the old `engines` check and then hit a broken test toolchain — the gap was real, not
+  merely theoretical, and the fix is one field, not a permanent caveat.
+  **The fix, and what changed with it:** `engines.node` now matches `vite`'s range exactly.
+  `package-lock.json` regenerated (`npm install --package-lock-only`; one line changed — the
+  root package's own `engines` field — no dependency version drift). Every place the old floor
+  was stated (`README.md`, `CLAUDE.md`, `CONTRIBUTING.md`) is corrected to the same range.
+  **This is advisory, not enforced — stated plainly, not implied:** no `.npmrc` in this repo
+  sets `engine-strict`, so `npm ci` on an excluded version (Node 21.x, 22.0.0–22.11.x) still
+  only warns (`EBADENGINE`) rather than failing — unchanged by this fix, and true of the old
+  floor too. The value of this change is that the field now STATES the true requirement;
+  enforcement was never what D-75 or this entry claimed for it.
+  **CI, and what is and is not tested:** the existing `test-matrix` job
+  (`.github/workflows/ci.yml`, unchanged from when this entry first added it) already proves
+  both ends of the new disjunction — `20.19.x` (the low end) and `22`, which resolves to the
+  latest available, ≥22.12 (the high end) — no third leg was needed. The excluded middle band
+  (Node 21.x, 22.0.0–22.11.x) is deliberately NOT a CI leg: there is nothing SUPPORTED in that
+  band to run the suite against, so a leg there could only ever prove "the toolchain the field
+  says is unsupported does or does not happen to work today" — not a claim this project makes
+  about any other unsupported version either. Documenting a version as unsupported and having
+  tested it are different, weaker-vs-stronger claims; this entry does not conflate them.
+  **Verified before this shipped:** `npm ci && npm run lint && npm test && npm run build` pass
+  clean on Node v26.0.0 (default here; satisfies `>=22.12.0`) and on Node 20.20.2 (Homebrew's
+  closest available build to `20.19.x`; satisfies `^20.19.0`), neither producing an `EBADENGINE`
+  warning. This PR's own CI run is what actually exercises `20.19.x` for the first time —
+  local Node-version proxies are not a substitute for that and are not cited as if they were.
+  **Still open, unchanged by this entry:** `release-0.2.0` (unmerged) carries its own,
+  independently-written Node-floor row in `CR-20260917-release-0.2.0.md` §5, written before
+  this fix — it is now doubly stale (both "no CI leg at 20.19.x" and "engines is a plain
+  floor" no longer hold on this branch) and must be reconciled against this branch's own CR row
+  when `release-0.2.0` merges, not before; a `git merge-tree` check already confirmed a textual
+  conflict between the two rows.
+  Ref: `package.json`, `package-lock.json`, `.github/workflows/ci.yml`,
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CLAUDE.md`,
+  `CONTRIBUTING.md` (R-1 / PAR-829, commit `7907983`).

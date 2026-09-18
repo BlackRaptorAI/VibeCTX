@@ -23,8 +23,7 @@ jobs:
   # is deliberately NOT a third matrix leg: `engines` now documents it as unsupported (though
   # `npm` does not enforce that by default — no `.npmrc` here sets `engine-strict`, so an
   # install there still only warns), and there is nothing SUPPORTED in that band to test against
-  # — see DECISIONS.md for the full history (the entry that first recorded the gap, and the
-  # later one recording this fix).
+  # — see D-80 in DECISIONS.md.
   test-matrix:
     strategy:
       # One leg failing (a flake on the runner, say) must not hide the other leg's result —
