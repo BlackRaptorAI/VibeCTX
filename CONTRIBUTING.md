@@ -57,12 +57,13 @@ documents all three as unsupported (R-1/PAR-829). This is advisory, not enforced
 here sets `engine-strict`, so `npm ci` on an excluded version still only warns (`EBADENGINE`)
 rather than failing — the value of the fix is accuracy of the stated requirement, same as
 D-75's own reasoning for the plain floor it replaces. CI (`.github/workflows/ci.yml`) builds
-and tests the low and high ends — the **20.19 line** and **22** (resolving to the latest,
-≥22.12) — but not the excluded bands: the manifest documents them as unsupported, and there is
-nothing supported there for CI to run. `test/engines.test.ts` asserts `engines.node` is a
-`semver` SUBSET of both `vite`'s and `vitest`'s own ranges (not merely equal to one of them),
-so a future dependency bump that narrows either range again fails the suite instead of
-silently reopening a hole.
+and tests all three supported bands — the **20.19 line**, **22** (resolving to the latest,
+≥22.12), and **24** (resolving to the latest, ≥24.0.0) — but not the excluded bands: the
+manifest documents them as unsupported, and there is nothing supported there for CI to run.
+`test/engines.test.ts` asserts `engines.node` is a `semver` SUBSET of both `vite`'s and
+`vitest`'s own ranges (not merely equal to one of them, and not narrower than either band
+either — a fourth assertion checks the range isn't needlessly tight), so a future dependency
+bump that narrows either range again fails the suite instead of silently reopening a hole.
 
 ## Build, test, lint
 

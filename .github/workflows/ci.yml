@@ -21,22 +21,25 @@ jobs:
   # alone then silently admitted 23.x too, which `vitest` itself does not support — narrower
   # than `vite`'s own range in that band. Two dependencies, not one: see D-80 in DECISIONS.md,
   # "the Node 23 hole," for the regression this recurred as before `test/engines.test.ts` was
-  # rewritten to check both). `test-matrix` proves the low and high ends: `20.19.x` and `22`,
-  # which resolves to the latest ≥22.12 — this is the run that actually exercises `20.19.x`;
-  # nothing had before. The excluded bands (21.x, 22.0–22.11, 23.x) are deliberately NOT
-  # separate matrix legs: `engines` now documents them as unsupported (though `npm` does not
-  # enforce that by default — no `.npmrc` here sets `engine-strict`, so an install there still
-  # only warns), and there is nothing SUPPORTED in any of those bands to test against.
+  # rewritten to check both). `test-matrix` proves all THREE bands of that range: `20.19.x`,
+  # `22` (resolves to the latest ≥22.12), and `24` (resolves to the latest ≥24.0.0, added
+  # code-reviewer round 4, B-1 — the range grew a third band when `vitest`'s own bump added
+  # one, and the matrix silently didn't; "CI tests both ends" was true with two bands and false
+  # with three, so it stayed true by adding the missing leg, not by re-wording around the gap).
+  # The excluded bands (21.x, 22.0–22.11, 23.x) are deliberately NOT separate matrix legs:
+  # `engines` now documents them as unsupported (though `npm` does not enforce that by default
+  # — no `.npmrc` here sets `engine-strict`, so an install there still only warns), and there
+  # is nothing SUPPORTED in any of those bands to test against.
   test-matrix:
     strategy:
-      # One leg failing (a flake on the runner, say) must not hide the other leg's result —
-      # the whole point here is to see BOTH numbers, not stop at the first red. Load-bearing
+      # One leg failing (a flake on the runner, say) must not hide the other legs' results —
+      # the whole point here is to see every number, not stop at the first red. Load-bearing
       # for the `test` gate job below: it trusts `needs.test-matrix.result` to reflect every
       # combination, which requires neither `continue-on-error: true` here nor a per-leg `if:`
       # — either would launder a real failure into a false "success" downstream.
       fail-fast: false
       matrix:
-        node-version: ["20.19.x", "22"]
+        node-version: ["20.19.x", "22", "24"]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

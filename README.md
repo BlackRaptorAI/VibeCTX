@@ -32,10 +32,10 @@ itself, which needs less). Node 21.x, 22.0.0–22.11.x, and 23.x — versions a 
 derived from either dependency alone would have silently admitted, and that the other
 dependency does not support — are now correctly documented as unsupported (`npm` does not
 enforce `engines` by default, so an install there still only warns, `EBADENGINE`, rather than
-failing — the field states the true requirement either way). CI builds and tests the low and
-high ends: the **20.19 line** and **22** (resolving to the latest, ≥22.12) — the excluded
-bands are documented, not separately exercised by CI (there is nothing supported there to
-run).
+failing — the field states the true requirement either way). CI builds and tests all three
+supported bands: the **20.19 line**, **22** (resolving to the latest, ≥22.12), and **24**
+(resolving to the latest, ≥24.0.0) — the excluded bands are documented, not separately
+exercised by CI (there is nothing supported there to run).
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build

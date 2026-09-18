@@ -965,16 +965,18 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   only warns (`EBADENGINE`) rather than failing — unchanged by this fix, and true of the old
   floor too. The value of this change is that the field now STATES the true requirement;
   enforcement was never what D-75 or this entry claimed for it.
-  **CI, and what is and is not tested:** the existing `test-matrix` job's two matrix LEGS
-  (`.github/workflows/ci.yml`, unchanged from when this entry first added them — its comments
-  were rewritten, the legs were not) already prove both ends of the new disjunction —
-  `20.19.x` (the low end) and `22`, which resolves to the
-  latest available, ≥22.12 (the high end) — no third leg was needed. The excluded middle band
-  (Node 21.x, 22.0.0–22.11.x) is deliberately NOT a CI leg: there is nothing SUPPORTED in that
-  band to run the suite against, so a leg there could only ever prove "the toolchain the field
-  says is unsupported does or does not happen to work today" — not a claim this project makes
-  about any other unsupported version either. Documenting a version as unsupported and having
-  tested it are different, weaker-vs-stronger claims; this entry does not conflate them.
+  **CI, and what is and is not tested (as of 2026-09-17 — SUPERSEDED, see the 2026-09-18 update
+  below and its own round 4 finding B-1; a third matrix leg WAS later needed, once the range
+  gained a third band):** the `test-matrix` job's two matrix legs at the time
+  (`.github/workflows/ci.yml`) proved both ends of the two-band disjunction — `20.19.x` (the low
+  end) and `22`, which resolves to the latest available, ≥22.12 (the high end). The excluded
+  middle band (Node 21.x, 22.0.0–22.11.x) was deliberately NOT a CI leg: there is nothing
+  SUPPORTED in that band to run the suite against, so a leg there could only ever prove "the
+  toolchain the field says is unsupported does or does not happen to work today" — not a claim
+  this project makes about any other unsupported version either. Documenting a version as
+  unsupported and having tested it are different, weaker-vs-stronger claims; this entry does
+  not conflate them — that reasoning still holds, unchanged; only the LEG COUNT needed to cover
+  every actually-supported band changed, once there were three of them instead of two.
   **Verified locally first, on macOS, then MEASURED for real on PR #26's own CI run:** locally,
   `npm ci && npm run lint && npm test && npm run build` passed clean on Node v26.0.0 (default;
   satisfies `>=22.12.0`) and Node 20.20.2 (Homebrew's closest available build to `20.19.x`;
@@ -1045,14 +1047,17 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   difference, but an unexplained unrelated diff line is exactly what CLAUDE.md's own
   diff-stat-by-eye rule (added this same day, PAR-831) exists to catch.
   **Verified on the merged tree:** `npm ci && npm run lint && npm test && npm run build` clean
-  on Node v26.0.0 (this session's local machine) — 45 files, 1629 tests (was 1627: two new
-  assertions in the rewritten `engines.test.ts`). CI's own matrix legs are the actual proof for
-  `20.19.x`/`22`, re-run after this push — see the round 4 review below for that result.
+  on Node v26.0.0 (this session's local machine — satisfies the range's `>=24.0.0` band, the
+  one CI did NOT cover until round 4's B-1 fix below added a third leg) — 45 files, 1629 tests
+  (was 1627: two new assertions in the rewritten `engines.test.ts`, later four — see round 4).
+  CI's own matrix legs are the actual proof for each band, re-run after this push — see the
+  round 4 review below for that result.
   D-number re-checked against `origin/main`, `release-0.2.0`, and (now merged) `par-831` after
   this merge: still only D-79 exists on any of them; D-80 stays D-80, no renumbering (per
   CLAUDE.md/PAR-831's own new rule — pick right before opening the PR, which this already was).
   Ref (2026-09-18 update): `package.json`, `package-lock.json`, `test/engines.test.ts`
-  (rewritten) (PAR-830 fallout, R-1 / PAR-829).
+  (rewritten), `.github/workflows/ci.yml`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`
+  (PAR-830 fallout, R-1 / PAR-829).
 
   **Round 3 review (code-reviewer — a fresh pass on the manifest fix; rounds 1/2 reviewed this
   entry's now-superseded prior text and are not repeated here), PASS with should-fixes, no
@@ -1088,3 +1093,42 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
     about. Advisory is the correct choice here, not merely the current one, and this is why.
   Ref (round 3 fixes): `test/engines.test.ts` (new),
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`.
+
+  **Round 4 review (code-reviewer — the 2026-09-18 PAR-830-fallout fix above), CONCERNS with
+  one blocking finding, fixed before push:**
+  - Independently re-verified, by an INDEPENDENT route rather than trusting `semver.subset()`:
+    enumerated 20 boundary versions and compared membership in `engines.node` against a
+    hand-computed `inVite(v) && inVitest(v)` predicate — zero mismatches. Confirmed
+    `semver.subset()`'s argument order is order-sensitive and was not accidentally inverted
+    (the flipped calls both correctly return `false`). Reproduced the "revert and re-run"
+    regression check independently and got the same two failures. Confirmed the `package.json`
+    diff against `origin/main` carries exactly the two claimed semantic changes and nothing
+    else, and that `npm ci` reinstalls clean from the committed lockfile with 0 vulnerabilities.
+    Swept the whole repo for stale `>=22.12.0` references and found none outside legitimate
+    historical citations. Ran the full gate on Node v26.0.0: clean, 45 files / 1629 tests.
+  - **B-1 (BLOCKING):** the range grew from two bands to three (`^20.19.0`, `^22.12.0`,
+    `>=24.0.0`), but the CI matrix still had two legs (`20.19.x`, `22`) — and `22` is now the
+    MIDDLE band's representative, not the high end. The unbounded top band, `>=24.0.0`, had NO
+    CI leg at all — every "CI tests both ends" claim in `ci.yml`, `README.md`,
+    `CONTRIBUTING.md`, `CLAUDE.md`, this entry (above) and the CR row was therefore false, the
+    same class of defect this whole item exists to close. Pointedly: the reviewer's own gate
+    run was on Node v26.0.0, which satisfies the range only via the untested `>=24.0.0` band —
+    "verified locally on Node v26" was, without a third leg, verifying precisely the band CI
+    did not cover. Fixed by adding the missing leg (`"24"`, resolves to the latest ≥24.0.0)
+    rather than re-wording the coverage claim around the gap — CI now runs three legs, one per
+    band, and every "tests X" claim across the repo is true again, not just less false.
+  - **Should-fix, applied:** `test/engines.test.ts`'s module comment cited a nonexistent
+    `D-81` — dropped (there is no D-81 anywhere in the repo; this entry stays D-80). Added a
+    fourth test assertion (S-2): `semver.subset()` alone proves `engines.node` does not
+    OVER-claim support, but says nothing about UNDER-claiming it — `">=24.0.0"` alone, or any
+    other needlessly narrow range still fully inside both dependencies' bounds, would have
+    passed all three prior assertions. The new assertion requires each band's low edge
+    (`20.19.0`, `22.12.0`, `24.0.0`) to satisfy `engines.node`, MEASURED to actually fail
+    against the over-narrow example above before the fix, and to pass after it. The CR row's
+    correction (round 3's own addition) had landed in a trailing cell while the Evidence and
+    Status cells two columns over still asserted the superseded `^20.19.0 || >=22.12.0` value
+    in the present tense — rewritten as one coherent, non-contradictory row stating the current
+    truth first, with the round-by-round history pointed at this entry instead of duplicated.
+  Ref (round 4 fixes): `.github/workflows/ci.yml`, `test/engines.test.ts`,
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`,
+  `CLAUDE.md`.
