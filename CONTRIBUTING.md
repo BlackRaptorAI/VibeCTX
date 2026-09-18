@@ -99,6 +99,7 @@ and `package.json` ships only `dist/` — but it is where the reasoning lives:
 | [`.vibectx-plan/VibeCTX-audit-2026-09-08.md`](.vibectx-plan/VibeCTX-audit-2026-09-08.md) | The code audit the current release remediates, with file:line evidence. |
 | [`.vibectx-plan/VibeCTX-scope-decision-2026-09-08.md`](.vibectx-plan/VibeCTX-scope-decision-2026-09-08.md) | Scope, non-goals, and the claim discipline below. |
 | [`.vibectx-plan/README.md`](.vibectx-plan/README.md) | Index to all of the above, including which documents are retired. |
+| [`RELEASING.md`](RELEASING.md) | The pre-tag reconciliation checklist — run before cutting any release tag. |
 
 Several documents in there carry **retirement banners**. Those describe a CI gate, a `GATED` path
 array and a verdict validator that were removed from this repository and from its history on
@@ -116,7 +117,7 @@ review gates signed off. **No CI check enforces one** — the workflow that used
 
 One is expected for:
 
-- a **tagged release**, and
+- a **tagged release** — run [`RELEASING.md`](RELEASING.md)'s pre-tag checklist first, and
 - any change touching **URL trust, fetching, or cache integrity**.
 
 Write it into `.vibectx-plan/change-records/` using
