@@ -343,7 +343,7 @@ describe("dispatchCli resolve (PAR-655)", () => {
   });
 });
 
-import { parseWarmArgs, WARM_USAGE } from "../src/cli.js";
+import { parseWarmArgs } from "../src/cli.js";
 import { mkdtempSync as mkdtemp2 } from "node:fs";
 import { projectRecordPath, PROJECT_RECORD_SCHEMA_VERSION } from "../src/project-store.js";
 
