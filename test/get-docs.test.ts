@@ -1505,6 +1505,57 @@ describe("getDocsToolText (MCP get_docs tool body: alias resolution + unknown-li
   });
 });
 
+describe("get_docs Source: stamp never leaks a URL query string (PAR-811)", () => {
+  // The one mechanism this tool has for reaching an authenticated internal endpoint is a URL
+  // query string (fetcher.ts sends no other credential/header) — so a config entry pointing at
+  // one is a realistic pattern, and the token it carries must never reach a rendered response.
+  // No `allowInternalHosts` needed on the entry: it is a config-schema-only field, consulted
+  // once at config-parse time (config.ts) — this entry is constructed directly, so the
+  // fetch-time host policy (gated on `entry.resolved`, unset here) never runs against it either.
+  const INTERNAL_URL = "https://docs.internal.example.com/llms.txt?token=super-secret-token";
+  const registry: Registry = {
+    entries: new Map([["acme", { name: "acme", urls: [INTERNAL_URL] }]]),
+  };
+
+  it("a cache hit's stamp carries the url with its query string stripped, in every render path (no topic, topic matched, no match)", async () => {
+    writeCache("acme", INTERNAL_URL, "# Acme\n\n## Setup\n\nRun the installer.");
+    stubFetch({});
+    const noTopic = await getDocsToolText(registry, { library: "acme" });
+    expect(noTopic).toContain("Source: https://docs.internal.example.com/llms.txt ·");
+    expect(noTopic).not.toContain("super-secret-token");
+    expect(noTopic).not.toContain("token=");
+
+    const matched = await getDocsToolText(registry, { library: "acme", topic: "installer" });
+    expect(matched).toContain("Source: https://docs.internal.example.com/llms.txt ·");
+    expect(matched).not.toContain("super-secret-token");
+
+    const noMatch = await getDocsToolText(registry, { library: "acme", topic: "zzz-unmatched" });
+    expect(noMatch).toContain("Source: https://docs.internal.example.com/llms.txt ·");
+    expect(noMatch).not.toContain("super-secret-token");
+  });
+
+  it("a freshly fetched (not cached) document's stamp also strips the query string", async () => {
+    stubFetch({ [INTERNAL_URL]: "# Acme\n\n## Setup\n\nRun the installer." });
+    const out = await getDocsToolText(registry, { library: "acme" });
+    expect(out).toContain("Source: https://docs.internal.example.com/llms.txt ·");
+    expect(out).not.toContain("super-secret-token");
+  });
+
+  /** KNOWN GAP, deliberately not fixed here (both reviewers of this item confirmed it and the
+   *  README now names it explicitly): the "Candidates tried:" list on the nothing-fetched,
+   *  nothing-cached path was never part of `sourceStampLine`/`fitStampLine` — it renders
+   *  `entry.urls` directly (`get-docs.ts`'s `noDocStamp` branch) and was out of PAR-811's own
+   *  stated scope ("the Source:/provenance stamp", not every URL-rendering path in this file).
+   *  Pinned here so the gap is visible in code, not only in prose — and so this test starts
+   *  FAILING, not silently passing, the day someone closes it (tracked for 0.2.1). */
+  it("KNOWN GAP (0.2.1): unlike the stamp, the 'Candidates tried:' list on a total-miss still prints the query string in full", async () => {
+    stubFetch({}); // every candidate 404s, nothing cached
+    const out = await getDocsToolText(registry, { library: "acme" });
+    expect(out).toContain("Candidates tried:");
+    expect(out).toContain(INTERNAL_URL); // the raw url, query string and all — the gap
+  });
+});
+
 describe("getDocsToolText — version matching (A11/PAR-724)", () => {
   const REACT_URL = "https://react.dev/llms-full.txt";
   const registry: Registry = {

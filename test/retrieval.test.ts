@@ -1258,6 +1258,69 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
     expect(rendered.length).toBe(300);
   });
 
+  /** PAR-811 (security-architect, surfaced verifying PAR-791/792): a URL query string is the
+   *  ONLY mechanism this tool has for reaching an authenticated internal endpoint, so a token
+   *  there (a realistic internal-docs pattern) must never reach a rendered response — the
+   *  widest exposure this tool has, since the stamp reaches the model's own context on every
+   *  call. Same fix as `activity-log.ts`'s `sanitizeLoggedUrl` (D-51/PAR-792). */
+  it("PAR-811: strips the query string (and fragment) from the stamped url — a token must never reach a rendered response", () => {
+    const line = sourceStampLine({
+      url: "https://docs.internal.example.com/llms.txt?token=super-secret&user=alice#section-2",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    });
+    expect(line).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("super-secret");
+    expect(line).not.toContain("token");
+    expect(line).not.toContain("section-2");
+  });
+
+  it("PAR-811: a malformed url that new URL() cannot parse falls back to the original string, never dropping the stamp", () => {
+    const line = sourceStampLine({ url: "not a valid url at all", fetchedAt: "t", stale: false, curated: true });
+    expect(line).toBe("Source: not a valid url at all · fetched t · fresh · curated");
+  });
+
+  /** code-reviewer, PAR-811 round 2, SF2: on a URL that DOES parse, `stripStampQuery`'s
+   *  `new URL().href` round trip re-serializes it — lower-cased host, a dropped default port,
+   *  resolved `.`/`..` segments, an added trailing slash on a bare origin, punycode on a
+   *  non-ASCII host — as a side effect of stripping the query/fragment/userinfo, not a
+   *  deliberate normalization feature. Pinned here so a future change to this function cannot
+   *  silently alter these without a test noticing. The parse-FAILURE fallback above stays
+   *  un-re-serialized (verbatim), which is what keeps the file's own "config URLs are never
+   *  re-serialized" comment load-bearing for THAT branch. */
+  it("(code-reviewer, PAR-811 round 2, SF2) a successfully-parsed url is re-serialized (lower-cased host, default port dropped, trailing slash on a bare origin) as a side effect of stripping", () => {
+    expect(sourceStampLine({ url: "https://EXAMPLE.com/Path", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/Path · fetched t · fresh · curated",
+    );
+    expect(sourceStampLine({ url: "https://example.com", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/ · fetched t · fresh · curated",
+    );
+    expect(sourceStampLine({ url: "https://example.com:443/x", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/x · fetched t · fresh · curated",
+    );
+  });
+
+  /** security-architect, PAR-811 round 2, S-1: a credential can travel in a URL as userinfo
+   *  (`https://user:pass@host/…`) as well as a query string — the OTHER half of the syntax
+   *  this fix's own doc comment claims parity with `sanitizeLoggedUrl` on. Unlike the query
+   *  string, userinfo is not gated by any upstream validator on every path a stamped URL can
+   *  arrive by (a cache hit's `finalUrl` is read back through `cache-meta.ts`'s `validMetaUrl`,
+   *  which checks only length/parseability), so this must be stripped unconditionally here,
+   *  the same as the query string, not left to depend on that gate holding. */
+  it("(security-architect, PAR-811 round 2, S-1) strips userinfo (username:password@) from the stamped url, not only the query string", () => {
+    const line = sourceStampLine({
+      url: "https://svc:s3cr3t-password@docs.internal.example.com/llms.txt?token=also-secret",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    });
+    expect(line).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("s3cr3t-password");
+    expect(line).not.toContain("svc");
+    expect(line).not.toContain("@");
+  });
+
   describe("PAR-776 (D-74) — redirectedFrom", () => {
     it("is omitted entirely when absent — byte-identical to the pre-776 line", () => {
       expect(sourceStampLine({ ...base, stale: false, curated: true })).toBe(
@@ -1284,36 +1347,115 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
       const rendered = line.slice(line.indexOf("(redirected from ") + "(redirected from ".length, line.indexOf(") · fetched"));
       expect(rendered.length).toBe(300);
     });
+
+    /** PAR-811 merge: `redirectedFrom` is a URL too — the ORIGINAL candidate, just as capable
+     *  of carrying a `?token=…` as the final `url` is. Stripping only `url` and not this field
+     *  would have reopened the exact leak PAR-811 closed, just moved into the parenthetical. */
+    it("PAR-811: strips the query string from redirectedFrom too, not only from the final url", () => {
+      const line = sourceStampLine({
+        ...base,
+        url: "https://docs.internal.example.com/llms.txt",
+        redirectedFrom: "https://old.internal.example.com/llms.txt?token=super-secret",
+        stale: false,
+        curated: true,
+      });
+      expect(line).toBe(
+        "Source: https://docs.internal.example.com/llms.txt (redirected from https://old.internal.example.com/llms.txt) · fetched 2026-09-17T12:00:00.000Z · fresh · curated",
+      );
+      expect(line).not.toContain("super-secret");
+    });
+
+    /** code-reviewer, PAR-811 round 2, SF1: stripping the query (or fragment, or userinfo) can
+     *  make a candidate and its final URL — which genuinely differed pre-strip — collapse to
+     *  the IDENTICAL rendered string. An auth gateway validating `?token=…` then 302-ing to the
+     *  plain document is exactly this shape, and exactly the flow PAR-811 exists to protect.
+     *  Rendering "X (redirected from X)" would assert a move the line's own text refutes. */
+    it("(code-reviewer, PAR-811 round 2, SF1) omits the redirect parenthetical when stripping collapses redirectedFrom onto url — never asserts a move that (after stripping) didn't happen", () => {
+      const queryOnly = sourceStampLine({
+        ...base,
+        url: "https://docs.internal.example.com/llms.txt",
+        redirectedFrom: "https://docs.internal.example.com/llms.txt?token=super-secret",
+        stale: false,
+        curated: true,
+      });
+      expect(queryOnly).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+      expect(queryOnly).not.toContain("redirected from");
+
+      const fragmentOnly = sourceStampLine({
+        ...base,
+        url: "https://docs.internal.example.com/llms.txt",
+        redirectedFrom: "https://docs.internal.example.com/llms.txt#section",
+        stale: false,
+        curated: true,
+      });
+      expect(fragmentOnly).not.toContain("redirected from");
+
+      // A genuine host change must still render — collapsing must not become "never show it".
+      const genuineMove = sourceStampLine({
+        ...base,
+        url: "https://new.example.com/llms.txt",
+        redirectedFrom: "https://old.example.com/llms.txt?token=super-secret",
+        stale: false,
+        curated: true,
+      });
+      expect(genuineMove).toContain("(redirected from https://old.example.com/llms.txt)");
+    });
   });
 });
 
-describe("fitStampLine (PAR-776, D-74): degrades by dropping whole fields, redirectedFrom first", () => {
-  const facts = {
-    url: "https://example.com/llms.txt",
-    redirectedFrom: "https://old.example.com/llms.txt",
-    fetchedAt: "2026-09-17T12:00:00.000Z",
-    stale: false,
-    curated: true,
-  };
-  const full = sourceStampLine(facts);
-  const withoutRedirect = sourceStampLine({ ...facts, redirectedFrom: undefined });
-
-  it("returns the full line, redirectedFrom included, when it fits", () => {
-    expect(fitStampLine(facts, full.length)).toBe(full);
+describe("fitStampLine (A17/PAR-726, PAR-776, PAR-811): the same stamp, degraded to fit a small budget", () => {
+  it("PAR-811: strips the query string in every degraded variant, not only the full line", () => {
+    const facts = {
+      url: "https://docs.internal.example.com/llms.txt?token=super-secret",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    };
+    const full = fitStampLine(facts, 1000);
+    expect(full).not.toContain("super-secret");
+    const withoutCurated = fitStampLine(facts, full.length - 1);
+    expect(withoutCurated).not.toContain("super-secret");
+    expect(withoutCurated).not.toContain("curated");
+    const urlOnly = fitStampLine(facts, "Source: https://docs.internal.example.com/llms.txt".length);
+    expect(urlOnly).toBe("Source: https://docs.internal.example.com/llms.txt");
+    expect(urlOnly).not.toContain("super-secret");
   });
 
-  it("drops redirectedFrom FIRST — ahead of curated/freshness/fetched-at — once the full line doesn't fit", () => {
-    expect(fitStampLine(facts, full.length - 1)).toBe(withoutRedirect);
-  });
+  describe("PAR-776 (D-74): degrades by dropping whole fields, redirectedFrom first", () => {
+    const facts = {
+      url: "https://example.com/llms.txt",
+      redirectedFrom: "https://old.example.com/llms.txt",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    };
+    const full = sourceStampLine(facts);
+    const withoutRedirect = sourceStampLine({ ...facts, redirectedFrom: undefined });
 
-  it("drops curated/resolved next, once even the no-redirect line doesn't fit", () => {
-    const withoutCurated = `Source: ${facts.url} · fetched ${facts.fetchedAt} · fresh`;
-    expect(fitStampLine(facts, withoutRedirect.length - 1)).toBe(withoutCurated);
-  });
+    it("returns the full line, redirectedFrom included, when it fits", () => {
+      expect(fitStampLine(facts, full.length)).toBe(full);
+    });
 
-  it("degrades exactly like a document with no redirect at all once redirectedFrom is gone — no residual difference in the tail of the chain", () => {
-    const noRedirectFacts = { ...facts, redirectedFrom: undefined };
-    expect(fitStampLine(facts, 10)).toBe(fitStampLine(noRedirectFacts, 10));
+    it("drops redirectedFrom FIRST — ahead of curated/freshness/fetched-at — once the full line doesn't fit", () => {
+      expect(fitStampLine(facts, full.length - 1)).toBe(withoutRedirect);
+    });
+
+    it("drops curated/resolved next, once even the no-redirect line doesn't fit", () => {
+      const withoutCurated = `Source: ${facts.url} · fetched ${facts.fetchedAt} · fresh`;
+      expect(fitStampLine(facts, withoutRedirect.length - 1)).toBe(withoutCurated);
+    });
+
+    it("degrades exactly like a document with no redirect at all once redirectedFrom is gone — no residual difference in the tail of the chain", () => {
+      const noRedirectFacts = { ...facts, redirectedFrom: undefined };
+      expect(fitStampLine(facts, 10)).toBe(fitStampLine(noRedirectFacts, 10));
+    });
+
+    /** PAR-811 merge: a redirectedFrom carrying a token must not survive even the FIRST
+     *  degradation step (the full line, before redirectedFrom is dropped for length reasons). */
+    it("PAR-811: strips redirectedFrom's query string in the full (undegraded) line too", () => {
+      const withToken = { ...facts, redirectedFrom: "https://old.example.com/llms.txt?token=super-secret" };
+      expect(fitStampLine(withToken, 1000)).not.toContain("super-secret");
+    });
   });
 });
 
@@ -1397,6 +1539,51 @@ describe("sourceStampLine / fitStampLine — doctorKind field (A19/PAR-728)", ()
     const facts = { ...base, doctorKind: "readme" as const };
     const full = sourceStampLine(facts);
     expect(fitStampLine(facts, full.length)).toBe(full);
+  });
+});
+
+/** PAR-811 merge invariant: the query-string strip must survive combination with EVERY other
+ *  field this stamp has ever grown (PAR-776's redirectedFrom, A11's version, A19's doctorKind/
+ *  doctorCheckedAt) and every degrade width `fitStampLine` can produce — not just the narrow
+ *  "url alone" case each field's own test suite exercises in isolation. A merge that dropped
+ *  the strip from one of two independently-evolved code paths (exactly what happened once
+ *  already on this branch before this fix — see the redirectedFrom tests above) would pass
+ *  every field-specific test above and still leak a token through a path none of them combine. */
+describe("PAR-811 (merge invariant): no '?', '#' or userinfo from a source URL survives into any rendered stamp, at any degrade width, with any combination of optional fields", () => {
+  const hostileUrl = "https://svc:s3cr3t@docs.internal.example.com/a/b?token=super-secret&user=alice#frag-1";
+  const hostileRedirect = "https://svc2:s3cr3t2@old.internal.example.com/c/d?key=another-secret#frag-2";
+
+  const combos: Array<Parameters<typeof sourceStampLine>[0]> = [
+    { url: hostileUrl, fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    { url: hostileUrl, fetchedAt: "2026-09-17T12:00:00.000Z", stale: true, curated: false },
+    { url: hostileUrl, redirectedFrom: hostileRedirect, fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    { url: hostileUrl, redirectedFrom: hostileRedirect, version: "1.2.3", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    {
+      url: hostileUrl,
+      redirectedFrom: hostileRedirect,
+      version: "1.2.3",
+      doctorKind: "index-only",
+      doctorCheckedAt: "2026-09-17T00:00:00.000Z",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    },
+  ];
+
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: full line carries neither '?', '#' nor '@' (userinfo)", (_i, facts) => {
+    expect(sourceStampLine(facts)).not.toMatch(/[?#@]/);
+  });
+
+  /** security-architect, PAR-811 round 2, S-2: a SAMPLED set of widths only proves the
+   *  invariant holds at those exact lengths — a future field added to the stamp shifts where
+   *  each degrade step's boundary falls, and a sample can silently stop covering it. This is
+   *  the ONE test meant to survive the NEXT merge the way it caught this one, so it sweeps
+   *  every width from the full line down to the extreme minimum, not a handful of samples. */
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: EVERY fitStampLine degrade width, full line down to 1, carries neither '?', '#' nor '@' (userinfo)", (_i, facts) => {
+    const full = sourceStampLine(facts);
+    for (let width = full.length; width >= 1; width--) {
+      expect(fitStampLine(facts, width), `width ${width}`).not.toMatch(/[?#@]/);
+    }
   });
 });
 

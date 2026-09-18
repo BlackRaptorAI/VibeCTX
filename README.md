@@ -235,7 +235,9 @@ Every response that actually has a document to show — this one included — ca
 past its cache TTL, and whether the entry is curated (from the default registry or your
 config) or auto-resolved from a package name. Not just the FIRST time a name resolves — every
 call, so an agent two calls later still knows what it is reading, and can weigh it as
-retrieved external text rather than instruction. (Two things can precede it on the same
+retrieved external text rather than instruction. The url is rendered with its query string
+and fragment stripped — see [Activity log](#activity-log-vibectx-log) for why, and for the
+handful of other response surfaces (not the stamp) that still print a URL whole. (Two things can precede it on the same
 response: a `> STALE:` banner when the cached copy is past its TTL, and the one-time `>
 Resolved …` note on the call that first resolves a package name. The one response that never
 had a document — nothing reachable, nothing cached — still states curated-or-resolved; it
@@ -1315,21 +1317,35 @@ and the entry is simply not recorded.
 **Owner-only permissions.** `activity.json` is written `0600` (readable and writable
 only by you), self-healing on every write — a copy left world-readable by an older
 vibectx version is corrected the moment the next entry is recorded, not merely held
-steady from then on. **This protection is scoped to the log file itself** — its query
-string stripping and 0600 mode apply to `activity.json` only, not to the rest of the
-cache directory, and not to what vibectx returns to your agent. If a config entry's
-`urls` carries a secret in its query string (an internal docs endpoint behind a
-`?token=…`), that token still appears — unstripped, at default file permissions — in
-cache file names, `.meta.json`, the search index and project records, **and it is
-printed in the `Source:` line of every `get_docs` and `search` response**, so it also
-reaches your agent's context and whatever model provider that agent uses. vibectx has
-no way to send credentials in a request header — it sends a user agent and a
-conditional `If-None-Match`, nothing else — so a token in the URL is the only form it
-can carry one at all. If that applies to you, reach the endpoint by network-level means
-instead (a VPN, a fronting proxy, an IP allow-list) where you can; otherwise treat both
-your agent's transcripts and the whole cache directory as holding that secret (a
-`chmod 700` on the cache directory is on you — vibectx sets that mode only on a cache
-root it creates itself, not one that already existed).
+steady from then on. **The 0600 mode is scoped to the log file itself** — it applies
+to `activity.json` only, not to the rest of the cache directory.
+
+**It is not redacted everywhere.** If a config entry's `urls` carries a secret in
+its query string (an internal docs endpoint behind a `?token=…` — vibectx has no
+way to send credentials in a request header, only a user agent and a conditional
+`If-None-Match`, so the query string is the only form one can travel in at all),
+that token no longer reaches your agent's context through this log or through the
+`Source:` line every `get_docs`/`search` response carries (see [Tools](#tools)) —
+both strip the query string and any userinfo (`user:pass@`) before rendering.
+**Other tool responses still print the URL whole**: `get_docs`'s "Candidates
+tried:" list, shown exactly when nothing could be fetched and nothing is cached —
+the moment a token has expired or rotated; `refresh`'s "refreshed from `<url>`"
+line; `resolve_library`'s "urls (probed in order)" list; and `warm_project`'s
+`url` column. The `--json` form of the CLI commands emits it whole too —
+`vibectx doctor --json` and `vibectx search --json` both serialize the resolved
+URL to stdout, where a terminal or a CI log can hold it as easily as an agent's
+context can. Setting `VIBECTX_DEBUG` prints it whole too, to stderr, on every
+fetch failure — exactly the moment (a stale or rotated token) an operator is
+most likely to turn debugging on, and many MCP clients capture server stderr to
+a persistent log file. It is also unstripped, at default file permissions, in
+cache file names, `.meta.json`, the search index and project records. Treat a
+URL-borne token as visible to your
+agent and to anyone who can read the cache directory — a VPN, a fronting proxy or an IP
+allow-list at the network level is the safer way to reach such an endpoint where
+you can use one. Closing the remaining response paths, a general redaction
+policy, and a real authenticated-fetch mechanism (so a credential never has to
+travel in a URL at all) are open questions, deliberately not decided here —
+tracked for 0.2.1.
 
 `--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
 contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;
