@@ -29,19 +29,51 @@ gh pr list --state open
 ```
 
 For each one: merge it now, or write into the release Change Record's §5 which PR is deferred
-and why (e.g. "0.2.1, tracked as PAR-nnn"). An open PR the checklist didn't mention is the
-failure mode this step exists to catch.
+and why (e.g. deferred to 0.2.1, tracked as PAR-nnn). An open PR the checklist didn't mention
+is the failure mode this step exists to catch.
 
-## 3. Reconcile the milestone against the repository
+## 3. Where a finding belongs, strongest first — then reconcile the milestone against it
+
+Prose is the fallback, not the goal. Where a tool can be made to refuse rather than merely
+warn, file that enforcement change instead of a warning a future reader has to find and
+believe. A finding that lives only in prose is exactly how PAR-653's own blocker stayed
+invisible while its own issue body still told readers to run the probe, and PAR-746 records
+the general class: a finding that exists only in a comment, a code comment, or a chat relay is
+not a tracked finding.
+
+Strongest to weakest:
+
+1. **Enforced in code, at the point of use.** Where a tool can refuse to produce a misleading
+   result, that IS the record — nobody has to remember it or read it to be protected by it.
+2. **In the data.** A provenance or metadata field that travels with the artifact itself, so
+   anyone reading the artifact reads the caveat with it.
+3. **The release Change Record, §5.** The release-time status: what shipped with its done-when
+   unmet, and why. Versioned with the tag; what an auditor opens later.
+4. **`.vibectx-plan/DECISIONS.md`.** Only for a standing constraint with no expiry of its
+   own — e.g. no external ranking claim until a gold set is re-labelled. A decision, not a
+   status.
+5. **The tracker (Linear).** Discoverability, not authority. An issue POINTS AT levels 1–4
+   rather than restating their content — two independent prose copies of the same fact is how
+   they drift apart from each other.
 
 Every issue in the release milestone is `Done` or `Canceled`. Any whose Done-when was not
-fully met says so plainly, with the reason and a revisit-by — the PAR-658 pattern: its
-done-when ("correct section in top result improves over the current ranker") was recorded as
-NOT MET, in the release Change Record's §5 (not a Linear comment), with the actual reason
-(the eval corpus was GitHub READMEs, not the docs-site primaries the ranker was designed for
-— not a gold-set problem) and a revisit-by (re-run the eval once the real corpus is reachable,
-before any external ranking claim) — rather than being marked Done on a technicality or left
-Todo with no explanation.
+fully met records why at the strongest level available, and the milestone issue points at that
+record rather than repeating it.
+
+**Worked example — PAR-658.** Its done-when (PAR-658: `"correct section in top result"`
+improves over 0.1.2) is recorded NOT MET. What actually settled why is level 2, not level 3 or
+5: `docs/eval/probe-gold.json`'s own `provenance` field states "hand-labelled against GitHub
+README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox" — the
+gold set's LABELS were hand-written against README fallbacks because the real docs-site
+documents were unreachable at labelling time. The EVAL CORPUS is those real docs-site
+`llms-full.txt` documents, reachable now — the corpus is not the problem; the labels are,
+because they describe different documents than the corpus they are graded against today. That
+is exactly why the project's own remediation, PAR-827, is a RE-LABEL of the gold set, not a
+re-fetch of the corpus. Revisit-by is not running the eval again now that the corpus is
+reachable — it already is, and re-running it unchanged fixes nothing. The actual revisit-by is
+PAR-827: re-label `probe-gold.json` against the real corpora, extend the validator (level 1) to
+refuse when a resolved URL disagrees with the corpus its gold set declares, then re-run. No
+external ranking claim ships before that.
 
 ## 4. Re-measure after the last merge, not before
 
