@@ -75,9 +75,10 @@ dependencies' docs, or call `get_docs` for one library. See
 
 Update with `git pull && npm ci && npm run build`.
 
-> **On pinning:** this repository carries no release tags yet, so `main` is currently the
-> only thing to track. Once a `v*` tag exists, checking it out (`git checkout v0.1.3`) is
-> how you pin a version — with source distribution the tag is the release artifact.
+> **On pinning:** for a source-only distribution, the tag *is* the release artifact.
+> `git checkout v0.2.0` pins your clone to the latest released version; staying on `main`
+> instead tracks unreleased changes as they land. To move a pinned clone to a newer
+> release, `git fetch --tags` and check out the newer tag.
 
 ## Quickstart
 
