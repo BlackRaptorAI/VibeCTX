@@ -78,7 +78,9 @@ Update with `git pull && npm ci && npm run build`.
 > **On pinning:** for a source-only distribution, the tag *is* the release artifact.
 > `git checkout v0.2.0` pins your clone to the latest released version; staying on `main`
 > instead tracks unreleased changes as they land. To move a pinned clone to a newer
-> release, `git fetch --tags` and check out the newer tag.
+> release, `git fetch --tags` and check out the newer tag, then re-run
+> `npm ci && npm run build` — `dist/` is gitignored, so checking out a tag alone leaves
+> the old build in place.
 
 ## Quickstart
 
