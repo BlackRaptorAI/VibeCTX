@@ -46,24 +46,29 @@ cannot be deprecated or superseded. **This repository is the only current source
 
 ### Node versions
 
-`package.json` declares `engines: "^20.19.0 || >=22.12.0"` — the exact range the test
-toolchain needs (`vitest`'s `vite` dependency declares the same range) rather than the server
-itself, which builds and runs on less. The range is a disjunction, not a plain floor: Node
-21.x and 22.0.0–22.11.x satisfy `>=20.19.0` but not `vite`'s own requirement, so a plain floor
-would have silently admitted a broken toolchain there — `engines` now correctly documents
-those versions as unsupported (R-1/PAR-829). This is advisory, not enforced: no `.npmrc` here
-sets `engine-strict`, so `npm ci` on an excluded version still only warns (`EBADENGINE`)
+`package.json` declares `engines: "^20.19.0 || ^22.12.0 || >=24.0.0"` — the INTERSECTION of
+what the test toolchain's own two dependencies need (`vite` and `vitest` each declare their
+own range; this is derived from both, not one) — rather than the server itself, which builds
+and runs on less. The range excludes three bands a naive floor would have admitted: Node 21.x
+and 22.0.0–22.11.x (`vite`'s own requirement — a plain `>=20.19.0` floor silently admitted
+both) and Node 23.x (`vitest`'s own requirement — a bare `>=22.12.0`, derived from `vite`
+alone, silently admitted this one; "the Node 23 hole," D-80). `engines` now correctly
+documents all three as unsupported (R-1/PAR-829). This is advisory, not enforced: no `.npmrc`
+here sets `engine-strict`, so `npm ci` on an excluded version still only warns (`EBADENGINE`)
 rather than failing — the value of the fix is accuracy of the stated requirement, same as
 D-75's own reasoning for the plain floor it replaces. CI (`.github/workflows/ci.yml`) builds
-and tests both ends of the range — the **20.19 line** and **22** (resolving to the latest,
-≥22.12) — but not the excluded middle band: the manifest documents it as unsupported, and
-there is nothing supported there for CI to run.
+and tests the low and high ends — the **20.19 line** and **22** (resolving to the latest,
+≥22.12) — but not the excluded bands: the manifest documents them as unsupported, and there is
+nothing supported there for CI to run. `test/engines.test.ts` asserts `engines.node` is a
+`semver` SUBSET of both `vite`'s and `vitest`'s own ranges (not merely equal to one of them),
+so a future dependency bump that narrows either range again fails the suite instead of
+silently reopening a hole.
 
 ## Build, test, lint
 
 ```bash
 npm run build   # tsc → dist/
-npm test        # vitest run  (needs Node ^20.19.0 || >=22.12.0)
+npm test        # vitest run  (needs Node ^20.19.0 || ^22.12.0 || >=24.0.0)
 npm run lint    # tsc --noEmit
 npm run dev     # tsc --watch
 ```

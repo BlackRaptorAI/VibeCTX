@@ -14,16 +14,19 @@ on:
   pull_request:
 
 jobs:
-  # R-1 / PAR-829 — `package.json`'s `engines.node` is `^20.19.0 || >=22.12.0`, `vite`'s own
-  # declared range (Tom's decision: fix the constraint rather than document around it — a plain
-  # `>=20.19.0` floor silently admitted Node 21.x and 22.0.0–22.11.x, which `vite` itself does
-  # not support). `test-matrix` proves both ends of that disjunction: `20.19.x` (the low end)
-  # and `22`, which resolves to the latest ≥22.12 (the high end) — this is the FIRST run that
-  # actually exercises 20.19.x; nothing had before. The excluded middle band (21.x, 22.0–22.11)
-  # is deliberately NOT a third matrix leg: `engines` now documents it as unsupported (though
-  # `npm` does not enforce that by default — no `.npmrc` here sets `engine-strict`, so an
-  # install there still only warns), and there is nothing SUPPORTED in that band to test against
-  # — see D-80 in DECISIONS.md.
+  # R-1 / PAR-829 — `package.json`'s `engines.node` is `^20.19.0 || ^22.12.0 || >=24.0.0`, the
+  # INTERSECTION of `vite`'s and `vitest`'s own declared ranges (Tom's decision: fix the
+  # constraint rather than document around it — a plain `>=20.19.0` floor silently admitted
+  # Node 21.x and 22.0.0–22.11.x, which `vite` itself does not support; deriving from `vite`
+  # alone then silently admitted 23.x too, which `vitest` itself does not support — narrower
+  # than `vite`'s own range in that band. Two dependencies, not one: see D-80 in DECISIONS.md,
+  # "the Node 23 hole," for the regression this recurred as before `test/engines.test.ts` was
+  # rewritten to check both). `test-matrix` proves the low and high ends: `20.19.x` and `22`,
+  # which resolves to the latest ≥22.12 — this is the run that actually exercises `20.19.x`;
+  # nothing had before. The excluded bands (21.x, 22.0–22.11, 23.x) are deliberately NOT
+  # separate matrix legs: `engines` now documents them as unsupported (though `npm` does not
+  # enforce that by default — no `.npmrc` here sets `engine-strict`, so an install there still
+  # only warns), and there is nothing SUPPORTED in any of those bands to test against.
   test-matrix:
     strategy:
       # One leg failing (a flake on the runner, say) must not hide the other leg's result —

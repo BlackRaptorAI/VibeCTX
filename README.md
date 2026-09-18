@@ -26,15 +26,16 @@ copy, clearly flagged as stale, instead of a failure.
 ## Install
 
 VibeCTX runs from a local clone. You need git and Node — `package.json` declares
-**`^20.19.0 || >=22.12.0`**, the exact range `vitest`'s `vite` dependency itself requires to
-run the test suite (constrained there rather than by the server itself, which needs less), so
-Node 21.x and 22.0.0–22.11.x — versions a plain `>=20.19.0` floor would have silently admitted
-and `vite` does not support — are now correctly documented as unsupported (`npm` does not
+**`^20.19.0 || ^22.12.0 || >=24.0.0`**, the INTERSECTION of what the test suite's own two
+dependencies, `vite` and `vitest`, each require (constrained there rather than by the server
+itself, which needs less). Node 21.x, 22.0.0–22.11.x, and 23.x — versions a naive floor
+derived from either dependency alone would have silently admitted, and that the other
+dependency does not support — are now correctly documented as unsupported (`npm` does not
 enforce `engines` by default, so an install there still only warns, `EBADENGINE`, rather than
-failing — the field states the true requirement either way). CI builds and tests both ends of
-the range: the **20.19 line** and **22** (resolving to the latest, ≥22.12) — the excluded
-middle band is documented, not separately exercised by CI (there is nothing supported there
-to run).
+failing — the field states the true requirement either way). CI builds and tests the low and
+high ends: the **20.19 line** and **22** (resolving to the latest, ≥22.12) — the excluded
+bands are documented, not separately exercised by CI (there is nothing supported there to
+run).
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
@@ -1400,7 +1401,7 @@ your setup. Real-world reports directly shape what gets built.
 
 ```bash
 npm ci
-npm test        # vitest (needs Node ^20.19.0 || >=22.12.0 — see Install, above)
+npm test        # vitest (needs Node ^20.19.0 || ^22.12.0 || >=24.0.0 — see Install, above)
 npm run build   # tsc → dist/
 npm run lint    # tsc --noEmit
 ```

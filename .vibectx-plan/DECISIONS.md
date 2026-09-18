@@ -942,9 +942,12 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ## D-80 — decided 2026-09-17, executing R-1 / PAR-829 (supersedes this entry's own prior text)
 
-- **D-80** 2026-09-17 — **`package.json`'s `engines.node` is `^20.19.0 || >=22.12.0` — `vite`'s
-  own exact declared range, read directly from `node_modules/vite/package.json` (v7.3.6) rather
-  than trusted from any prior record — not a plain `>=20.19.0` floor approximating it.**
+- **D-80** 2026-09-17, updated 2026-09-18 — **`package.json`'s `engines.node` is `^20.19.0 ||
+  ^22.12.0 || >=24.0.0` — the INTERSECTION of `vite`'s and `vitest`'s own declared ranges, read
+  directly from `node_modules/{vite,vitest}/package.json` rather than trusted from any prior
+  record — not a plain floor approximating either, and not derived from `vite` alone (see the
+  2026-09-18 update below: deriving from one dependency and ignoring the other is exactly the
+  class of gap this decision exists to close, and it recurred one dependency over).**
   **What this entry originally recorded, and why that was wrong to leave standing:** this
   entry first recorded CI proving the floor's LOWER bound only, leaving `engines.node
   >=20.19.0` in place and noting (via two rounds of code-reviewer correction — see git history
@@ -998,6 +1001,58 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `package.json`, `package-lock.json`, `.github/workflows/ci.yml`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CLAUDE.md`,
   `CONTRIBUTING.md` (R-1 / PAR-829, commit `7907983`).
+
+  **2026-09-18 update (PAR-830 fallout): `vitest` bumped to 4.1.11 — clearing two moderate
+  advisories, unrelated to this item — and its own declared `engines.node` narrowed to
+  `^20.0.0 || ^22.0.0 || >=24.0.0`, DIFFERENT from and narrower than `vite`'s
+  `^20.19.0 || >=22.12.0` in the 22.x/23.x band. The 2026-09-17 fix above had derived
+  `engines.node` from `vite` alone; it never looked at `vitest`'s own range at all.**
+  **The diagnostic Tom asked for, before anything was changed:** run `npm test` after the
+  merge+`npm ci` and check whether `test/engines.test.ts` — which asserted `ours === vite's
+  engines.node` by STRING EQUALITY — still passed. It did. `vite` itself bumped to 8.3.0 in the
+  same `npm install` but kept the identical `^20.19.0 || >=22.12.0` string, so the equality
+  check had nothing to disagree with; it never once consulted `vitest`'s range, so it could not
+  have caught `vitest` narrowing regardless of what `vite` did. **This is finding (b) from the
+  item's own framing, not (a): the test was pinning a literal comparison, not enforcing an
+  invariant** — it would keep passing forever against a `vitest` bump that moved its range
+  anywhere, because nothing in it ever read `vitest`'s `package.json` at all.
+  **The real gap this exposed — "the Node 23 hole":** a bare `>=22.12.0` (the 2026-09-17 value)
+  admits Node 23.x. `vitest`'s new range does not: `^22.0.0` stops before 23.0.0, and the next
+  band starts at `>=24.0.0` — nothing covers 23.x. Left uncorrected, `engines.node` would have
+  silently re-admitted exactly the class of defect this whole item exists to close, one Node
+  major over from the one it already fixed.
+  **The fix:** `engines.node` is now the INTERSECTION of `vite`'s and `vitest`'s ranges —
+  `^20.19.0 || ^22.12.0 || >=24.0.0` — computed and VERIFIED with `semver.subset()`
+  (`semver@7.8.5`, added as a new devDependency; there was no existing semver-range library
+  anywhere in the tree to reuse, and Tom's own instruction was explicit: approximating this by
+  hand is the failure mode, not an acceptable shortcut — `semver.subset()` itself has a real
+  boundary quirk around caret-expanded prerelease exclusions (`<23.0.0` vs the internally
+  normalized `<23.0.0-0`) that was hit and worked around while deriving this, which is itself
+  evidence FOR using the library rather than hand-rolling the same interval algebra worse).
+  `test/engines.test.ts` was rewritten from a single string-equality assertion into three: `ours`
+  is a `semver.subset()` of `vite`'s range, `ours` is a `semver.subset()` of `vitest`'s range,
+  and — a non-vacuity check, D-24's own "an empty result is not a passing result" pattern
+  applied here — Node `23.0.0` is confirmed to fail `semver.satisfies(v, ours)`, so the test
+  cannot pass by accident against a range that silently reopened the hole. VERIFIED the new test
+  actually discriminates, not just that it passes: reverted `engines.node` to the OLD
+  `>=22.12.0` value locally and re-ran it — 2 of 3 assertions failed exactly as the subset/hole
+  checks predict — then restored the fix. `package-lock.json` regenerated via `npm install
+  --save-dev semver` and `npm install --package-lock-only`; `npm ci` afterward reinstalls clean
+  from it. An unrelated cosmetic side effect of `npm install` rewriting `package.json` (the
+  `description` field's em dash re-escaped from a literal character to `—`, and the
+  file's trailing newline added) was reverted by hand so the diff carries only the intended
+  two-line change (`engines.node`, the new `semver` devDependency) — neither is a semantic
+  difference, but an unexplained unrelated diff line is exactly what CLAUDE.md's own
+  diff-stat-by-eye rule (added this same day, PAR-831) exists to catch.
+  **Verified on the merged tree:** `npm ci && npm run lint && npm test && npm run build` clean
+  on Node v26.0.0 (this session's local machine) — 45 files, 1629 tests (was 1627: two new
+  assertions in the rewritten `engines.test.ts`). CI's own matrix legs are the actual proof for
+  `20.19.x`/`22`, re-run after this push — see the round 4 review below for that result.
+  D-number re-checked against `origin/main`, `release-0.2.0`, and (now merged) `par-831` after
+  this merge: still only D-79 exists on any of them; D-80 stays D-80, no renumbering (per
+  CLAUDE.md/PAR-831's own new rule — pick right before opening the PR, which this already was).
+  Ref (2026-09-18 update): `package.json`, `package-lock.json`, `test/engines.test.ts`
+  (rewritten) (PAR-830 fallout, R-1 / PAR-829).
 
   **Round 3 review (code-reviewer — a fresh pass on the manifest fix; rounds 1/2 reviewed this
   entry's now-superseded prior text and are not repeated here), PASS with should-fixes, no
