@@ -9,7 +9,7 @@ offline, deterministic, no recurring cost. MIT licensed.
 ```
 npm ci
 npm run build   # tsc -> dist/
-npm test        # vitest run   (needs Node >= 20.19; CI runs Node 22)
+npm test        # vitest run   (needs Node >= 20.19; CI runs 20.19.x and 22, R-1/PAR-829)
 npm run lint    # tsc --noEmit
 ```
 

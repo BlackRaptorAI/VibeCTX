@@ -937,3 +937,38 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref (round 1 fixes): `src/doctor-store.ts`, `src/doctor.ts`, `src/list-libraries.ts`,
   `src/get-docs.ts`, `src/retrieval.ts`, `src/cache-meta.ts`, `src/limits.ts`, `src/cli.ts`,
   `README.md`.
+
+---
+
+## D-80 — decided 2026-09-18, executing R-1 / PAR-829
+
+- **D-80** 2026-09-18 — **CI proves `package.json`'s `engines.node` floor (`>=20.19.0`, D-3/
+  PAR-778) directly: a matrix job runs the full suite on `20.19.x` alongside the version CI
+  already ran, on every PR and push to `main`.** Before this the floor was stated, never
+  exercised — CI, the 2026-09-17 release pre-flight and the final pre-release test run had all
+  been on a NEWER Node (v22 in CI, v26.0.0 locally) than the declared floor.
+  **Premise check against the tree first:** the issue expected an existing accepted-risk row in
+  `CR-20260917-release-0.2.0.md` §5 to rewrite; checked against the committed tree, no such row
+  existed (the CR's own commit, `924da67`, never included one) — the row is added directly as a
+  closed, measured item instead, with an editorial note recording the mismatch, the same
+  practice this file has used for a stale issue premise before (D-73).
+  **Branch protection, the item's own stated constraint:** the required status check is the
+  literal string `test`. A job carrying `strategy.matrix` itself reports under a name GitHub
+  suffixes per combination (`test (20.19.x)`, `test (22)`) — not the string `test` — which would
+  silently stop matching and make every PR unmergeable until someone updated the repo's
+  required-checks setting. Solved with the standard "required-check aggregator" shape rather
+  than by touching that setting: the matrix runs in a new `test-matrix` job (no branch-protection
+  claim on it), and a thin `test` job — carrying no matrix, so its own check name is unchanged —
+  depends on it (`needs: test-matrix`) and fails only if the matrix as a whole did not succeed
+  (`if: always()`, so the gate itself still runs and reports even when a matrix leg fails, rather
+  than being skipped as a dependent of a failed job and leaving the required check with no status
+  at all). No repo settings change needed; branch protection is unaffected.
+  **Both ends verified before this shipped, not just configured:** locally, on the closest
+  obtainable build to the CI matrix's own `20.19.x` leg (Homebrew's `node@20`, 20.20.2 — Node 20
+  itself is end-of-life 2026-10-28 and Homebrew no longer distributes the `20.19.z` patch line
+  separately) — `npm ci`, lint, the full 1,626-test suite and the build all passed, unchanged
+  from the default Node. The floor holds; nothing in `package.json` or the README needed
+  raising. `CLAUDE.md` and `README.md`'s own "CI runs Node 22" claims (now stale the moment a
+  second version joined the matrix) are corrected in the same change.
+  Ref: `.github/workflows/ci.yml`, `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`,
+  `CLAUDE.md`, `README.md` (R-1 / PAR-829).

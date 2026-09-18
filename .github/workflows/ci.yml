@@ -11,15 +11,46 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # R-1 / PAR-829 — `package.json`'s `engines.node` floor is `>=20.19.0` (D-3/PAR-778), but
+  # nothing had ever run the suite at that version; CI ran only the latest Node. `test-matrix`
+  # proves both ends: the declared floor, and the version everything was actually built/tested
+  # against before this.
+  test-matrix:
+    strategy:
+      # One leg failing (a flake on the runner, say) must not hide the other leg's result —
+      # the whole point here is to see BOTH numbers, not stop at the first red.
+      fail-fast: false
+      matrix:
+        node-version: ["20.19.x", "22"]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 22
+          node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
       - run: npm run lint
       - run: npm test
       - run: npm run build
+
+  # Branch protection's required check is named `test`. A job that itself carries
+  # `strategy.matrix` reports under a name GitHub suffixes per combination (`test (20.19.x)`,
+  # `test (22)`), which is not the literal string `test` and would stop matching — every PR
+  # becomes unmergeable until someone notices and updates the repo's required-checks setting
+  # (R-1/PAR-829's own stated risk). This thin gate job carries NO matrix, so its check name is
+  # exactly `test`, unchanged from before this file added one; it only reports pass/fail of
+  # `test-matrix` as a whole. `if: always()` — this job must still run (and see the real
+  # result) even when a matrix leg fails, rather than being skipped as a dependent of a failed
+  # job, which would leave the required check with no status at all.
+  test:
+    needs: test-matrix
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have passed
+        run: |
+          if [ "${{ needs.test-matrix.result }}" != "success" ]; then
+            echo "test-matrix: ${{ needs.test-matrix.result }} (one or more Node versions failed or were cancelled)" >&2
+            exit 1
+          fi
