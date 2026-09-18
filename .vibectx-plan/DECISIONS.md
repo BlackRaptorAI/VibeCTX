@@ -947,11 +947,27 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   already ran, on every PR and push to `main`.** Before this the floor was stated, never
   exercised — CI, the 2026-09-17 release pre-flight and the final pre-release test run had all
   been on a NEWER Node (v22 in CI, v26.0.0 locally) than the declared floor.
-  **Premise check against the tree first:** the issue expected an existing accepted-risk row in
-  `CR-20260917-release-0.2.0.md` §5 to rewrite; checked against the committed tree, no such row
-  existed (the CR's own commit, `924da67`, never included one) — the row is added directly as a
-  closed, measured item instead, with an editorial note recording the mismatch, the same
-  practice this file has used for a stale issue premise before (D-73).
+  **Premise check against the tree first — and code-reviewer round 1's B-1 correction to it:**
+  the issue expected an existing accepted-risk row in `CR-20260917-release-0.2.0.md` §5 to
+  rewrite. Checked against `main` only (this branch's base), no such row existed there — but
+  round 1 review caught that this check was incomplete: a MORE COMPLETE row, twice
+  code-reviewed, already exists on the unmerged `release-0.2.0` branch (`cf610d6`, sharpened by
+  `5715301`/`7c4af55`), which was never checked. That row makes a finding this item does NOT
+  close — see below — so the CR row here is written narrowly, as partial progress against
+  `release-0.2.0`'s existing row rather than as its (nonexistent-on-`main`) replacement, with an
+  editorial note pointing at `par-831-pretag-reconciliation` (itself branched from
+  `release-0.2.0`, already touching the same file) as the place the two get reconciled before
+  the 0.2.0 tag. This is a sharper version of the same lesson D-73 recorded: a premise check is
+  only as good as the ref it's checked against, and "the committed tree" can mean more than one
+  unmerged branch at once.
+  **What this item actually closes, and what it does not:** `release-0.2.0`'s row observes that
+  `vite`'s own declared range is `^20.19.0 || >=22.12.0` — a disjunction — so `engines.node
+  >=20.19.0` silently admits Node 21.x and 22.0.0–22.11.x, neither of which `vite` itself
+  supports. This item's matrix (`20.19.x`, and `22` which resolves to the latest ≥22.12) sits
+  entirely inside vite's own supported range on both legs — it proves the floor's LOWER bound,
+  20.19.0, but does not touch the silently-admitted gap band at all. The floor holds; nothing in
+  `package.json` needed raising; the gap is unclosed and stays `release-0.2.0`'s own open item
+  (tighten `engines.node` to the disjunctive form, or add a third matrix leg inside the gap).
   **Branch protection, the item's own stated constraint:** the required status check is the
   literal string `test`. A job carrying `strategy.matrix` itself reports under a name GitHub
   suffixes per combination (`test (20.19.x)`, `test (22)`) — not the string `test` — which would
@@ -959,16 +975,49 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   required-checks setting. Solved with the standard "required-check aggregator" shape rather
   than by touching that setting: the matrix runs in a new `test-matrix` job (no branch-protection
   claim on it), and a thin `test` job — carrying no matrix, so its own check name is unchanged —
-  depends on it (`needs: test-matrix`) and fails only if the matrix as a whole did not succeed
-  (`if: always()`, so the gate itself still runs and reports even when a matrix leg fails, rather
-  than being skipped as a dependent of a failed job and leaving the required check with no status
-  at all). No repo settings change needed; branch protection is unaffected.
+  depends on it (`needs: test-matrix`) and fails only if the matrix as a whole did not succeed.
+  `if: always()` here is LOAD-BEARING, not defensive (code-reviewer round 1, S-1): without it
+  this job is SKIPPED when `test-matrix` fails, and GitHub reports a skipped job as check-run
+  conclusion `skipped` — which branch protection treats as PASSING, the opposite of "no status."
+  Removing `always()` would make this gate green exactly when the matrix is red (confirmed
+  against GitHub's own documented required-status-check behaviour, not assumed). No repo
+  settings change needed; branch protection is unaffected.
   **Both ends verified before this shipped, not just configured:** locally, on the closest
-  obtainable build to the CI matrix's own `20.19.x` leg (Homebrew's `node@20`, 20.20.2 — Node 20
-  itself is end-of-life 2026-10-28 and Homebrew no longer distributes the `20.19.z` patch line
-  separately) — `npm ci`, lint, the full 1,626-test suite and the build all passed, unchanged
-  from the default Node. The floor holds; nothing in `package.json` or the README needed
-  raising. `CLAUDE.md` and `README.md`'s own "CI runs Node 22" claims (now stale the moment a
-  second version joined the matrix) are corrected in the same change.
+  obtainable build to the CI matrix's own `20.19.x` leg (Homebrew's `node@20`, 20.20.2 — not
+  `20.19.x` itself: Node 20's own upstream end-of-life was 2026-04-30 (nodejs.org), separate
+  from Homebrew's own `node@20` formula-removal date of 2026-10-28, and the `20.19.z` patch line
+  is no longer separately distributed by either) — `npm ci`, lint, the full 1,626-test suite and
+  the build all passed, unchanged from the default Node. This local run is a proxy, not the
+  proof — held provisional until this PR's own CI matrix reports `20.19.x` green, at which point
+  the CR row should be updated with that run's URL. `CLAUDE.md` and `README.md`'s own "CI runs
+  Node 22" claims (now stale the moment a second version joined the matrix) are corrected in the
+  same change.
   Ref: `.github/workflows/ci.yml`, `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`,
   `CLAUDE.md`, `README.md` (R-1 / PAR-829).
+
+  **Round 1 review (code-reviewer), one blocking finding fixed before push:**
+  - **B-1 (BLOCKING):** the premise-check above had only been run against `main`; a more
+    complete, twice-reviewed Node-floor row already existed on the unmerged `release-0.2.0`
+    branch, dropping a real finding (the vite-disjunction gap) and setting up a guaranteed
+    conflicting duplicate row at merge/tag time. Fixed: both the CR row and this record now cite
+    `release-0.2.0`'s row explicitly, narrow the disposition to "the floor's lower bound is
+    measured, the disjunction gap is not," and point at `par-831-pretag-reconciliation` as where
+    the two rows get reconciled — see above.
+  - **Should-fix, applied:** the `if: always()` rationale was backwards (it said a skipped
+    dependent leaves "no status," when GitHub actually reports `skipped` and branch protection
+    treats that as passing — the opposite risk); corrected in both the workflow comment and
+    above, cited against GitHub's own documented behaviour. The CR/DECISIONS Node-20-EOL date
+    was wrong (2026-10-28, actually Homebrew's own `node@20` formula-removal date, not Node's
+    upstream EOL of 2026-04-30 per nodejs.org) — corrected, both dates now stated and
+    attributed. The CR's disposition is now explicitly provisional on this PR's own CI run
+    rather than resting on the local Node 20.20.2 proxy alone. `README.md`'s Install-section
+    PAR reference was dropped (internal tracker jargon in user-facing text) in favour of keeping
+    that traceability in this record and the CR. `ci.yml` gained `permissions: contents: read`
+    (matching `doctor.yml`'s own existing convention), `timeout-minutes: 15` on `test-matrix`,
+    the `needs.test-matrix.result` comparison moved out of inline `${{ }}` interpolation into an
+    `env:` var (house style for shell steps, even though this particular value is a
+    GitHub-controlled enum with no injection risk), and a one-line forward-guard comment noting
+    the gate's correctness depends on `test-matrix` never gaining `continue-on-error` or a
+    per-leg `if:`.
+  Ref (round 1 fixes): `.github/workflows/ci.yml`,
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`.

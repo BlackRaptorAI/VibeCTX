@@ -28,8 +28,8 @@ copy, clearly flagged as stale, instead of a failure.
 VibeCTX runs from a local clone. You need git and Node — `package.json` declares
 **Node ≥ 20.19** (vitest's `vite` dependency requires `^20.19.0 || >=22.12.0` to run the test
 suite; the floor is set there rather than for the server itself, which needs less), and CI
-(R-1/PAR-829) builds and tests on both **20.19.x** — the declared floor itself — and **22**,
-so the floor is a measurement, not merely a claim.
+builds and tests on both the **20.19 line, at the declared floor**, and **22**, so the floor
+is a measurement, not merely a claim.
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
