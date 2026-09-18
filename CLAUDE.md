@@ -24,12 +24,20 @@ npm run lint    # tsc --noEmit
      config URL handling, the cache or search index on disk, or any file delete/rename.
    Fix blocking findings. File everything else as a Linear issue. No second round unless the
    first found something blocking.
-5. Push the branch and open a PR. The PR description holds: what changed, each Done-when line
-   marked met / not met, and the review findings (paste them). Link the PR on the Linear issue.
+5. Before pushing: `git fetch origin && git diff --stat origin/main HEAD` (two dots, not
+   three — three-dot hides exactly the failure this catches). Confirm by eye that it deletes
+   nothing belonging to another item — a branch that fell behind `main` can otherwise look, at
+   merge time, like it reverts work someone else just landed (this has happened).
+   Push the branch and open a PR. The PR description holds: what changed, each Done-when line
+   marked met / not met, the review findings (paste them), and that `git diff --stat` output.
+   Link the PR on the Linear issue.
 6. **Never merge and never push to `main`.** Tom merges (squash).
    To bring a PR branch up to date: `git fetch origin && git merge origin/main`, fix conflicts,
    re-run lint + tests, push. Merge, don't rebase — force-push is blocked.
 7. If a Done-when is wrong or can't be met, say so in the PR and move on. Tom decides.
+
+Before cutting a release tag, see `RELEASING.md` — a merged-and-reviewed PR is not yet a
+released one, and that gap has bitten this repo.
 
 Not used on this repo: per-item Change Records, verdict JSON blocks, phase gates, go blocks,
 handoff bundles, test-count baselines, MEASURED annotations. CI is the record of test results.
@@ -46,9 +54,13 @@ One Change Record is written per release.
   `src/link-policy.ts` host policy; internal hosts only via `allowInternalHosts`; symlinks are
   refused, never followed, in discovery, config walk-up and cache eviction; response bodies and
   inputs are bounded.
-- Producers edit `src/`, `test/`, `docs/`, `README.md`. Ask before touching `.github/` or
-  `package.json`.
+- Producers edit `src/`, `test/`, `docs/`, `README.md`, `RELEASING.md`. Ask before touching
+  `.github/` or `package.json`.
 - Product decisions get one line in `.vibectx-plan/DECISIONS.md`. Process notes do not.
+- Pick the D-number after your last `git fetch origin` (step 5), right before opening the PR —
+  never when the work starts. Two sessions can still both fetch before either has opened a PR
+  and pick the same next number; if that happens, whichever merges second renumbers before
+  merging. Has collided three times: D-71, D-76, D-78.
 
 ## Scope and claims
 
