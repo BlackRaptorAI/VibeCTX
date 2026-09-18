@@ -1132,3 +1132,41 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref (round 4 fixes): `.github/workflows/ci.yml`, `test/engines.test.ts`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`,
   `CLAUDE.md`.
+
+## D-81 — decided 2026-09-18, executing PAR-832 root cause B (clerk)
+
+- **D-81** 2026-09-18 — `clerk`'s curated `urls` now try `https://clerk.com/docs/llms.txt`
+  first, ahead of `https://clerk.com/llms-full.txt`. Investigated and MEASURED 2026-09-18, not
+  taken from the filing issue's own claim: `llms-full.txt` is 768 bytes (curl/Node `fetch`
+  agree) and is not a content index at all — it is a meta-index of OTHER `llms-full.txt` files
+  (Documentation, Articles, Blog, Changelog, Glossary, Dashboard index). None of those six link
+  titles overlaps either of clerk's own `probeQueries` ("middleware protect routes", "useUser
+  hook"), so `rankLinks` scores every candidate 0 and index-following never starts — `doctor`
+  reported clerk `matched 0, dropped {0,0,0}`, a distinct shape from a real link-index page that
+  simply has some links refused (that shape follows > 0 and drops some).
+  `docs/llms.txt` (520,419 bytes, MEASURED) is the real thing: an index of `.md`-suffixed doc
+  pages whose titles include a direct hit for each probe (`useUser()`; "Protect content from
+  unauthenticated users"). `getLibraryDoc` (`src/cache.ts`) tries `entry.urls` in order and
+  commits to the first one that fetches successfully — a 200-OK meta-index still fetches
+  successfully, so nothing in that loop would ever fall through to a better candidate on its
+  own. The fix is the ORDER, not new code.
+  **Explicitly rejected:** substituting `docs/llms-full.txt` (a real, complete content dump,
+  unlike the meta-index) in `llms-full.txt`'s place. MEASURED 2026-09-18: 27,860,399 bytes —
+  over `PRIMARY_DOC_MAX_BYTES` (25 MiB / 26,214,400 bytes) and would be refused outright.
+  **Coverage check, this entry's own scope:** every other curated entry whose first candidate is
+  a bare-host `llms-full.txt` was checked live (GET, real status + byte count, Node's own
+  `fetch` — not just `curl`, to rule out a client-specific block) for the same failure shape (a
+  200 response whose body is itself a tiny link-only meta-index). None were found. Two other,
+  DIFFERENT and unrelated shapes turned up in the same sweep and are explicitly NOT this
+  decision's scope: several first-candidate URLs now 404 (`docs.stripe.com`, `react.dev`,
+  `tailwindcss.com`, `ui.shadcn.com`, `firebase.google.com`, `playwright.dev`,
+  `reactrouter.com`, `docs.astro.build`, `motion.dev`, MEASURED 2026-09-18) — harmless today,
+  because a 404 IS caught by the existing try-next-candidate fallback, unlike a 200-OK
+  meta-index; and `docs.anthropic.com/llms-full.txt` redirects to a 35,109,013-byte document,
+  itself over `PRIMARY_DOC_MAX_BYTES`. Neither is this issue's failure shape and neither is
+  fixed here — noted for whoever picks up the registry's other stale entries, not actioned.
+  **Verified live:** `vibectx doctor --library clerk --json` against a fresh cache, real
+  network, MEASURED 2026-09-18 — `url: "https://clerk.com/docs/llms.txt"`, both probes
+  `index-followed` (5 followed / 0 dropped each, 10/0 total), `healthy: true`.
+  Ref: `src/registry.ts` (clerk's `urls`), `test/registry.test.ts` ("clerk's curated urls prefer
+  the real index over the llms-full.txt meta-index (D-81/PAR-832)").
