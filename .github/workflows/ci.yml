@@ -14,12 +14,17 @@ on:
   pull_request:
 
 jobs:
-  # R-1 / PAR-829 — `package.json`'s `engines.node` floor is `>=20.19.0` (D-3/PAR-778), but
-  # nothing had ever run the suite at that version; CI ran only the latest Node. `test-matrix`
-  # proves both ends: the declared floor, and the version everything was actually built/tested
-  # against before this. Neither leg here closes the WIDER, separately tracked gap that
-  # `engines.node >=20.19.0` silently admits Node 21.x and 22.0.0–22.11.x, both of which
-  # `vite`'s own declared range (`^20.19.0 || >=22.12.0`) excludes — see D-80 in DECISIONS.md.
+  # R-1 / PAR-829 — `package.json`'s `engines.node` is `^20.19.0 || >=22.12.0`, `vite`'s own
+  # declared range (Tom's decision: fix the constraint rather than document around it — a plain
+  # `>=20.19.0` floor silently admitted Node 21.x and 22.0.0–22.11.x, which `vite` itself does
+  # not support). `test-matrix` proves both ends of that disjunction: `20.19.x` (the low end)
+  # and `22`, which resolves to the latest ≥22.12 (the high end) — this is the FIRST run that
+  # actually exercises 20.19.x; nothing had before. The excluded middle band (21.x, 22.0–22.11)
+  # is deliberately NOT a third matrix leg: `engines` now documents it as unsupported (though
+  # `npm` does not enforce that by default — no `.npmrc` here sets `engine-strict`, so an
+  # install there still only warns), and there is nothing SUPPORTED in that band to test against
+  # — see DECISIONS.md for the full history (the entry that first recorded the gap, and the
+  # later one recording this fix).
   test-matrix:
     strategy:
       # One leg failing (a flake on the runner, say) must not hide the other leg's result —

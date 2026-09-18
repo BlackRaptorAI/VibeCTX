@@ -26,10 +26,15 @@ copy, clearly flagged as stale, instead of a failure.
 ## Install
 
 VibeCTX runs from a local clone. You need git and Node — `package.json` declares
-**Node ≥ 20.19** (vitest's `vite` dependency requires `^20.19.0 || >=22.12.0` to run the test
-suite; the floor is set there rather than for the server itself, which needs less), and CI
-builds and tests on both the **20.19 line, at the declared floor**, and **22**, so the floor
-is a measurement, not merely a claim.
+**`^20.19.0 || >=22.12.0`**, the exact range `vitest`'s `vite` dependency itself requires to
+run the test suite (constrained there rather than by the server itself, which needs less), so
+Node 21.x and 22.0.0–22.11.x — versions a plain `>=20.19.0` floor would have silently admitted
+and `vite` does not support — are now correctly documented as unsupported (`npm` does not
+enforce `engines` by default, so an install there still only warns, `EBADENGINE`, rather than
+failing — the field states the true requirement either way). CI builds and tests both ends of
+the range: the **20.19 line**, at the floor itself, and **22** (resolving to the latest,
+≥22.12) — the excluded middle band is documented, not separately exercised by CI (there is
+nothing supported there to run).
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
@@ -1395,7 +1400,7 @@ your setup. Real-world reports directly shape what gets built.
 
 ```bash
 npm ci
-npm test        # vitest (needs Node ≥ 20.19)
+npm test        # vitest (needs Node ^20.19.0 || >=22.12.0 — see Install, above)
 npm run build   # tsc → dist/
 npm run lint    # tsc --noEmit
 ```
