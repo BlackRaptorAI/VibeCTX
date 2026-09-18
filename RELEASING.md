@@ -49,9 +49,11 @@ Strongest to weakest:
    anyone reading the artifact reads the caveat with it.
 3. **The release Change Record, §5.** The release-time status: what shipped with its done-when
    unmet, and why. Versioned with the tag; what an auditor opens later.
-4. **`.vibectx-plan/DECISIONS.md`.** Only for a standing constraint with no expiry of its
-   own — e.g. no external ranking claim until a gold set is re-labelled. A decision, not a
-   status.
+4. **`.vibectx-plan/DECISIONS.md`.** Only once a finding stops being a one-release status and
+   becomes a standing constraint with no expiry of its own — hypothetically, "no external
+   ranking claim ships until a gold set is re-labelled" would belong here, though as of this
+   writing that constraint is recorded only in the Change Record (§5) below, not yet promoted.
+   A decision, not a status.
 5. **The tracker (Linear).** Discoverability, not authority. An issue POINTS AT levels 1–4
    rather than restating their content — two independent prose copies of the same fact is how
    they drift apart from each other.
@@ -61,19 +63,31 @@ fully met records why at the strongest level available, and the milestone issue 
 record rather than repeating it.
 
 **Worked example — PAR-658.** Its done-when (PAR-658: `"correct section in top result"`
-improves over 0.1.2) is recorded NOT MET. What actually settled why is level 2, not level 3 or
-5: `docs/eval/probe-gold.json`'s own `provenance` field states "hand-labelled against GitHub
-README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox" — the
-gold set's LABELS were hand-written against README fallbacks because the real docs-site
-documents were unreachable at labelling time. The EVAL CORPUS is those real docs-site
-`llms-full.txt` documents, reachable now — the corpus is not the problem; the labels are,
-because they describe different documents than the corpus they are graded against today. That
-is exactly why the project's own remediation, PAR-827, is a RE-LABEL of the gold set, not a
-re-fetch of the corpus. Revisit-by is not running the eval again now that the corpus is
-reachable — it already is, and re-running it unchanged fixes nothing. The actual revisit-by is
-PAR-827: re-label `probe-gold.json` against the real corpora, extend the validator (level 1) to
-refuse when a resolved URL disagrees with the corpus its gold set declares, then re-run. No
-external ranking claim ships before that.
+improves over 0.1.2) is recorded NOT MET. Level 2 is what a reader of the artifact itself would
+see first: `docs/eval/probe-gold.json`'s own `provenance` field states "hand-labelled against
+GitHub README fallbacks on 2026-09-06; docs-site llms.txt unreachable from the build sandbox" —
+the gold set's LABELS were hand-written against README fallbacks because the real docs-site
+documents were unreachable at labelling time. (The file's own `corpus` field says the same
+thing, frozen at that same labelling-time snapshot — it describes what was fetched on
+2026-09-06, not what the eval fetches when re-run today, so read it as historical, not current.)
+The EVAL CORPUS, when the script is actually re-run, is those real docs-site `llms-full.txt`
+documents — reachable from a machine with real network access (PAR-827: "the eval was run for
+the first time from Tom's Mac, where the real documents ARE reachable"), still NOT reachable
+from the build sandbox itself. The corpus is not the problem; the labels are, because they
+describe different documents than the corpus they are graded against today. Level 3, the
+release Change Record, is where that conclusion is actually written down as the release-time
+status (`CR-20260917-release-0.2.0.md` §5) — level 2 is the evidence it cites, not a
+freestanding record of the conclusion on its own.
+
+That mismatch is exactly why the project's own remediation, PAR-827, is a RE-LABEL of the gold
+set, not a re-fetch of the corpus. Revisit-by is not running the eval again now that a machine
+capable of reaching the corpus exists — one already does, and re-running it unchanged fixes
+nothing. The actual revisit-by, per PAR-827's own Fix section, is: re-label `probe-gold.json`
+against the real corpora, then re-run `scripts/eval-retrieval.mjs` and post the result to
+PAR-658. No external ranking claim ships before that. (A stronger fix than re-labelling alone,
+not yet filed: extend the validator to refuse when a resolved URL disagrees with the corpus its
+gold set declares — level 1 of the hierarchy above — so this class of mismatch can't recur
+silently. That is a proposal, not something PAR-827 currently commits to.)
 
 ## 4. Re-measure after the last merge, not before
 
