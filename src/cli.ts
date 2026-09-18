@@ -287,7 +287,7 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   }
   let report;
   try {
-    report = await runDoctor(registry, { library: parsed.library, offline: parsed.offline });
+    report = await runDoctor(registry, { library: parsed.library, offline: parsed.offline, warn: io.stderr });
   } catch (e) {
     io.stderr(`${message(e)}\n`);
     return 2;

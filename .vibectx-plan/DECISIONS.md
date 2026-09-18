@@ -825,3 +825,115 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   (`normalisePyPiName`) (PAR-777).
 
 ---
+
+## D-79 — decided 2026-09-17, executing A19 / PAR-728
+
+- **D-79** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
+  `doctor.json`) so `list_libraries` and `get_docs` can surface it without re-running a probe on
+  every call, and `DoctorReport` gains an optional `eviction` key with no schema bump.**
+  **Premise check against the tree first:** A19's own problem statement ("the classification
+  appears in neither `list_libraries` nor any `get_docs` response") was partly stale —
+  `list_libraries` already showed `[${kind}]` per row, derived directly from the cached document
+  via `classifySourceKind` (PAR-707), independent of any doctor run. What was genuinely missing,
+  and is the actual PAR-704 gap this item closes, is a PROBE verdict: whether a real topic query
+  against the entry actually answered, which only `doctor` computes and — before this — never
+  persists, so a library can be cleanly cached, `[index-only]`, and still fail every real query
+  with no warning anywhere outside a manual `vibectx doctor` run.
+  **Persistence, not re-probing:** doctor's verdict requires running probe queries through
+  `getDocsDetailed`, which can touch the network — not something `list_libraries` (documented as
+  network-free) or `get_docs` (a per-call budget, not a batch job) can afford to redo on every
+  call. `runDoctor` now writes each `LibraryReport`'s `{kind, healthy, reasons}` to a new store
+  (`src/doctor-store.ts`), mirroring `resolved-store.ts`'s exact K1 (every field re-validated on
+  read, a malformed record dropped whole rather than partially trusted)/K2 (a file with a newer
+  schemaVersion is left alone)/atomic-write shape; `list-libraries.ts` and `get-docs.ts` read it
+  back cheaply. The verdict is therefore only as fresh as the last `doctor` run — stated in the
+  store module's own doc comment, the same staleness the README already accepts for `doctor`
+  results in general.
+  **Where it surfaces, and how:** `list_libraries` gets a new `[doctor: <first reason>]` bracket,
+  appended after the existing `[resolved]` tag, present only when a persisted verdict for that
+  entry is unhealthy — absent (not "healthy") when doctor has never checked it, so the note never
+  overclaims the way the existing `[unknown]` kind already declines to. `get_docs`'s stamp
+  (`StampFacts`/`sourceStampLine`, A17/PAR-726) gains an optional `doctorKind`, set to the source
+  kind doctor found ONLY when unhealthy, rendered as `· doctor check failed (<kind>)` and
+  dropped together with `version`/`redirectedFrom` in `fitStampLine`'s existing "no invented
+  priority between independently-added optional fields" degrade step — the same idiom `version`
+  (D-76) and `redirectedFrom` (D-74) already established, reused rather than a new mechanism
+  invented for a third field.
+  **`DoctorReport.eviction` (CR-20260907-par-652-governance, `doctor-json-eviction`):** the
+  cache-eviction summary `formatDoctorTable` has always rendered in its TEXT output
+  (`lastEvictionSummary()`, PAR-652 item 7a) now also appears on the JSON report, as a plain new
+  optional key — no schemaVersion bump, per `DOCTOR_SCHEMA_VERSION`'s own documented rule that a
+  new key may be appended without one. Computed once in `runDoctor` and stored on the report;
+  `formatDoctorTable` was changed to read `report.eviction` rather than calling
+  `lastEvictionSummary()` a second time itself, so the text table and the JSON output can never
+  state two different answers to the same question from two separate reads of that process-wide
+  singleton.
+  Ref: `src/doctor-store.ts` (new), `src/doctor.ts`, `src/list-libraries.ts`, `src/get-docs.ts`,
+  `src/retrieval.ts` (A19 / PAR-728).
+
+  **Round 1 review (code-reviewer + security-architect), findings fixed before merge:**
+  - **security-architect S-1 (BLOCKING):** the cache directory — and `doctor.json` with it — is
+    process-global, but a library's config (and so `reasons`, built in part from config-authored
+    `probeQueries` text and from raw error messages that can carry filesystem paths or internal
+    hostnames) is per project. Rendering `reasons` in `list_libraries` would have leaked one
+    project's config-authored or error text into another project's tool response. Fixed by never
+    rendering `reasons` in either surface — `list-libraries.ts`'s `[doctor: ...]` note and
+    `get_docs`'s stamp both state only the closed `kind` enum and the check date; `reasons`
+    stays persisted (a same-project `doctor --json` reader can still see it) and still
+    cleaned/clipped on read, but no caller may treat that cleaning as sufficient to render it
+    across a project boundary.
+  - **security-architect S-2 / code-reviewer B2 (BLOCKING, found independently by both):**
+    `saveDoctorVerdicts`'s `warn` defaulted to a no-op, so a K2 refusal or a write failure was
+    silent forever — no stderr line, no report note, exactly the "fallbacks are stated, never
+    silent" rule this file's own D-13 exists to prevent. Fixed by defaulting `warn` to stderr
+    (matching `resolved-store.ts`/`writeProjectRecord`'s own default exactly) and adding
+    `DoctorReport.notes?: string[]` — a new optional key, no schema bump — rendered by
+    `formatDoctorTable` as `note: ...` lines, the same pattern `warm.ts` already established for
+    its own best-effort persistence failures.
+  - **security-architect S-3 (BLOCKING):** `checkedAt` was validated only by
+    `Number.isFinite(Date.parse(...))`, which is not a length backstop (`cache-meta.ts`'s own
+    MEASURED finding: an arbitrarily long fractional-seconds run still parses to a finite
+    timestamp) — a third, unbounded copy of a gap that file's own comment already tracks for two
+    OTHER stores. Fixed by exporting `cache-meta.ts`'s `ISO_INSTANT` and reusing it here (D-48:
+    one definition, not a third local variant) rather than duplicating the gap. Verdict COUNT was
+    also unbounded (the file merges by name and never prunes) — fixed with a new
+    `MAX_DOCTOR_VERDICTS` (`limits.ts`, 500, ~1.71 MiB worst case), oldest-by-`checkedAt` dropped
+    first once a save would exceed it, the same rule `ACTIVITY_LOG_MAX_ENTRIES` applies to its
+    own file.
+  - **code-reviewer B1 (BLOCKING):** an `--offline` doctor run's "unreachable" is the EXPECTED,
+    correct answer for that call (README's own documented `--offline` behaviour), not a genuine
+    probe failure — persisting it poisoned every later ONLINE response with a stale, misleading
+    warning the moment the library was actually fetched and answered fine. Fixed: `runDoctor`
+    skips persistence entirely for an offline run; an earlier online verdict already on disk is
+    left untouched.
+  - **code-reviewer B3 (BLOCKING):** an unhealthy verdict's stamp/note carried no date, so it
+    read as a present-tense fact forever, even long after the library was fixed and simply never
+    re-checked. Fixed: `checkedAt` is now rendered in both surfaces (`retrieval.ts`'s new
+    `StampFacts.doctorCheckedAt`, always set together with `doctorKind`; `list-libraries.ts`'s
+    note gained `, checked <date>`).
+  - **Should-fix, applied:** N-2 (a persisted `reasons` element that was not a string used to be
+    silently filtered rather than dropping the whole record — the K1 doc comment's own claim);
+    N-3 (a forged `reasons` array was filtered/sliced in full before being bounded — now bounded
+    to `MAX_RAW_REASONS` first); N-4 (`SOURCE_KINDS` is now a `Record<SourceKind, true>`, which
+    fails to compile if `SourceKind` gains a member this file does not also list, rather than
+    silently rejecting the new kind at runtime); N-5 (`saveDoctorVerdicts` now round-trips each
+    verdict through `toDoctorVerdict(toRecord(v))` before writing, matching
+    `saveResolvedEntry`'s "the write side must produce something the read side would accept");
+    README updated for all three user-visible contract changes (the stamp shape, the `doctor
+    --json` key list, and the new `list_libraries`/`get_docs` doctor-verdict surfacing) —
+    code-reviewer S1.
+  - **Filed as Linear follow-ups, not fixed here** (all explicitly non-blocking): a persisted
+    verdict is keyed by bare library name with no URL/config scoping, so two projects with
+    different configs for the same name share one verdict (security-architect's accepted
+    fixed-vocabulary display closes the information-leak half of this; the correctness half —
+    a same-named-different-library verdict misapplied — is not); `readDoctorVerdicts()` has no
+    memoisation on what is now a per-call hot path; `doctor`'s own probes read their own
+    just-persisted verdict, adding a small self-referential stamp cost to the very measurement
+    that produced it; nothing prunes a verdict for a library removed from every registry (bounded
+    by `MAX_DOCTOR_VERDICTS`, not actively pruned); `doctor.json` is read without an `lstat`
+    regular-file gate first, a gap shared with `resolved-store.ts`'s own read path (parity, not a
+    new regression, but a new HOT-PATH exposure); `search` responses do not carry the same
+    doctor-verdict note `get_docs` does.
+  Ref (round 1 fixes): `src/doctor-store.ts`, `src/doctor.ts`, `src/list-libraries.ts`,
+  `src/get-docs.ts`, `src/retrieval.ts`, `src/cache-meta.ts`, `src/limits.ts`, `src/cli.ts`,
+  `README.md`.

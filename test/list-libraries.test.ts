@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { writeCache, urlSlug, libDirName } from "../src/cache.js";
 import { loadRegistry, loadRegistryFrom, type Registry } from "../src/registry.js";
 import { listLibrariesText } from "../src/list-libraries.js";
+import { saveDoctorVerdicts } from "../src/doctor-store.js";
 
 let dir: string;
 
@@ -231,6 +232,54 @@ describe("listLibrariesText: the config header (D-18, PAR-657)", () => {
 
   it("omits the header for a hand-built registry (no config resolution to report)", () => {
     expect(listLibrariesText(registry).startsWith(`Cache dir: ${dir}\n\n`)).toBe(true);
+  });
+});
+
+describe("A19/PAR-728: doctor's verdict surfaced in list_libraries", () => {
+  it("PAR-704 shape: an entry doctor found unhealthy (index-only, probe failing) is marked, even though the cache shows it as cleanly cached", () => {
+    writeCache("fastify", "https://fastify.dev/llms.txt", "# Fastify\n- [A](/docs/A.md)\n- [B](/docs/B.md)\n- [C](/docs/C.md)");
+    saveDoctorVerdicts([
+      {
+        name: "fastify",
+        kind: "index-only",
+        healthy: false,
+        reasons: ["index-only, no links followed (answered from the link list at best)"],
+        checkedAt: "2026-09-17T00:00:00.000Z",
+      },
+    ]);
+    const text = listLibrariesText(registry);
+    expect(text).toMatch(
+      /- \*\*fastify\*\* — Fastify web framework reference \[cached \S+\] \[index-only\] \[doctor: check failed \(index-only\), checked 2026-09-17T00:00:00\.000Z\]/,
+    );
+  });
+
+  it("says nothing extra for a library doctor found healthy, or one doctor has never checked", () => {
+    saveDoctorVerdicts([{ name: "react", kind: "full-text", healthy: true, reasons: [], checkedAt: "2026-09-17T00:00:00.000Z" }]);
+    writeCache("react", "https://react.dev/llms-full.txt", "# React\n\nProse.");
+    const text = listLibrariesText(registry);
+    expect(text).toMatch(/- \*\*react\*\* — React 19 documentation \[cached \S+ \(stale\)\] \[full-text\]$/m);
+    expect(text).toMatch(/- \*\*pgvector\*\* —  \[not cached\] \[unknown\]$/m); // no verdict at all: no note
+    expect(text).not.toContain("[doctor:");
+  });
+
+  it("security-architect S-1: never renders doctor's free-text reasons, even a hostile one — only the closed kind enum and the check date", () => {
+    // The persisted store is process-global; `reasons` can carry config-authored probeQuery
+    // text or a raw error message from a DIFFERENT project's own doctor run. list_libraries
+    // must never repeat that text, regardless of what it says.
+    writeCache("fastify", "https://fastify.dev/llms.txt", "# Fastify\n- [A](/docs/A.md)");
+    saveDoctorVerdicts([
+      {
+        name: "fastify",
+        kind: "index-only",
+        healthy: false,
+        reasons: ["some other project's secret internal hostname: internal.example.corp"],
+        checkedAt: "2026-09-17T00:00:00.000Z",
+      },
+    ]);
+    const text = listLibrariesText(registry);
+    expect(text).not.toContain("internal.example.corp");
+    expect(text).not.toContain("some other project's");
+    expect(text).toMatch(/\[doctor: check failed \(index-only\), checked 2026-09-17T00:00:00\.000Z\]/);
   });
 });
 

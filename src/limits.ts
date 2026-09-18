@@ -60,3 +60,16 @@ export const MAX_FULL_REFRESHES_PER_HOUR = 5;
  * field's worst-case length is ~2.06 MiB, pretty-printed exactly as the file is written.
  */
 export const ACTIVITY_LOG_MAX_ENTRIES = 2000;
+
+/**
+ * `doctor.json`'s verdict cap (A19/PAR-728, security-architect S-3b): oldest (by `checkedAt`)
+ * dropped first once a write would exceed it, the same "oldest dropped first" rule
+ * `ACTIVITY_LOG_MAX_ENTRIES` applies to its own file. ASSUMED: a generous multiple of any
+ * registry this tool ships or is likely to accumulate across projects sharing one cache root
+ * (the shipped default registry alone is 30 entries), not a measurement of how many verdicts
+ * are useful. MEASURED (`doctor-store.ts`): 500 verdicts at every field's worst-case length
+ * (a 300-character name, 10 reasons at 300 characters each) is ~1.71 MiB, pretty-printed
+ * exactly as the file is written — the same order of magnitude as `ACTIVITY_LOG_MAX_ENTRIES`'s
+ * own ~2.06 MiB bound.
+ */
+export const MAX_DOCTOR_VERDICTS = 500;

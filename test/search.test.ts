@@ -814,6 +814,18 @@ describe("the README's search example (PAR-659)", () => {
   });
 });
 
+describe("search's Source: stamp never leaks a URL query string (PAR-811)", () => {
+  it("strips the query string (a token, the only credential mechanism this tool has) from every group's stamp", () => {
+    const INTERNAL_URL = "https://docs.internal.example.com/llms.txt?token=super-secret-token";
+    writeCache("acme", INTERNAL_URL, "# Acme\n\n## Setup\n\nRun the installer to get started.");
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [INTERNAL_URL] }]]) };
+    const out = formatSearchResults(runSearch(reg, { query: "installer" }));
+    expect(out).toContain("Source: https://docs.internal.example.com/llms.txt ·");
+    expect(out).not.toContain("super-secret-token");
+    expect(out).not.toContain("token=");
+  });
+});
+
 /**
  * PAR-659 — the two failure modes the excellence pass went looking for, and neither of which
  * any earlier case would have caught.
