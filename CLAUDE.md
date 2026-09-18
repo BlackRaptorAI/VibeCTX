@@ -24,9 +24,10 @@ npm run lint    # tsc --noEmit
      config URL handling, the cache or search index on disk, or any file delete/rename.
    Fix blocking findings. File everything else as a Linear issue. No second round unless the
    first found something blocking.
-5. Before pushing: `git fetch origin && git diff --stat origin/main HEAD`. Confirm by eye that
-   it deletes nothing belonging to another item — a branch that fell behind `main` can otherwise
-   look, at merge time, like it reverts work someone else just landed (this has happened).
+5. Before pushing: `git fetch origin && git diff --stat origin/main HEAD` (two dots, not
+   three — three-dot hides exactly the failure this catches). Confirm by eye that it deletes
+   nothing belonging to another item — a branch that fell behind `main` can otherwise look, at
+   merge time, like it reverts work someone else just landed (this has happened).
    Push the branch and open a PR. The PR description holds: what changed, each Done-when line
    marked met / not met, the review findings (paste them), and that `git diff --stat` output.
    Link the PR on the Linear issue.
@@ -53,13 +54,13 @@ One Change Record is written per release.
   `src/link-policy.ts` host policy; internal hosts only via `allowInternalHosts`; symlinks are
   refused, never followed, in discovery, config walk-up and cache eviction; response bodies and
   inputs are bounded.
-- Producers edit `src/`, `test/`, `docs/`, `README.md`. Ask before touching `.github/` or
-  `package.json`.
+- Producers edit `src/`, `test/`, `docs/`, `README.md`, `RELEASING.md`. Ask before touching
+  `.github/` or `package.json`.
 - Product decisions get one line in `.vibectx-plan/DECISIONS.md`. Process notes do not.
-  Pick the D-number after merging `origin/main` into your branch (step 6), right before
-  opening the PR — never when the work starts. Two sessions branching from `main` at the same
-  time otherwise pick the same next number and collide (has happened three times: D-71, D-76,
-  D-78).
+- Pick the D-number after your last `git fetch origin` (step 5), right before opening the PR —
+  never when the work starts. Two sessions can still both fetch before either has opened a PR
+  and pick the same next number; if that happens, whichever merges second renumbers before
+  merging. Has collided three times: D-71, D-76, D-78.
 
 ## Scope and claims
 

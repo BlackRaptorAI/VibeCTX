@@ -35,20 +35,27 @@ failure mode this step exists to catch.
 ## 3. Reconcile the milestone against the repository
 
 Every issue in the release milestone is `Done` or `Canceled`. Any whose Done-when was not
-fully met carries a comment saying so, plainly — the PAR-658 pattern ("the eval gold set
-doesn't match the corpus; this done-when is accepted as unmet for this release") — rather than
-being marked Done on a technicality or left Todo with no explanation.
+fully met says so plainly, with the reason and a revisit-by — the PAR-658 pattern: its
+done-when ("correct section in top result improves over the current ranker") was recorded as
+NOT MET, in the release Change Record's §5 (not a Linear comment), with the actual reason
+(the eval corpus was GitHub READMEs, not the docs-site primaries the ranker was designed for
+— not a gold-set problem) and a revisit-by (re-run the eval once the real corpus is reachable,
+before any external ranking claim) — rather than being marked Done on a technicality or left
+Todo with no explanation.
 
 ## 4. Re-measure after the last merge, not before
 
-A number measured before the last PR landed describes a `main` that no longer exists.
+A number measured before the last PR landed describes a `main` that no longer exists. Record
+these once, in the release Change Record — not as a `CLAUDE.md` baseline to check future runs
+against (`CLAUDE.md` deliberately carries no such baseline; this is a point-in-time release
+figure, not a regression gate):
 
-- `npm test` — record the test count and pass/fail, taken on `main` at the commit the release
-  is actually cut from.
+- `npm test` — the test count and pass/fail, taken on `main` at the commit the release is
+  actually cut from.
 - `npm audit` and `npm audit --omit=dev` — record both; if they differ, say why the gap is (or
   isn't) an accepted risk, in the same release Change Record.
 
 ## 5. Version bump
 
 `package.json`'s version bump happens in the release PR, on top of the reconciled `main` from
-steps 1–2 above — not on an earlier commit taken before a straggler PR merged.
+steps 1–3 above — not on an earlier commit taken before a straggler PR merged.
