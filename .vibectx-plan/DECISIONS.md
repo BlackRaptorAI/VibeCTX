@@ -1146,27 +1146,49 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   simply has some links refused (that shape follows > 0 and drops some).
   `docs/llms.txt` (520,419 bytes, MEASURED) is the real thing: an index of `.md`-suffixed doc
   pages whose titles include a direct hit for each probe (`useUser()`; "Protect content from
-  unauthenticated users"). `getLibraryDoc` (`src/cache.ts`) tries `entry.urls` in order and
+  unauthenticated users"). `getLibraryDoc` (`src/fetcher.ts`) tries `entry.urls` in order and
   commits to the first one that fetches successfully — a 200-OK meta-index still fetches
   successfully, so nothing in that loop would ever fall through to a better candidate on its
   own. The fix is the ORDER, not new code.
   **Explicitly rejected:** substituting `docs/llms-full.txt` (a real, complete content dump,
   unlike the meta-index) in `llms-full.txt`'s place. MEASURED 2026-09-18: 27,860,399 bytes —
   over `PRIMARY_DOC_MAX_BYTES` (25 MiB / 26,214,400 bytes) and would be refused outright.
-  **Coverage check, this entry's own scope:** every other curated entry whose first candidate is
-  a bare-host `llms-full.txt` was checked live (GET, real status + byte count, Node's own
-  `fetch` — not just `curl`, to rule out a client-specific block) for the same failure shape (a
-  200 response whose body is itself a tiny link-only meta-index). None were found. Two other,
-  DIFFERENT and unrelated shapes turned up in the same sweep and are explicitly NOT this
-  decision's scope: several first-candidate URLs now 404 (`docs.stripe.com`, `react.dev`,
-  `tailwindcss.com`, `ui.shadcn.com`, `firebase.google.com`, `playwright.dev`,
-  `reactrouter.com`, `docs.astro.build`, `motion.dev`, MEASURED 2026-09-18) — harmless today,
-  because a 404 IS caught by the existing try-next-candidate fallback, unlike a 200-OK
-  meta-index; and `docs.anthropic.com/llms-full.txt` redirects to a 35,109,013-byte document,
-  itself over `PRIMARY_DOC_MAX_BYTES`. Neither is this issue's failure shape and neither is
-  fixed here — noted for whoever picks up the registry's other stale entries, not actioned.
-  **Verified live:** `vibectx doctor --library clerk --json` against a fresh cache, real
-  network, MEASURED 2026-09-18 — `url: "https://clerk.com/docs/llms.txt"`, both probes
-  `index-followed` (5 followed / 0 dropped each, 10/0 total), `healthy: true`.
+  **Coverage check, this entry's own scope (bare-host `llms-full.txt` first candidates only —
+  an entry whose first candidate carries a path, like `ai-sdk`'s or `supabase`'s, is out of this
+  narrower scope even where it also 404s):** every one of the other 29 curated entries whose
+  first candidate is a bare-host `llms-full.txt` was checked live (GET, real status + byte
+  count, redirects followed, Node's own `fetch` — not just `curl`, to rule out a client-specific
+  block; re-run twice, stable both times) for the same failure shape (a 200 response whose body
+  is itself a tiny link-only meta-index). None were found. Two other, DIFFERENT and unrelated
+  shapes turned up in the same sweep and are explicitly NOT this decision's scope: 12
+  first-candidate URLs across the registry now 404 — among the bare-host `llms-full.txt` set,
+  `nextjs.org` (a PAR-832 sibling — root cause A, not investigated here), `docs.stripe.com`,
+  `react.dev`, `tailwindcss.com`, `ui.shadcn.com`, `firebase.google.com`, `playwright.dev`,
+  `reactrouter.com`, `docs.astro.build`, `motion.dev` (also a PAR-832 sibling), plus two with a
+  path (`ai-sdk.dev/docs`, `supabase.com/docs`) outside this scope — harmless today for every
+  entry with a working fallback, because a 404 IS caught by the existing try-next-candidate
+  fallback, unlike a 200-OK meta-index; and `docs.anthropic.com/llms-full.txt` redirects to a
+  35,109,013-byte document, itself over `PRIMARY_DOC_MAX_BYTES`. Neither is this issue's failure
+  shape and neither is fixed here — noted for whoever picks up the registry's other stale
+  entries (including PAR-832's next.js/motion root causes), not actioned.
+  **Verified live, on a FRESH cache:** `vibectx doctor --library clerk --json` against a fresh
+  cache, real network, MEASURED 2026-09-18 — `url: "https://clerk.com/docs/llms.txt"`, both
+  probes `index-followed` (5 followed / 0 dropped each, 10/0 total), `healthy: true`.
+  **Known gap, not fixed here:** an install that already holds a FRESH cached copy of
+  `llms-full.txt` (under the old order's 168 h default TTL) keeps being served it after this
+  fix ships, because `getLibraryDoc`'s cache-first loop (`src/fetcher.ts`) also walks
+  `entry.urls` in order and cache entries are keyed per-URL (`urlSlug`, `src/cache.ts`) — a
+  fresh hit on `urls[1]` (the meta-index, post-fix) returns before `urls[0]` is ever tried.
+  MEASURED by reproducing both states against the same warmed cache dir: pre-fix code / fresh
+  cache → `llms-full.txt`, unhealthy (the PAR-832 symptom); fixed code / that SAME cache →
+  still `llms-full.txt`, still unhealthy; fixed code / fresh cache → `docs/llms.txt`, healthy.
+  Self-heals once the cached copy passes its TTL. `vibectx warm --force` does NOT clear it —
+  `src/warm.ts` only forces retry of a recent RESOLUTION failure, never `forceRefresh` on the
+  document itself (MEASURED: ran it against the poisoned cache, no change). What does work today:
+  deleting that library's cache directory, waiting out the TTL, or the MCP `refresh` tool
+  (`src/refresh.ts` calls `getLibraryDoc` with `forceRefresh: true`, skipping the cache loop
+  entirely). The general defect — a curated `urls` reorder cannot invalidate a still-fresh cache
+  keyed to the old winner — is not specific to clerk and will recur on every other PAR-832 root
+  cause that turns out to need a reorder; filed as its own issue rather than fixed here.
   Ref: `src/registry.ts` (clerk's `urls`), `test/registry.test.ts` ("clerk's curated urls prefer
   the real index over the llms-full.txt meta-index (D-81/PAR-832)").

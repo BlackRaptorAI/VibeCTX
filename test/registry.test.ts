@@ -152,11 +152,14 @@ describe("default registry: vibe-coder top-30 (PAR-654)", () => {
  * `clerk.com/docs/llms.txt` (520,419 bytes, MEASURED 2026-09-18) is a real index of
  * `.md`-suffixed documentation pages — it contains real matches for both of clerk's own
  * probeQueries (`useUser()`, "Protect content from unauthenticated users"). `getLibraryDoc`
- * (src/cache.ts) tries `entry.urls` in order and commits to the first one that fetches
- * successfully — a meta-index still returns 200, so nothing about that loop would ever fall
- * through to a later, better candidate on its own. The fix is the ORDER, not new code: moving
- * `docs/llms.txt` in front of the meta-index means it is what gets tried, and committed to,
- * first.
+ * (src/fetcher.ts) tries `entry.urls` in order, in BOTH its cache-first loop and its network
+ * loop, and commits to the first one that hits — a meta-index still returns 200, so nothing
+ * about the NETWORK loop would ever fall through to a later, better candidate on its own. The
+ * fix is the ORDER, not new code: moving `docs/llms.txt` in front of the meta-index means it is
+ * what a fresh or expired cache tries, and commits to, first. It is NOT what an install already
+ * holding a fresh cached `llms-full.txt` sees until that copy's TTL expires — cache entries are
+ * keyed per-URL, so the cache-first loop still finds and returns the old winner first; see
+ * D-81's "Known gap" note.
  *
  * `clerk.com/docs/llms-full.txt` (27,860,399 bytes, MEASURED 2026-09-18) was deliberately NOT
  * substituted in its place — it is over `PRIMARY_DOC_MAX_BYTES` (25 MiB) and would be refused.
