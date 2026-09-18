@@ -32,9 +32,9 @@ Node 21.x and 22.0.0–22.11.x — versions a plain `>=20.19.0` floor would have
 and `vite` does not support — are now correctly documented as unsupported (`npm` does not
 enforce `engines` by default, so an install there still only warns, `EBADENGINE`, rather than
 failing — the field states the true requirement either way). CI builds and tests both ends of
-the range: the **20.19 line**, at the floor itself, and **22** (resolving to the latest,
-≥22.12) — the excluded middle band is documented, not separately exercised by CI (there is
-nothing supported there to run).
+the range: the **20.19 line** and **22** (resolving to the latest, ≥22.12) — the excluded
+middle band is documented, not separately exercised by CI (there is nothing supported there
+to run).
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build

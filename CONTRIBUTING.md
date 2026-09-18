@@ -55,9 +55,9 @@ those versions as unsupported (R-1/PAR-829). This is advisory, not enforced: no 
 sets `engine-strict`, so `npm ci` on an excluded version still only warns (`EBADENGINE`)
 rather than failing — the value of the fix is accuracy of the stated requirement, same as
 D-75's own reasoning for the plain floor it replaces. CI (`.github/workflows/ci.yml`) builds
-and tests both ends of the range — the **20.19 line**, at the floor itself, and **22**
-(resolving to the latest, ≥22.12) — but not the excluded middle band, which the manifest
-documents as unsupported rather than CI separately proving there is nothing valid to run.
+and tests both ends of the range — the **20.19 line** and **22** (resolving to the latest,
+≥22.12) — but not the excluded middle band: the manifest documents it as unsupported, and
+there is nothing supported there for CI to run.
 
 ## Build, test, lint
 

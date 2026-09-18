@@ -940,16 +940,16 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ---
 
-## D-80 — decided 2026-09-18, executing R-1 / PAR-829 (supersedes this entry's own prior text)
+## D-80 — decided 2026-09-17, executing R-1 / PAR-829 (supersedes this entry's own prior text)
 
-- **D-80** 2026-09-18 — **`package.json`'s `engines.node` is `^20.19.0 || >=22.12.0` — `vite`'s
+- **D-80** 2026-09-17 — **`package.json`'s `engines.node` is `^20.19.0 || >=22.12.0` — `vite`'s
   own exact declared range, read directly from `node_modules/vite/package.json` (v7.3.6) rather
   than trusted from any prior record — not a plain `>=20.19.0` floor approximating it.**
   **What this entry originally recorded, and why that was wrong to leave standing:** this
   entry first recorded CI proving the floor's LOWER bound only, leaving `engines.node
   >=20.19.0` in place and noting (via two rounds of code-reviewer correction — see git history
   for that discussion, now superseded) that the field silently admitted Node 21.x and
-  22.0.0–22.11.x, versions `vite`'s own range excludes. Tom's decision (2026-09-18): a field
+  22.0.0–22.11.x, versions `vite`'s own range excludes. Tom's decision (2026-09-17): a field
   that states something false should be corrected, not documented around. A user on Node 21
   passed the old `engines` check and then hit a broken test toolchain — the gap was real, not
   merely theoretical, and the fix is one field, not a permanent caveat.
@@ -962,20 +962,31 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   only warns (`EBADENGINE`) rather than failing — unchanged by this fix, and true of the old
   floor too. The value of this change is that the field now STATES the true requirement;
   enforcement was never what D-75 or this entry claimed for it.
-  **CI, and what is and is not tested:** the existing `test-matrix` job
-  (`.github/workflows/ci.yml`, unchanged from when this entry first added it) already proves
-  both ends of the new disjunction — `20.19.x` (the low end) and `22`, which resolves to the
+  **CI, and what is and is not tested:** the existing `test-matrix` job's two matrix LEGS
+  (`.github/workflows/ci.yml`, unchanged from when this entry first added them — its comments
+  were rewritten, the legs were not) already prove both ends of the new disjunction —
+  `20.19.x` (the low end) and `22`, which resolves to the
   latest available, ≥22.12 (the high end) — no third leg was needed. The excluded middle band
   (Node 21.x, 22.0.0–22.11.x) is deliberately NOT a CI leg: there is nothing SUPPORTED in that
   band to run the suite against, so a leg there could only ever prove "the toolchain the field
   says is unsupported does or does not happen to work today" — not a claim this project makes
   about any other unsupported version either. Documenting a version as unsupported and having
   tested it are different, weaker-vs-stronger claims; this entry does not conflate them.
-  **Verified before this shipped:** `npm ci && npm run lint && npm test && npm run build` pass
-  clean on Node v26.0.0 (default here; satisfies `>=22.12.0`) and on Node 20.20.2 (Homebrew's
-  closest available build to `20.19.x`; satisfies `^20.19.0`), neither producing an `EBADENGINE`
-  warning. This PR's own CI run is what actually exercises `20.19.x` for the first time —
-  local Node-version proxies are not a substitute for that and are not cited as if they were.
+  **Verified before this shipped, on macOS — scoped deliberately, not a general claim:**
+  `npm ci && npm run lint && npm test && npm run build` pass clean on Node v26.0.0 (default
+  here; satisfies `>=22.12.0`) and on Node 20.20.2 (Homebrew's closest available build to
+  `20.19.x`; satisfies `^20.19.0`), neither producing an `EBADENGINE` warning — but
+  code-reviewer round 3 found one lockfile entry, `@napi-rs/lzma-linux-x64-gnu@1.5.1` (an
+  OPTIONAL, `linux-x64`-only dependency of `rollup`, `engines.node: "^22.20 || ^24.12 ||
+  >=25"`), that excludes the ENTIRE `20.19.x` line and cannot have been exercised on macOS at
+  all: npm never even considers an optional dependency whose `os`/`cpu` doesn't match the
+  current platform. CI's `ubuntu-latest` runner is the first place this package can surface at
+  all. Its `EBADENGINE` (if any) is expected, harmless (the package is an optional native
+  accelerator; `rollup` runs without it) and consistent with "advisory, not enforced" above —
+  but read the `20.19.x` leg's actual `npm ci` output before treating that as assumed rather
+  than confirmed. This PR's own CI run is what actually exercises `20.19.x` for the first
+  time — local Node-version proxies are not a substitute for that and are not cited as if they
+  were.
   **Still open, unchanged by this entry:** `release-0.2.0` (unmerged) carries its own,
   independently-written Node-floor row in `CR-20260917-release-0.2.0.md` §5, written before
   this fix — it is now doubly stale (both "no CI leg at 20.19.x" and "engines is a plain
@@ -985,3 +996,38 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `package.json`, `package-lock.json`, `.github/workflows/ci.yml`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CLAUDE.md`,
   `CONTRIBUTING.md` (R-1 / PAR-829, commit `7907983`).
+
+  **Round 3 review (code-reviewer — a fresh pass on the manifest fix; rounds 1/2 reviewed this
+  entry's now-superseded prior text and are not repeated here), PASS with should-fixes, no
+  blocking finding:**
+  - Independently verified: `engines.node` matches `node_modules/vite/package.json` (v7.3.6)
+    exactly; `npm ls vite --all` shows one resolved version; `package-lock.json` is
+    byte-identical to a from-scratch `npm install --package-lock-only` re-run (no hand-edit, no
+    drift); the "advisory, not enforced" claim MEASURED directly (a scratch package with an
+    impossible `engines.node` warns and exits 0 under plain `npm ci`, and exits 1 only once
+    `engine-strict=true` is added) rather than merely recalled; both matrix legs resolve inside
+    the new range (`20.19.x` → 20.19.6, `22` → 22.23.2 at review time, both confirmed against
+    `nodejs.org`'s and `actions/node-versions`' own version listings); `release-0.2.0`'s row is
+    confirmed still open and still conflicting via `git merge-tree`.
+  - **Should-fix, applied:** `D-3/PAR-778` in the CR row was a dangling reference (no such
+    entry exists; the real one is `D-75`) — corrected. This entry's and the CR row's dates said
+    2026-09-18; every commit carrying them is 2026-09-17 local time, and the file's own
+    convention (D-78, D-79) dates by commit day — corrected to 2026-09-17. The "neither
+    producing an EBADENGINE warning" claim (above) was gathered entirely on macOS and did not
+    account for `@napi-rs/lzma-linux-x64-gnu@1.5.1` — an optional, `linux-x64`-only dependency
+    of `rollup` whose own `engines.node` (`^22.20 || ^24.12 || >=25`) excludes ALL of `20.19.x`
+    and cannot have been exercised outside `ubuntu-latest` — narrowed to say so explicitly
+    rather than read as a platform-general claim. A drift guard was added
+    (`test/engines.test.ts`): nothing previously would have caught a future `vite`/`vitest`
+    bump moving its declared range out from under `engines.node` — the exact failure mode this
+    item exists to fix, now closed permanently rather than once. Two imprecise "at the floor
+    itself" claims (README, CONTRIBUTING) were corrected: `20.19.x` resolves to the latest
+    20.19 patch, not the literal `20.19.0` minimum, so CI proves the 20.19 LINE, not the exact
+    boundary value.
+  - **Explicitly considered and rejected:** setting `engine-strict=true` to make the exclusion
+    enforced, not merely documented. `@napi-rs/lzma-linux-x64-gnu`'s own range excludes ALL of
+    `20.19.x` — turning on tree-wide strict enforcement to defend the 20.19 line would risk
+    BREAKING install on the 20.19 line, via an optional native accelerator nobody is thinking
+    about. Advisory is the correct choice here, not merely the current one, and this is why.
+  Ref (round 3 fixes): `test/engines.test.ts` (new),
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`.
