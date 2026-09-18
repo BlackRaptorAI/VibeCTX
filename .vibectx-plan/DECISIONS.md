@@ -972,21 +972,23 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   says is unsupported does or does not happen to work today" — not a claim this project makes
   about any other unsupported version either. Documenting a version as unsupported and having
   tested it are different, weaker-vs-stronger claims; this entry does not conflate them.
-  **Verified before this shipped, on macOS — scoped deliberately, not a general claim:**
-  `npm ci && npm run lint && npm test && npm run build` pass clean on Node v26.0.0 (default
-  here; satisfies `>=22.12.0`) and on Node 20.20.2 (Homebrew's closest available build to
-  `20.19.x`; satisfies `^20.19.0`), neither producing an `EBADENGINE` warning — but
-  code-reviewer round 3 found one lockfile entry, `@napi-rs/lzma-linux-x64-gnu@1.5.1` (an
-  OPTIONAL, `linux-x64`-only dependency of `rollup`, `engines.node: "^22.20 || ^24.12 ||
-  >=25"`), that excludes the ENTIRE `20.19.x` line and cannot have been exercised on macOS at
-  all: npm never even considers an optional dependency whose `os`/`cpu` doesn't match the
-  current platform. CI's `ubuntu-latest` runner is the first place this package can surface at
-  all. Its `EBADENGINE` (if any) is expected, harmless (the package is an optional native
-  accelerator; `rollup` runs without it) and consistent with "advisory, not enforced" above —
-  but read the `20.19.x` leg's actual `npm ci` output before treating that as assumed rather
-  than confirmed. This PR's own CI run is what actually exercises `20.19.x` for the first
-  time — local Node-version proxies are not a substitute for that and are not cited as if they
-  were.
+  **Verified locally first, on macOS, then MEASURED for real on PR #26's own CI run:** locally,
+  `npm ci && npm run lint && npm test && npm run build` passed clean on Node v26.0.0 (default;
+  satisfies `>=22.12.0`) and Node 20.20.2 (Homebrew's closest available build to `20.19.x`;
+  satisfies `^20.19.0`) — but code-reviewer round 3 correctly flagged that claim as macOS-only:
+  `@napi-rs/lzma-linux-x64-gnu@1.5.1`, an OPTIONAL `linux-x64`-only dependency of `rollup`
+  declaring `engines.node: "^22.20 || ^24.12 || >=25"` (excludes ALL of `20.19.x`), cannot have
+  been exercised on macOS at all, since npm never even considers an optional dependency whose
+  `os`/`cpu` doesn't match the current platform. **Resolved by the actual CI run, not left as a
+  guess:** on PR #26 (<https://github.com/BlackRaptorAI/VibeCTX/actions/runs/35300888578>,
+  2026-09-18), `test-matrix (20.19.x)` (resolved to Node 20.19.6, the exact `ubuntu-latest`
+  platform where that package could matter) ran `npm ci` with NO `EBADENGINE` and no mention of
+  `napi-rs`/`lzma` anywhere in the job log at all — npm silently omitted the optional dependency
+  rather than warning about its unmet engines. PASS, 1m12s, 45 files / 1627 tests, clean build.
+  `test-matrix (22)` (resolved to Node 22.23.2) PASS likewise, same 45/1627 result. The required
+  `test` gate job PASSED under the bare name `test`, confirming empirically — not just by
+  analysis — that branch protection needed no settings change. This is the first run ever to
+  exercise `20.19.x`; the local proxies above were never cited as a substitute for it.
   **Still open, unchanged by this entry:** `release-0.2.0` (unmerged) carries its own,
   independently-written Node-floor row in `CR-20260917-release-0.2.0.md` §5, written before
   this fix — it is now doubly stale (both "no CI leg at 20.19.x" and "engines is a plain
