@@ -879,6 +879,23 @@ then any curated fallback page (raw GitHub READMEs work well). Cache lives at
 `~/.vibectx/` (override with `VIBECTX_CACHE_DIR`). Default TTL is 7 days. A `VIBECTX_CACHE_DIR`
 override must point at a directory vibectx owns: `refresh` deletes files inside it (its own
 stale followed-page cache) as part of normal operation, not only under a byte cap.
+For the per-library **documentation cache** specifically (the `<slug>.md` / `<slug>.meta.json`
+pair every `get_docs`/`refresh` reads and writes through `readCache`/`writeCache`/`touchCache`):
+if the cache root, or an individual library's own directory inside it, is a symlink instead of a
+real directory, vibectx refuses to read or write through it — nothing is served from the far
+side of the link, and nothing is created there either — and says so once on stderr, rather than
+silently following it. (`lstat` on the exact path decides this; it is not a check that the path
+is free of symlinked ancestors elsewhere on the filesystem, such as macOS's `/var` →
+`/private/var`.) Every cached `.md` file is also read back under a size ceiling (25 MiB,
+matching the limit `fetchUrl` already applies to what it hands `writeCache` on a live fetch); an
+oversized or unreadable one reads as simply uncached rather than being loaded into memory. Before
+this, only cache **eviction** refused a symlinked root — ordinary reads and writes of the
+documentation cache did not.
+**This does not yet cover the rest of the cache directory**: the search index (`index.json`),
+the activity log (`activity.json`), per-project records (`projects/*.json`), saved package
+resolutions (`resolved.json`) and doctor verdicts (`doctor.json`) are still written — and, for
+the search index, read back — through whatever a symlinked `VIBECTX_CACHE_DIR` points at, with
+no warning. Tracked as **PAR-859**.
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
 killed process left behind before they write anything — but only once it is at least a

@@ -52,10 +52,18 @@ const toStderr = (message: string): void => {
 let deprecationNoted = false;
 let resolvedDefaultRoot: string | undefined;
 
+/** PAR-786 — roots `writeCache` has already refused because they are a symlink or another
+ *  non-directory, said once per distinct root per process, mirroring `cache-evict.ts`'s
+ *  `refusedRoots` for the identical reason: a warm run calling `writeCache` for twenty
+ *  libraries against the same misconfigured `VIBECTX_CACHE_DIR` must print one line, not
+ *  twenty identical ones. */
+const refusedWriteRoots = new Set<string>();
+
 /** Test seam: forget what this process has already noted and migrated. */
 export function resetCacheRootState(): void {
   deprecationNoted = false;
   resolvedDefaultRoot = undefined;
+  refusedWriteRoots.clear();
 }
 
 /** Empty is not a directory: an exported-but-empty variable reads as unset rather than as
@@ -63,12 +71,111 @@ export function resetCacheRootState(): void {
 const configured = (value: string | undefined): string | undefined =>
   value !== undefined && value.length > 0 ? value : undefined;
 
-/** A real directory this tool would be willing to treat as a cache (D-46: lstat, not stat). */
-function isRealDirectory(path: string): boolean {
+/** A real directory this tool would be willing to treat as a cache (D-46: lstat, not stat).
+ *
+ *  PAR-786 (findings F-2a/F-2b) — exported: this was
+ *  `dropFollowedPageCache`'s own guard alone until this item, which reuses it for `readCache`
+ *  and `writeCache` (below) so a symlinked root or library directory reads/writes exactly as a
+ *  missing one does, the same D-46 rule `cache-evict.ts`'s `rootIsSweepable` already applies to
+ *  eviction. Also exported for reuse by `activity-log.ts` (a later item, PAR-805, which already
+ *  imports `cacheRoot` from this same file — no circular-import risk). */
+export function isRealDirectory(path: string): boolean {
   try {
     return lstatSync(path).isDirectory();
   } catch {
     return false;
+  }
+}
+
+/** PAR-786 write-side guard: does something already sit at `path` that is NOT a real directory?
+ *  `false` both when `path` does not exist at all (nothing to refuse — the caller creates a
+ *  fresh, real chain exactly as it always has) and when it IS already a real directory (the
+ *  ordinary, overwhelmingly common case). `true` only when `lstat` finds an ENTRY there that is
+ *  not a directory — a symlink, most importantly, but also, defensively, any other
+ *  non-directory node. `lstat`, never `stat`: the question is what the ENTRY at this exact path
+ *  is, never what it resolves to (D-46's rule, applied here to the WRITE side for the first
+ *  time — see `writeCache`'s own comment for what this closes). */
+function existsAsNonDirectory(path: string): boolean {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return false;
+  }
+  return !stat.isDirectory();
+}
+
+/** PAR-786: is a symlink already planted at exactly this leaf? Checked BEFORE `mkdirSync` runs,
+ *  regardless of what the link points to — MEASURED (this file's own investigation, folded into
+ *  PAR-786, correcting an earlier assumption in the issue this closes): a symlink leaf pointing
+ *  at an EXISTING real directory does not make `mkdirSync(dir, { recursive: true })` throw at
+ *  all — Node's recursive `mkdir` sees `EEXIST` on the raw syscall, then `stat`s (follows the
+ *  link) to check whether what is already there is a directory, and a real directory at the far
+ *  end of the link reads as "already exists, nothing to do" — SUCCESS, silently, with every
+ *  subsequent write in `writeCache` resolving through the link into that directory. Only a
+ *  DANGLING symlink leaf throws (`ENOENT`, since the followed `stat` fails); a symlink to an
+ *  existing FILE throws too, but as `EEXIST` — indistinguishable by error code from the
+ *  pre-existing "library directory position is a plain file" case this function has always
+ *  thrown for (see `test/cache.test.ts`'s "a failed write (the library dir is a file) throws"
+ *  case). Catching by error code after the fact would therefore either miss the dangerous
+ *  existing-directory shape entirely (it never throws) or have to swallow the plain-file case
+ *  this function must keep throwing for. Checking the leaf's own `lstat` up front sidesteps all
+ *  three shapes uniformly, with one rule: a plain file at this exact leaf is untouched by this
+ *  check and still throws out of `mkdirSync` exactly as it always has; only a SYMLINK here is
+ *  new to PAR-786. */
+function isSymlinkAt(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Longest cache CONTENT file this process will read back (PAR-786, finding F-10). Mirrors
+ *  `PRIMARY_DOC_MAX_BYTES` (`src/fetcher.ts`, 25 MiB) as a SEPARATE constant, not an import:
+ *  `fetcher.ts` imports `{ readCache, writeCache, touchCache }` from THIS file, so importing the
+ *  other way would be circular. `PRIMARY_DOC_MAX_BYTES` is `fetchUrl`'s own `maxBytes` bound —
+ *  applied by the CALLER (`getLibraryDoc`/`fetchLinkedPage`, `fetcher.ts`) to what a live fetch
+ *  may hand to `writeCache` — not a bound `writeCache` itself enforces; `writeCache` has no size
+ *  check of its own on `content` and writes whatever it is given. This constant is the READ-side
+ *  backstop for a `.md` file that reached disk some other way regardless (a planted or corrupted
+ *  file, or a stale write from a build that had a different `PRIMARY_DOC_MAX_BYTES`) — see
+ *  `test/cache-content-size.test.ts`'s boundary assertion that this stays `>=`
+ *  `PRIMARY_DOC_MAX_BYTES`, so raising the write-side bound alone can never silently make every
+ *  large document permanently uncacheable. F-10 measured a planted 31,457,287-byte `.md` file
+ *  read wholesale and served in full before this existed. */
+export const MAX_CACHED_CONTENT_BYTES = 25 * 1024 * 1024;
+
+/** A real, regular file (never a symlink — `lstat`, not `stat`, so the ENTRY at this exact path
+ *  decides, never what it points at) no larger than `maxBytes`. Returns its contents as utf8, or
+ *  `undefined` for anything else: missing, a symlink, a directory, oversized, or unreadable all
+ *  read the same as "not cached" to the caller, matching the trust rule A4 already applies to
+ *  `.meta.json` (`readMetaFile`, `cache-meta.ts`) and now applies to this file's other half
+ *  (PAR-786, findings F-2a/F-10). The size check runs BEFORE any read — an oversized file costs
+ *  one `lstat`, never a `readFileSync` (`test/cache-content-size.test.ts` proves this by call
+ *  count, not merely by return value). Exported for reuse by `activity-log.ts` (PAR-805, a later
+ *  item).
+ *
+ *  DISCLOSED TOCTOU, for parity with `writeCache`'s own honest disclosure of its analogous
+ *  window: `lstatSync` then `readFileSync` is two syscalls, not one — a real file swapped for a
+ *  symlink by a concurrent process in the gap between them would be FOLLOWED by the second call,
+ *  since `readFileSync` (unlike `lstatSync`) has no way to insist "only if this is still not a
+ *  link." Bounded the same way the write side's residual is: this function's body is entirely
+ *  synchronous (no `await` for such a race to land in). Left as a disclosed residual, not closed
+ *  here — closing it fully would need `openSync(path, O_RDONLY | O_NOFOLLOW)` + `fstatSync` +
+ *  reading by file descriptor, which is POSIX-only and out of this issue's scope. */
+export function readBoundedRegularFile(path: string, maxBytes: number): string | undefined {
+  let stat;
+  try {
+    stat = lstatSync(path);
+  } catch {
+    return undefined;
+  }
+  if (!stat.isFile() || stat.size > maxBytes) return undefined;
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return undefined;
   }
 }
 
@@ -213,25 +320,32 @@ function libDirIn(root: string, library: string): string {
   return join(root, libDirName(library));
 }
 
-function libDir(library: string): string {
-  return libDirIn(cacheRoot(), library);
-}
-
 export function readCache(
   library: string,
   url: string,
   ttlHours: number,
 ): CacheHit | undefined {
-  const dir = libDir(library);
+  // PAR-786 (finding F-2a) — mirrors the D-46
+  // leaf-`lstat` policy `dropFollowedPageCache` and `enforceCacheSizeCap` (`cache-evict.ts`)
+  // already apply to DELETION: the ROOT, then the LIBRARY DIRECTORY, must each be proven a
+  // real directory before anything below either is trusted, not just the two files at the
+  // leaf (which is all this function checked before this item — F-2a: the content file had no
+  // `lstat` guard at all). `isRealDirectory` returning `false` for a root or library directory
+  // that does not exist yet is exactly right — nothing is cached either way, so an absent
+  // cache and a refused symlinked one report the identical outward "uncached" result,
+  // silently, matching this function's existing philosophy (see the corruption classes below)
+  // that anything this process cannot trust is reported as a miss, never a special error.
+  // `root` is resolved ONCE and threaded through `libDirIn` (not `libDir`, which calls
+  // `cacheRoot()` again internally) so the value proven real is provably the value used — the
+  // same discipline `dropFollowedPageCache` already follows, for the same reason (D-46's
+  // comment there).
+  const root = cacheRoot();
+  if (!isRealDirectory(root)) return undefined;
+  const dir = libDirIn(root, library);
+  if (!isRealDirectory(dir)) return undefined;
   const slug = urlSlug(url);
   const contentPath = join(dir, `${slug}.md`);
   const metaPath = join(dir, `${slug}.meta.json`);
-  // Kept even though both branches below also guard their own read (N1, code-reviewer):
-  // without this pair, an ordinary miss (no file at all — the overwhelming common case)
-  // would fall through into the same try/catch as real corruption, which is still correct
-  // but loses the distinction a future diagnostic would want to draw between "nothing here"
-  // and "something here this process cannot trust".
-  if (!existsSync(contentPath) || !existsSync(metaPath)) return undefined;
   const meta = readMetaFile(metaPath);
   // A4 supersedes N-6: a bad `fetchedAt` used to read as stale-but-served (ageMs went NaN,
   // and `!(NaN < x)` is true). It now drops the whole meta, so the entry reads as uncached —
@@ -246,17 +360,18 @@ export function readCache(
   // serving the wrong document impossible regardless: a meta whose own `url` does not match
   // the URL actually requested is not this entry, whatever its file name says.
   if (meta.url !== url) return undefined;
-  let content: string;
-  try {
-    content = readFileSync(contentPath, "utf8");
-  } catch {
-    // Same trust boundary as the meta half, same rule (security-architect, A4 round 1, F1):
-    // `existsSync` above returns true for a directory, and a TOCTOU unlink between that check
-    // and this read is possible either way. An unreadable content file reads as uncached, not
-    // a throw — `configuredEntriesNeedingWarm`'s pre-scan (autowarm.ts) and list_libraries
-    // both call this function directly, with no try/catch of their own to fall back on.
-    return undefined;
-  }
+  // PAR-786 (F-2a, F-10) — the same bounded, symlink-refusing read `.meta.json` already gets
+  // via `readMetaFile` (`cache-meta.ts`), now applied to the content half: `readBoundedRegularFile`
+  // refuses a symlink (a secret file swapped in for this entry's `.md` — Attack 1 in the
+  // finding), a dangling link, a directory, or anything over `MAX_CACHED_CONTENT_BYTES` — the
+  // read-side ceiling `.meta.json` has always had but the content file never did (F-10: a
+  // planted 31 MB `.md` was returned in full, 58 ms, before this). Same trust boundary as the
+  // meta half, same rule (security-architect, A4 round 1, F1): an unreadable, oversized or
+  // untrustworthy content file reads as uncached, not a throw — `configuredEntriesNeedingWarm`'s
+  // pre-scan (autowarm.ts) and list_libraries both call this function directly, with no
+  // try/catch of their own to fall back on.
+  const content = readBoundedRegularFile(contentPath, MAX_CACHED_CONTENT_BYTES);
+  if (content === undefined) return undefined;
   const ageMs = Date.now() - new Date(meta.fetchedAt).getTime();
   // Negated `<` rather than `>=`: a TTL of 0 means "expire immediately", even when written
   // and read within the same millisecond. `meta.fetchedAt` is now guaranteed a valid ISO
@@ -286,11 +401,23 @@ export function readCache(
  *  (per the etag) has not — a site's redirect target moving is not a content change. Passing
  *  the newly observed value here keeps a long-lived, repeatedly-revalidated entry's `finalUrl`
  *  from going stale itself. `undefined` (the caller observed no redirect, or has nothing new
- *  to report) leaves whatever was already persisted untouched rather than erasing it. */
+ *  to report) leaves whatever was already persisted untouched rather than erasing it.
+ *
+ *  PAR-786 (security-architect review round) — this is a THIRD read/write path through the same
+ *  `.meta.json`, reachable on every 304 revalidation (`fetcher.ts`'s `getLibraryDoc`/
+ *  `fetchLinkedPage`), and it was the one this item's first pass missed: `readMetaFile` already
+ *  made the meta FILE itself symlink-safe (its own `lstat`, `cache-meta.ts`), but nothing here
+ *  checked the ROOT or the LIBRARY DIRECTORY above it — `existsSync(metaPath)` follows a symlink
+ *  through every path component, so a symlinked root or library directory let this function
+ *  read AND rewrite a `.meta.json` on the far side of the link. Brought under the identical
+ *  policy `readCache` uses, for the identical reason (D-46/D-83): a symlinked root or library
+ *  directory reports the same outward "nothing to touch" result a missing one does, silently. */
 export function touchCache(library: string, url: string, finalUrl?: string): string | undefined {
-  const dir = libDir(library);
+  const root = cacheRoot();
+  if (!isRealDirectory(root)) return undefined;
+  const dir = libDirIn(root, library);
+  if (!isRealDirectory(dir)) return undefined;
   const metaPath = join(dir, `${urlSlug(url)}.meta.json`);
-  if (!existsSync(metaPath)) return undefined;
   const meta = readMetaFile(metaPath);
   // Best effort (D-13): a meta this process cannot trust has nothing to refresh. The next
   // `readCache` reports the entry uncached and the next fetch writes a fresh, valid meta.
@@ -350,15 +477,103 @@ export function touchCache(library: string, url: string, finalUrl?: string): str
  *  awareness — permanently unreadable, defeating offline fallback for it). Dropped alone on
  *  rejection, exactly like an invalid `etag`: the entry still writes, just without the
  *  redirect-aware extra. */
+/** PAR-786 (findings F-2b, N-b1) — refuses to write through a symlinked cache root or a
+ *  symlinked library directory, silently for the caller (never throws) but not silently for the
+ *  operator: `warn` (defaulting to this file's `toStderr`, the pattern `dropFollowedPageCache`
+ *  already uses) is called once per distinct refused ROOT per process (`refusedWriteRoots`,
+ *  mirroring `cache-evict.ts`'s `refusedRoots`) and, more cheaply, once per refused CALL for a
+ *  symlinked library directory — that shape is rarer (it needs the root to already be right AND
+ *  the one library's directory specifically planted), so a per-call note was judged not worth a
+ *  second dedupe set; documented here rather than left implicit.
+ *
+ *  The root and library-directory checks run BEFORE `mkdirSync`, not after: MEASURED,
+ *  `mkdirSync(dir, { recursive: true })` where the ROOT is a symlink succeeds SILENTLY and
+ *  creates the library directory and both files INSIDE the symlink's target — no exception to
+ *  catch afterward. Before this item, the only warning anywhere came from `cache-evict.ts`'s
+ *  sweep (`noteCacheWrite` → `enforceCacheSizeCap` → `rootIsSweepable`), fired only when a sweep
+ *  threshold happened to trigger, AFTER both renames had already landed — by then its wording
+ *  ("Nothing was evicted and the link was not followed") was already FALSE: the write had gone
+ *  through. Checking here means that when either of THESE two checks' warnings fires, the write
+ *  genuinely has not happened yet — "nothing was written" is true at the moment it is printed.
+ *  (There is a THIRD, later refusal path too — the post-`mkdirSync` TOCTOU recheck below — for
+ *  which "nothing was created" no longer holds, since by definition `mkdirSync` already ran; see
+ *  that check's own comment.)
+ *
+ *  On every refusal, whichever of the three checks catches it: `noteCacheWrite` is never called
+ *  and nothing is written to `contentPath`/`metaPath`, and the return value is
+ *  `new Date().toISOString()` computed once up front — safe because no caller re-reads the cache
+ *  to get the content it just tried to write: `fetcher.ts`'s `getLibraryDoc`/`fetchLinkedPage`
+ *  serve the in-memory fetched body they already have this round-trip, and use `writeCache`'s
+ *  return only as the `fetchedAt` shown to the caller (confirmed by reading `fetcher.ts:340-400`
+ *  and `:480-490` before relying on this). */
 export function writeCache(
   library: string,
   url: string,
   content: string,
   etag?: string,
   finalUrl?: string,
+  warn: (message: string) => void = toStderr,
 ): string {
-  const dir = libDir(library);
+  const fallbackFetchedAt = new Date().toISOString();
+  const root = cacheRoot();
+  // Deliberately ANY non-directory here, not "a symlink specifically" (`existsAsNonDirectory`,
+  // not `isSymlinkAt` — contrast the LIBRARY-directory check below, which uses `isSymlinkAt` and
+  // still lets a plain file at that narrower position throw, unchanged, out of `mkdirSync`).
+  // The two are allowed to differ on purpose (code-reviewer, S2, PAR-786): a wrong ROOT is a
+  // whole-cache misconfiguration — nothing under `VIBECTX_CACHE_DIR` is usable regardless of
+  // which library asked — so it should degrade to "nothing persists this run" for every write,
+  // not crash whichever request happens to go first. A plain file colliding with one specific
+  // LIBRARY's directory position is narrow enough (one library, one name) that surfacing it as
+  // an exception remains the more useful signal, and is the function's pre-existing behaviour
+  // (`test/cache.test.ts`'s "library dir is a file" case) — not something this item changes.
+  if (existsAsNonDirectory(root)) {
+    if (!refusedWriteRoots.has(root)) {
+      refusedWriteRoots.add(root);
+      warn(
+        `vibectx: refusing to cache into ${clipText(root, MAX_DISPLAY_PATH_CHARS)} — it is a symlink or another ` +
+          `non-directory, not a real directory. Nothing was written. Remove it, or point VIBECTX_CACHE_DIR at a ` +
+          `real directory.`,
+      );
+    }
+    return fallbackFetchedAt;
+  }
+  const dir = libDirIn(root, library);
+  // See `isSymlinkAt`'s own comment for why this is checked here, before `mkdirSync`, rather
+  // than by catching whatever `mkdirSync` throws: a symlink leaf pointing at an existing real
+  // directory does not throw at all.
+  if (isSymlinkAt(dir)) {
+    warn(
+      `vibectx: refusing to cache "${clipText(library, MAX_CONFIG_VALUE_CHARS)}" into ` +
+        `${clipText(dir, MAX_DISPLAY_PATH_CHARS)} — that path is a symlink, not a directory vibectx created. ` +
+        `Nothing was written.`,
+    );
+    return fallbackFetchedAt;
+  }
+  // Unchanged from before this item: a plain file already at this exact leaf still throws
+  // EEXIST out of mkdirSync here, exactly as `test/cache.test.ts`'s "library dir is a file"
+  // case has always required.
   mkdirSync(dir, { recursive: true });
+  // Belt-and-suspenders against a TOCTOU between the `isSymlinkAt` check above and the writes
+  // below (an external process replacing `dir` with a symlink in that window) — the same
+  // residual `dropFollowedPageCache` documents and does not close either; cheap, since this
+  // function already pays for the shape of this check elsewhere in the file.
+  //
+  // DISCLOSED, NOT TESTED (R5/R9 mutation check, PAR-786): removing this check alone, with
+  // `isSymlinkAt` above left intact, makes no test in the suite fail — every reachable,
+  // single-threaded test scenario that would trip this check is already caught by
+  // `isSymlinkAt` first, since nothing changes `dir`'s own leaf between that check and
+  // `mkdirSync` in a synchronous test. This line exists ONLY for the genuine multi-process race
+  // (CWE-367) `dropFollowedPageCache`'s own comment names and does not close either — real, but
+  // not exercisable from a single synchronous test process. Kept rather than removed: cheap
+  // (one `lstat` this function already has the shape to do), and the alternative (dropping it)
+  // would be quietly narrowing coverage of a real, if rare, race.
+  if (!isRealDirectory(dir)) {
+    warn(
+      `vibectx: refusing to cache "${clipText(library, MAX_CONFIG_VALUE_CHARS)}" into ` +
+        `${clipText(dir, MAX_DISPLAY_PATH_CHARS)} — it is not a real directory. Nothing was written.`,
+    );
+    return fallbackFetchedAt;
+  }
   const slug = urlSlug(url);
   const contentPath = join(dir, `${slug}.md`);
   const metaPath = join(dir, `${slug}.meta.json`);
@@ -367,7 +582,7 @@ export function writeCache(
   // never carry a newline — but a nonconforming server's high-byte obs-text or an oversized
   // value would otherwise land on disk unfiltered, cost space against the size cap, and be
   // silently dropped again on the very next read anyway.
-  const meta: CacheMeta = { url, fetchedAt: new Date().toISOString() };
+  const meta: CacheMeta = { url, fetchedAt: fallbackFetchedAt };
   if (validEtag(etag)) meta.etag = etag;
   if (finalUrl !== undefined && finalUrl !== url) {
     const clean = sanitizeRemoteUrl(finalUrl);
@@ -388,8 +603,9 @@ export function writeCache(
   // Only after BOTH renames land: this document now exists and counts toward the cap, and it
   // is protected from eviction for the rest of this run (PAR-652 item 7a). Sweeping is
   // amortised inside noteCacheWrite, which never throws — an unsweepable cache must not fail
-  // a write that already succeeded.
-  noteCacheWrite(cacheRoot(), contentPath, Buffer.byteLength(content, "utf8"));
+  // a write that already succeeded. `root`, not a second `cacheRoot()` call: the value this
+  // function already proved real above.
+  noteCacheWrite(root, contentPath, Buffer.byteLength(content, "utf8"));
   return meta.fetchedAt;
 }
 
