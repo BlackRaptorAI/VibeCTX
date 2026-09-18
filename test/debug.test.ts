@@ -127,9 +127,7 @@ describe("fetchUrl diagnostics: a 404, a timeout and a DNS failure are three dif
   it("an HTML 200 and an empty body are distinguishable from both", async () => {
     process.env.VIBECTX_DEBUG = "1";
     vi.stubGlobal("fetch", vi.fn(async () => new Response("<!doctype html><h1>404</h1>", { status: 200, headers: { "content-type": "text/html" } })));
-    // PAR-832a: htmlNotText:true is new here — the one FetchOutcome field fetchLinkedPage
-    // reads to decide whether a .md-suffix retry is worth attempting.
-    expect(await fetchOnce()).toEqual({ status: "miss", htmlNotText: true });
+    expect(await fetchOnce()).toEqual({ status: "miss" });
     expect(loggedReason()).toBe("html-not-text");
 
     lines = [];

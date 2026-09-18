@@ -96,13 +96,6 @@ export interface FetchOutcome {
    *  `miss`: no content was ever accepted from those, so there is nothing for a caller to
    *  attribute to a "final" URL. */
   finalUrl?: string;
-  /** PAR-832a — set only on the `"html-not-text"` miss reason: a real (usually 200) response
-   *  came back, but it was an HTML page, not the text/markdown content this tool reads. This
-   *  is the one miss reason `fetchLinkedPage` treats as potentially recoverable (retry with a
-   *  `.md`-suffixed URL) — every other miss reason (a genuine HTTP error, a timeout, a DNS
-   *  failure, a redirect loop) is not: retrying those would not plausibly change the outcome,
-   *  only spend a second request finding that out. */
-  htmlNotText?: true;
 }
 
 export interface FetchOptions {
@@ -308,7 +301,7 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       // Some sites serve their 404 page with 200; a real llms.txt is plain text.
       if (body.slice(0, 500).toLowerCase().includes("<!doctype html")) {
         debugEvent("fetch.miss", { url, reason: "html-not-text", status: res.status, ms: Date.now() - startedAt });
-        return { status: "miss", htmlNotText: true };
+        return { status: "miss" };
       }
     }
     if (body.trim().length === 0) {
@@ -422,21 +415,6 @@ export type LinkedPageResult =
  *  next.js's own site under either convention — not a gap either strategy can close. */
 const LINKED_PAGE_ACCEPT = "text/markdown, text/plain;q=0.9, */*;q=0.1";
 
-/** PAR-832a — `url` with `.md` appended to its PATH (not its query string or fragment), via
- *  `URL` parsing rather than string concatenation, so a URL carrying `?foo=bar` becomes
- *  `...page.md?foo=bar`, never the wrong `...page?foo=bar.md`. Returns undefined for a URL
- *  `new URL` cannot parse — should not happen (`url` already passed `isAllowedLink`, which
- *  requires a parseable URL), but this function makes no assumption about that itself. */
-function withMdSuffix(url: string): string | undefined {
-  try {
-    const u = new URL(url);
-    u.pathname = `${u.pathname}.md`;
-    return u.href;
-  } catch {
-    return undefined;
-  }
-}
-
 /** Fetch a single linked page (for llms.txt index files), cache-backed with the
  *  same revalidation policy. Refuses links the allowed-host policy rejects (the source
  *  document's host plus `policy.allowedHosts`; https only) both before the fetch and
@@ -444,17 +422,20 @@ function withMdSuffix(url: string): string | undefined {
  *  is the 0.1.3 same-origin rule. With `offline`, the network is never attempted: cached
  *  pages (fresh or stale) are served and anything else is `unavailable`.
  *
- *  PAR-832a — the first attempt asks for markdown via `Accept` (`LINKED_PAGE_ACCEPT`); if the
- *  response is HTML anyway (`FetchOutcome.htmlNotText`), and `url` does not already end in
- *  `.md`, this recurses EXACTLY ONCE with a `.md`-suffixed URL — never a loop, since that URL
- *  always ends in `.md` and so can never take this branch again on its own recursive call.
- *  The recursive call re-runs this function's own `isAllowedLink` check on the NEW url from
- *  its own top, the same check any other followed link gets — the retry URL is never trusted
- *  because its parent already passed. Budget: this at most DOUBLES the network requests one
- *  followed-link ATTEMPT can cost (one negotiated request, one `.md` retry) — it does not
- *  increase how many DISTINCT links `get-docs.ts`'s `followLimit()` allows a single call to
- *  attempt, so the existing per-call link budget is unchanged; each attempted link can now
- *  cost up to 2 requests instead of 1. */
+ *  PAR-832a — asks for markdown via `Accept` (`LINKED_PAGE_ACCEPT`): several doc-site
+ *  frameworks serve raw markdown for exactly this header on a page whose default response is
+ *  rendered HTML (MEASURED against hono.dev, motion.dev and nextjs.org's own non-tutorial
+ *  pages, 2026-09-18). A response that is STILL `text/html` after this is simply `unavailable`
+ *  — no retry. An earlier version of this fix also retried with a `.md`-suffixed URL for sites
+ *  that ignore `Accept` (ui.shadcn.com does; content negotiation alone does not close every
+ *  library PAR-832 found). That retry is deliberately NOT here: two independent reviews
+ *  (code-reviewer, security-architect) found its loop-termination check — `url.endsWith(".md")`
+ *  on the whole href — fails open for any followed link carrying a query string or fragment
+ *  (`...guide?v=1` → `...guide.md?v=1`, which does not end in `.md`, so the guard never stops
+ *  it), which is ordinary in real `llms.txt` indexes (confirmed live in hono's own cached
+ *  index) and unbounded once triggered. Deferred to its own item (0.2.1) rather than shipped
+ *  with a known unbounded-request bug or hidden behind a flag — dead code carrying a known
+ *  defect is worse than no code. See D-82 in DECISIONS.md for the full account. */
 export async function fetchLinkedPage(
   library: string,
   url: string,
@@ -503,14 +484,6 @@ export async function fetchLinkedPage(
   if (out.status === "ok" && out.body !== undefined) {
     const fetchedAt = writeCache(library, url, out.body, out.etag, out.finalUrl);
     return { status: "ok", page: { content: out.body, url, finalUrl: out.finalUrl ?? url, fetchedAt, stale: false } };
-  }
-  if (out.status === "miss" && out.htmlNotText && !url.endsWith(".md")) {
-    const mdUrl = withMdSuffix(url);
-    // A distinct URL, so it gets its OWN cache entry — never mixed with `url`'s. `readCache`
-    // above already proved `hit` (if any) is for `url`, not `mdUrl`; the recursive call reads
-    // and writes strictly under `mdUrl` from here, keeping the two URLs' cached content
-    // (and, per D-71/PAR-749, their on-disk keys) never conflated.
-    if (mdUrl !== undefined) return fetchLinkedPage(library, mdUrl, sourceUrl, ttlHours, offline, policy);
   }
   if (hit) {
     return {
