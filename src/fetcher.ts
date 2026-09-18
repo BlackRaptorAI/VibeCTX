@@ -109,6 +109,13 @@ export interface FetchOptions {
    *  the final URL must be https on a non-forbidden host even when no redirect happened.
    *  Redirect targets are held to that baseline for every caller (see hopAllowed). */
   publicFinalUrl?: boolean;
+  /** PAR-832a — sent as the `Accept` header, when set; absent (the default) sends no `Accept`
+   *  header at all, exactly as before this option existed. SCOPE: `fetchLinkedPage` sets this
+   *  for followed index links; `getLibraryDoc` (the primary-document path) deliberately never
+   *  does — content negotiation on the primary path could change what gets cached for a
+   *  library that already works today, a far larger blast radius than the followed-link gap
+   *  this exists to close. */
+  accept?: string;
 }
 
 /** https, no userinfo, on a host `isForbiddenHost` does not name; false for anything
@@ -204,6 +211,7 @@ export async function fetchUrl(url: string, opts: FetchOptions): Promise<FetchOu
       "user-agent": USER_AGENT, // src/version.ts — the manifest's version, not a second copy of it
     };
     if (opts.etag) headers["if-none-match"] = opts.etag;
+    if (opts.accept) headers["accept"] = opts.accept;
     // Redirects are followed by hand (S1, PAR-655 security gate): with redirect:"follow"
     // the runtime would issue the request to the Location before any check could run —
     // a blind SSRF for a 302 to http://127.0.0.1/. Each Location is checked BEFORE it is
@@ -396,12 +404,36 @@ export type LinkedPageResult =
   /** Network / HTTP failure with nothing cached to fall back on. */
   | { status: "unavailable" };
 
+/** PAR-832a — the Accept header sent on the single request `fetchLinkedPage` makes: several
+ *  doc-site frameworks serve raw markdown for exactly this header on a page whose default
+ *  response is the rendered HTML (MEASURED against hono.dev, motion.dev and nextjs.org's own
+ *  non-tutorial pages, 2026-09-18). This does NOT cover every convention found in the PAR-832
+ *  investigation: ui.shadcn.com ignores Accept entirely and serves markdown only at the same
+ *  path plus `.md`, and nextjs.org's `/learn/*` tutorial pages have no markdown form at all.
+ *  The `.md`-suffix convention is deferred to 0.2.1 — see `fetchLinkedPage` below and D-82. */
+const LINKED_PAGE_ACCEPT = "text/markdown, text/plain;q=0.9, */*;q=0.1";
+
 /** Fetch a single linked page (for llms.txt index files), cache-backed with the
  *  same revalidation policy. Refuses links the allowed-host policy rejects (the source
  *  document's host plus `policy.allowedHosts`; https only) both before the fetch and
  *  after redirects; refused responses are never read or cached. Without a policy this
  *  is the 0.1.3 same-origin rule. With `offline`, the network is never attempted: cached
- *  pages (fresh or stale) are served and anything else is `unavailable`. */
+ *  pages (fresh or stale) are served and anything else is `unavailable`.
+ *
+ *  PAR-832a — asks for markdown via `Accept` (`LINKED_PAGE_ACCEPT`): several doc-site
+ *  frameworks serve raw markdown for exactly this header on a page whose default response is
+ *  rendered HTML (MEASURED against hono.dev, motion.dev and nextjs.org's own non-tutorial
+ *  pages, 2026-09-18). A response that is STILL `text/html` after this is simply `unavailable`
+ *  — no retry. An earlier version of this fix also retried with a `.md`-suffixed URL for sites
+ *  that ignore `Accept` (ui.shadcn.com does; content negotiation alone does not close every
+ *  library PAR-832 found). That retry is deliberately NOT here: two independent reviews
+ *  (code-reviewer, security-architect) found its loop-termination check — `url.endsWith(".md")`
+ *  on the whole href — fails open for any followed link carrying a query string or fragment
+ *  (`...guide?v=1` → `...guide.md?v=1`, which does not end in `.md`, so the guard never stops
+ *  it), which is ordinary in real `llms.txt` indexes (confirmed live in hono's own cached
+ *  index) and unbounded once triggered. Deferred to its own item (0.2.1) rather than shipped
+ *  with a known unbounded-request bug or hidden behind a flag — dead code carrying a known
+ *  defect is worse than no code. See D-82 in DECISIONS.md for the full account. */
 export async function fetchLinkedPage(
   library: string,
   url: string,
@@ -431,6 +463,7 @@ export async function fetchLinkedPage(
     etag: hit?.meta.etag,
     maxBytes: LINKED_PAGE_MAX_BYTES,
     linkGuard: { sourceUrl, policy },
+    accept: LINKED_PAGE_ACCEPT,
   });
   if (out.status === "refused") return { status: "refused" };
   if (out.status === "too-large") return { status: "too-large" };
