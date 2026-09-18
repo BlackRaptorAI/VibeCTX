@@ -274,9 +274,9 @@ export const DEFAULT_REGISTRY: LibraryEntry[] = [
     ecosystem: "npm",
     aliases: ["@clerk/nextjs"],
     urls: [
+      "https://clerk.com/docs/llms.txt",
       "https://clerk.com/llms-full.txt",
       "https://clerk.com/llms.txt",
-      "https://clerk.com/docs/llms.txt",
       "https://raw.githubusercontent.com/clerk/javascript/main/packages/nextjs/README.md",
     ],
     description: "Clerk — authentication and user management (@clerk/nextjs)",

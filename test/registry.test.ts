@@ -140,6 +140,61 @@ describe("default registry: vibe-coder top-30 (PAR-654)", () => {
   });
 });
 
+/**
+ * D-81/PAR-832 root cause B: `clerk.com/llms-full.txt` (768 bytes, MEASURED 2026-09-18) is not a
+ * content index — it is a meta-index of OTHER llms-full.txt files (Documentation, Articles,
+ * Blog, Changelog, Glossary, Dashboard index). None of its link titles overlap any real topic
+ * query, so `rankLinks` scores every candidate 0 and index-following never starts: `doctor`
+ * reported clerk `matched 0, dropped {0,0,0}` — a distinct failure shape from a genuine
+ * link-index page that simply has its links refused (that shape follows > 0 candidates and
+ * drops some; clerk followed none).
+ *
+ * `clerk.com/docs/llms.txt` (520,419 bytes, MEASURED 2026-09-18) is a real index of
+ * `.md`-suffixed documentation pages — it contains real matches for both of clerk's own
+ * probeQueries (`useUser()`, "Protect content from unauthenticated users"). `getLibraryDoc`
+ * (src/fetcher.ts) tries `entry.urls` in order, in BOTH its cache-first loop and its network
+ * loop, and commits to the first one that hits — a meta-index still returns 200, so nothing
+ * about the NETWORK loop would ever fall through to a later, better candidate on its own. The
+ * fix is the ORDER, not new code: moving `docs/llms.txt` in front of the meta-index means it is
+ * what a fresh or expired cache tries, and commits to, first. It is NOT what an install already
+ * holding a fresh cached `llms-full.txt` sees until that copy's TTL expires — cache entries are
+ * keyed per-URL, so the cache-first loop still finds and returns the old winner first; see
+ * D-81's "Known gap" note.
+ *
+ * `clerk.com/docs/llms-full.txt` (27,860,399 bytes, MEASURED 2026-09-18) was deliberately NOT
+ * substituted in its place — it is over `PRIMARY_DOC_MAX_BYTES` (25 MiB) and would be refused.
+ *
+ * This test exists so a future edit that re-promotes the meta-index (or otherwise moves it back
+ * in front of the real index) fails here rather than silently reintroducing the bug `doctor`
+ * only detects at review time, not at registry-edit time.
+ */
+describe("clerk's curated urls prefer the real index over the llms-full.txt meta-index (D-81/PAR-832)", () => {
+  it("docs/llms.txt (a real index of doc pages) is tried before llms-full.txt (a meta-index of other llms-full.txt files)", () => {
+    const clerk = DEFAULT_REGISTRY.find((e) => e.name === "clerk");
+    expect(clerk).toBeDefined();
+    const docsIndex = clerk!.urls.indexOf("https://clerk.com/docs/llms.txt");
+    const metaIndex = clerk!.urls.indexOf("https://clerk.com/llms-full.txt");
+    expect(docsIndex, "docs/llms.txt must be present").toBeGreaterThanOrEqual(0);
+    expect(metaIndex, "llms-full.txt must be present").toBeGreaterThanOrEqual(0);
+    expect(docsIndex).toBeLessThan(metaIndex);
+  });
+
+  it("docs/llms.txt is the FIRST candidate — the one getLibraryDoc actually commits to", () => {
+    const clerk = DEFAULT_REGISTRY.find((e) => e.name === "clerk");
+    expect(clerk?.urls[0]).toBe("https://clerk.com/docs/llms.txt");
+  });
+
+  // Guards against "fix" the size limit instead of the order: docs/llms-full.txt (a real,
+  // complete content dump, unlike the meta-index) is NOT a safe substitute either — it is over
+  // PRIMARY_DOC_MAX_BYTES and would be refused. Not re-measured live on every test run (a
+  // network-dependent assertion has no place in the default suite); this pins the registry
+  // entry's own intent instead: nothing in clerk's curated urls points at that oversized file.
+  it("does not list docs/llms-full.txt as a candidate (27.86 MB, MEASURED 2026-09-18 — over PRIMARY_DOC_MAX_BYTES/25 MiB, would be refused)", () => {
+    const clerk = DEFAULT_REGISTRY.find((e) => e.name === "clerk");
+    expect(clerk?.urls).not.toContain("https://clerk.com/docs/llms-full.txt");
+  });
+});
+
 describe("docs/examples/paragon.vibectx.config.json (Paragon's stack, moved to committed config)", () => {
   it("is a valid config that restores the removed entries with their probe queries", () => {
     const reg = loadRegistry(PARAGON_EXAMPLE);

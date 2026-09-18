@@ -750,3 +750,62 @@ describe("fetchUrl — httpStatus (A16/PAR-725)", () => {
     expect(ok.httpStatus).toBeUndefined();
   });
 });
+
+/** PAR-832a — real-site shapes found in the PAR-832 investigation, reproduced as fixtures:
+ *  hono.dev/motion.dev/nextjs.org's non-tutorial pages negotiate `Accept` correctly.
+ *  ui.shadcn.com and nextjs.org's `/learn/*` tutorial pages do not — those need a `.md`-suffix
+ *  retry to close, which is NOT part of this item (see the module comment on `fetchLinkedPage`
+ *  and D-82 in DECISIONS.md: two independent reviews found the retry's loop-termination check
+ *  fails open for any link carrying a query string or fragment, deferred to 0.2.1 rather than
+ *  shipped with a known unbounded-request bug). This item is `Accept`-negotiation only — a
+ *  response that is still `text/html` after asking for markdown is simply `unavailable`. */
+describe("fetchLinkedPage content negotiation via Accept (PAR-832a)", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const html = (body = "<!doctype html><html><body>rendered page</body></html>") =>
+    new Response(body, { status: 200, headers: { "content-type": "text/html" } });
+  const markdown = (body: string) => new Response(body, { status: 200, headers: { "content-type": "text/markdown" } });
+
+  it("hono/motion/next.js-docs shape: the site honours Accept, so the request succeeds in one fetch", async () => {
+    const link = "https://docs.example.com/guide/middleware";
+    const spy = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const accept = (init?.headers as Record<string, string> | undefined)?.["accept"];
+      return accept?.includes("text/markdown") ? markdown("# Middleware\n\nUse app.use().") : html();
+    });
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    expect(result).toMatchObject({ status: "ok", page: { content: "# Middleware\n\nUse app.use().", url: link } });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(readCache("lib", link, 999)?.content).toBe("# Middleware\n\nUse app.use().");
+    // The actual request carried the negotiated Accept header — pins the behavior, not just
+    // the outcome (a spy that ignored `init` entirely could not tell a real negotiation from
+    // a coincidence).
+    const [, init] = spy.mock.calls[0];
+    expect((init?.headers as Record<string, string> | undefined)?.["accept"]).toBe(
+      "text/markdown, text/plain;q=0.9, */*;q=0.1",
+    );
+  });
+
+  it("shadcn/next.js-learn shape: Accept is ignored (always HTML) — unavailable after exactly ONE request, no retry", async () => {
+    const link = "https://docs.example.com/components/button";
+    const spy = vi.fn(async () => html());
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    expect(result).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(1); // no .md retry — that half is deferred, not shipped
+    expect(readCache("lib", link, 999)).toBeUndefined();
+  });
+
+  it("a followed link's primary-document counterpart (getLibraryDoc) never sends Accept — the scope is followed links only", async () => {
+    const spy = vi.fn(async () => html());
+    vi.stubGlobal("fetch", spy);
+    const entry = { name: "lib", urls: ["https://docs.example.com/llms.txt"] };
+    const doc = await getLibraryDoc(entry);
+    // An HTML response on the PRIMARY path is (unchanged by this item) still a plain miss —
+    // no candidate URL left, no cache, so the call returns undefined. What this test pins is
+    // the REQUEST: exactly one, and it carries no `accept` header.
+    expect(doc).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [, init] = spy.mock.calls[0];
+    expect((init?.headers as Record<string, string> | undefined)?.["accept"]).toBeUndefined();
+  });
+});

@@ -1132,3 +1132,150 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref (round 4 fixes): `.github/workflows/ci.yml`, `test/engines.test.ts`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`,
   `CLAUDE.md`.
+
+## D-81 — decided 2026-09-18, executing PAR-832 root cause B (clerk)
+
+- **D-81** 2026-09-18 — `clerk`'s curated `urls` now try `https://clerk.com/docs/llms.txt`
+  first, ahead of `https://clerk.com/llms-full.txt`. Investigated and MEASURED 2026-09-18, not
+  taken from the filing issue's own claim: `llms-full.txt` is 768 bytes (curl/Node `fetch`
+  agree) and is not a content index at all — it is a meta-index of OTHER `llms-full.txt` files
+  (Documentation, Articles, Blog, Changelog, Glossary, Dashboard index). None of those six link
+  titles overlaps either of clerk's own `probeQueries` ("middleware protect routes", "useUser
+  hook"), so `rankLinks` scores every candidate 0 and index-following never starts — `doctor`
+  reported clerk `matched 0, dropped {0,0,0}`, a distinct shape from a real link-index page that
+  simply has some links refused (that shape follows > 0 and drops some).
+  `docs/llms.txt` (520,419 bytes, MEASURED) is the real thing: an index of `.md`-suffixed doc
+  pages whose titles include a direct hit for each probe (`useUser()`; "Protect content from
+  unauthenticated users"). `getLibraryDoc` (`src/fetcher.ts`) tries `entry.urls` in order and
+  commits to the first one that fetches successfully — a 200-OK meta-index still fetches
+  successfully, so nothing in that loop would ever fall through to a better candidate on its
+  own. The fix is the ORDER, not new code.
+  **Explicitly rejected:** substituting `docs/llms-full.txt` (a real, complete content dump,
+  unlike the meta-index) in `llms-full.txt`'s place. MEASURED 2026-09-18: 27,860,399 bytes —
+  over `PRIMARY_DOC_MAX_BYTES` (25 MiB / 26,214,400 bytes) and would be refused outright.
+  **Coverage check, this entry's own scope (bare-host `llms-full.txt` first candidates only —
+  an entry whose first candidate carries a path, like `ai-sdk`'s or `supabase`'s, is out of this
+  narrower scope even where it also 404s):** every one of the other 29 curated entries whose
+  first candidate is a bare-host `llms-full.txt` was checked live (GET, real status + byte
+  count, redirects followed, Node's own `fetch` — not just `curl`, to rule out a client-specific
+  block; re-run twice, stable both times) for the same failure shape (a 200 response whose body
+  is itself a tiny link-only meta-index). None were found. Two other, DIFFERENT and unrelated
+  shapes turned up in the same sweep and are explicitly NOT this decision's scope: 12
+  first-candidate URLs across the registry now 404 — among the bare-host `llms-full.txt` set,
+  `nextjs.org` (a PAR-832 sibling — root cause A, not investigated here), `docs.stripe.com`,
+  `react.dev`, `tailwindcss.com`, `ui.shadcn.com`, `firebase.google.com`, `playwright.dev`,
+  `reactrouter.com`, `docs.astro.build`, `motion.dev` (also a PAR-832 sibling), plus two with a
+  path (`ai-sdk.dev/docs`, `supabase.com/docs`) outside this scope — harmless today for every
+  entry with a working fallback, because a 404 IS caught by the existing try-next-candidate
+  fallback, unlike a 200-OK meta-index; and `docs.anthropic.com/llms-full.txt` redirects to a
+  35,109,013-byte document, itself over `PRIMARY_DOC_MAX_BYTES`. Neither is this issue's failure
+  shape and neither is fixed here — noted for whoever picks up the registry's other stale
+  entries (including PAR-832's next.js/motion root causes), not actioned.
+  **Verified live, on a FRESH cache:** `vibectx doctor --library clerk --json` against a fresh
+  cache, real network, MEASURED 2026-09-18 — `url: "https://clerk.com/docs/llms.txt"`, both
+  probes `index-followed` (5 followed / 0 dropped each, 10/0 total), `healthy: true`.
+  **Known gap, not fixed here:** an install that already holds a FRESH cached copy of
+  `llms-full.txt` (under the old order's 168 h default TTL) keeps being served it after this
+  fix ships, because `getLibraryDoc`'s cache-first loop (`src/fetcher.ts`) also walks
+  `entry.urls` in order and cache entries are keyed per-URL (`urlSlug`, `src/cache.ts`) — a
+  fresh hit on `urls[1]` (the meta-index, post-fix) returns before `urls[0]` is ever tried.
+  MEASURED by reproducing both states against the same warmed cache dir: pre-fix code / fresh
+  cache → `llms-full.txt`, unhealthy (the PAR-832 symptom); fixed code / that SAME cache →
+  still `llms-full.txt`, still unhealthy; fixed code / fresh cache → `docs/llms.txt`, healthy.
+  Self-heals once the cached copy passes its TTL. `vibectx warm --force` does NOT clear it —
+  `src/warm.ts` only forces retry of a recent RESOLUTION failure, never `forceRefresh` on the
+  document itself (MEASURED: ran it against the poisoned cache, no change). What does work today:
+  deleting that library's cache directory, waiting out the TTL, or the MCP `refresh` tool
+  (`src/refresh.ts` calls `getLibraryDoc` with `forceRefresh: true`, skipping the cache loop
+  entirely). The general defect — a curated `urls` reorder cannot invalidate a still-fresh cache
+  keyed to the old winner — is not specific to clerk and will recur on every other PAR-832 root
+  cause that turns out to need a reorder; filed as its own issue rather than fixed here.
+  Ref: `src/registry.ts` (clerk's `urls`), `test/registry.test.ts` ("clerk's curated urls prefer
+  the real index over the llms-full.txt meta-index (D-81/PAR-832)").
+
+---
+
+## D-82 — decided 2026-09-18, executing PAR-832a (Accept-header negotiation only)
+
+- **D-82** 2026-09-18 — **Every followed index link is asked for markdown up front, on its one
+  and only request, via `Accept: text/markdown, text/plain;q=0.9, */*;q=0.1` — not as a
+  follow-up after seeing an HTML response. If the site ignores that and answers `text/html`
+  anyway, the result is simply `unavailable` — there is no second request. Scoped to followed
+  index links only; the primary-document fetch path is unchanged.**
+  **What this entry originally proposed, and why it was cut down:** the first version of this
+  fix ALSO retried a still-HTML response once more with a `.md`-suffixed url (closes
+  ui.shadcn.com and nextjs.org's `/learn/*` tutorial pages, neither of which negotiates on
+  `Accept`). Two independent reviews (code-reviewer, security-architect), run in parallel on
+  that version, both found the SAME defect by different routes: the retry's loop-termination
+  check — `url.endsWith(".md")` tested against the whole href — fails open for any followed
+  link whose url carries a query string or a fragment. `withMdSuffix` correctly appends `.md`
+  to the URL's PATH only (`new URL` parsing, `u.pathname += ".md"` — confirmed by both reviews
+  to be incapable of a host/protocol escape), but `...guide?v=1` becomes `...guide.md?v=1`,
+  which does not end in `.md` — so the SAME guard that was supposed to stop the recursion at
+  one level lets it re-arm on the very URL it just produced, appending `.md` again forever
+  (`guide.md.md?v=1`, `guide.md.md.md?v=1`, …), bounded only by the origin eventually answering
+  a non-2xx to an absurdly long path. code-reviewer additionally confirmed such links are LIVE
+  on the shipped registry today — 31 fragment-carrying same-host links in hono's own cached
+  index alone — and that no existing test caught the bug: a candidate fix applied and reverted
+  left the suite passing identically either way (1637/1637 on the with-retry tree; the shipped
+  tree without the retry is 45 files / 1636 tests), because every fixture used a bare-path URL.
+  Tom's
+  decision: ship the negotiation half now; the retry half defers to 0.2.1 with this bug as the
+  stated reason, not merged behind a flag — dead code carrying a known unbounded-request defect
+  is worse than no code. `withMdSuffix`, the retry guard, and the retry's own `fetchUrl` call
+  were all REMOVED from `src/fetcher.ts`, not disabled.
+  **What remains, and what it closes:** `FetchOptions` gained one field, `accept?: string`,
+  read only when present. `getLibraryDoc` — `src/fetcher.ts`, the primary-document path, NOT
+  `src/cache.ts` (an earlier draft of this entry named the wrong file) — never sets it, so
+  primary-document fetches stay byte-for-byte unchanged; content negotiation there would risk
+  changing what gets cached for a library that already works today, a far larger blast radius
+  than this item's own scope. Verified, not merely asserted: a test pins that `getLibraryDoc`
+  against an HTML response sends no `accept` header and performs exactly one request. The
+  followed-link path is NOT unchanged for libraries that already worked before this item: every
+  library whose index has followable links (react, stripe, expo, convex, anthropic-sdk, supabase,
+  tanstack-query, and others) now sends `Accept` on those requests too — the scope constraint is
+  "primary path untouched," not "no other library's behaviour changes." The cache key is
+  `(library, url)` with no representation discriminator, so a server that varies its response on
+  `Accept` without varying its ETag could serve a different cached representation than before.
+  code-reviewer's own full-registry run (below) shows every one of those libraries still healthy,
+  which is the actual evidence this is benign — not the scope framing above, which was too narrow
+  to make that claim on its own. Filed as PAR-842 rather than fixed here: add a `Vary`-aware or
+  accept-scoped cache key if a real site is ever found to need it. MEASURED
+  directly against the real sites (2026-09-18): hono.dev and motion.dev honour `Accept:
+  text/markdown` on the same URL; nextjs.org's `/docs/` and `/blog/` pages do too; nextjs.org's
+  `/learn/*` tutorial pages and ui.shadcn.com do not negotiate under any `Accept` value and stay
+  `unavailable` — no vibectx defect on those two, a real gap in what those sites serve (or, for
+  shadcn, a convention — the `.md`-suffix retry — that this item does not ship).
+  **Security, corrected from this entry's earlier text (code-reviewer/security-architect,
+  independently, on the version WITH the retry):** the original text framed the recursive
+  call's own `isAllowedLink` re-check as "the retry is re-validated, not trusted because its
+  parent was" — implying that check was THE control. Both reviews found this overclaimed:
+  `isAllowedLink` (`src/link-policy.ts`) constrains only protocol, userinfo, host and port, all
+  of which are structurally invariant under a pathname-only mutation (`new URL` parsing never
+  touches them when only `.pathname` is set) — so on a `.md`-suffixed same-host URL, that
+  re-check is a TAUTOLOGY once the original passed it, not a control that could ever refuse
+  something the first check allowed. It was defence-in-depth, not the actual gate. The REAL
+  control was `fetchUrl`'s own per-hop redirect guard (`hopAllowed`, `MAX_REDIRECT_HOPS`, the
+  final-host `linkGuard` check) — confirmed by both reviews to be exercised identically on
+  every request this feature issues, retried or not, since every request still goes through
+  the one `fetchUrl` function. This correction is now moot for the shipped SCOPE of this item
+  (no retry exists to re-validate), but is recorded here because the CLAIM was wrong regardless
+  of whether the code it described shipped — a security property asserted in a decision record
+  should be an accurate description of the mechanism, not of the intent.
+  **Verified against the real sites, not just fixtures:** `vibectx doctor` on a fresh cache —
+  next.js `healthy: true, followed: 1, dropped: 2` (the `/blog/...` link succeeds; the two
+  `/learn/*` links remain unavailable, exactly as this item's own scope predicts); hono
+  `healthy: true, followed: 9`; motion `healthy: true, followed: 10, dropped: 0`; shadcn
+  `healthy: false, followed: 0, dropped: 5` — unchanged from before ANY PAR-832 work, exactly as
+  expected, since it needs the deferred retry; clerk `healthy: true` — PAR-832's OTHER root
+  cause, fixed by the separate D-81/PR #30, already on `main` before this branch last merged it.
+  A full-registry `doctor --json` run: **28/30** — up from the CR-20260917 baseline of 24/30
+  (clerk was unhealthy there; shadcn was already unhealthy there too, so it does not "flip"
+  relative to that baseline). The more informative comparison is to the version WITH the retry,
+  measured at `cc0c8ab` before D-81's clerk fix had merged: that tree was also 28/30, but with
+  shadcn healthy and clerk not yet fixed. With the retry AND D-81 both in, this would be 29/30.
+  The deferral's real cost is exactly one library — shadcn — and the total here reads 28/30
+  instead of 29/30 because of it; the two counts land on the same number only because losing
+  shadcn (this item's scope cut) and gaining clerk (D-81, an unrelated fix merged from `main`)
+  happen to offset by one each. tailwindcss remains its own pre-existing, unrelated gap.
+  Ref: `src/fetcher.ts`, `test/fetcher.test.ts`, `test/debug.test.ts` (PAR-832a, PAR-832).
