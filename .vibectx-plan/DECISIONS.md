@@ -937,3 +937,198 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref (round 1 fixes): `src/doctor-store.ts`, `src/doctor.ts`, `src/list-libraries.ts`,
   `src/get-docs.ts`, `src/retrieval.ts`, `src/cache-meta.ts`, `src/limits.ts`, `src/cli.ts`,
   `README.md`.
+
+---
+
+## D-80 — decided 2026-09-17, executing R-1 / PAR-829 (supersedes this entry's own prior text)
+
+- **D-80** 2026-09-17, updated 2026-09-18 — **`package.json`'s `engines.node` is `^20.19.0 ||
+  ^22.12.0 || >=24.0.0` — the INTERSECTION of `vite`'s and `vitest`'s own declared ranges, read
+  directly from `node_modules/{vite,vitest}/package.json` rather than trusted from any prior
+  record — not a plain floor approximating either, and not derived from `vite` alone (see the
+  2026-09-18 update below: deriving from one dependency and ignoring the other is exactly the
+  class of gap this decision exists to close, and it recurred one dependency over).**
+  **What this entry originally recorded, and why that was wrong to leave standing:** this
+  entry first recorded CI proving the floor's LOWER bound only, leaving `engines.node
+  >=20.19.0` in place and noting (via two rounds of code-reviewer correction — see git history
+  for that discussion, now superseded) that the field silently admitted Node 21.x and
+  22.0.0–22.11.x, versions `vite`'s own range excludes. Tom's decision (2026-09-17): a field
+  that states something false should be corrected, not documented around. A user on Node 21
+  passed the old `engines` check and then hit a broken test toolchain — the gap was real, not
+  merely theoretical, and the fix is one field, not a permanent caveat.
+  **The fix, and what changed with it:** `engines.node` now matches `vite`'s range exactly.
+  `package-lock.json` regenerated (`npm install --package-lock-only`; one line changed — the
+  root package's own `engines` field — no dependency version drift). Every place the old floor
+  was stated (`README.md`, `CLAUDE.md`, `CONTRIBUTING.md`) is corrected to the same range.
+  **This is advisory, not enforced — stated plainly, not implied:** no `.npmrc` in this repo
+  sets `engine-strict`, so `npm ci` on an excluded version (Node 21.x, 22.0.0–22.11.x) still
+  only warns (`EBADENGINE`) rather than failing — unchanged by this fix, and true of the old
+  floor too. The value of this change is that the field now STATES the true requirement;
+  enforcement was never what D-75 or this entry claimed for it.
+  **CI, and what is and is not tested (as of 2026-09-17 — SUPERSEDED, see the 2026-09-18 update
+  below and its own round 4 finding B-1; a third matrix leg WAS later needed, once the range
+  gained a third band):** the `test-matrix` job's two matrix legs at the time
+  (`.github/workflows/ci.yml`) proved both ends of the two-band disjunction — `20.19.x` (the low
+  end) and `22`, which resolves to the latest available, ≥22.12 (the high end). The excluded
+  middle band (Node 21.x, 22.0.0–22.11.x) was deliberately NOT a CI leg: there is nothing
+  SUPPORTED in that band to run the suite against, so a leg there could only ever prove "the
+  toolchain the field says is unsupported does or does not happen to work today" — not a claim
+  this project makes about any other unsupported version either. Documenting a version as
+  unsupported and having tested it are different, weaker-vs-stronger claims; this entry does
+  not conflate them — that reasoning still holds, unchanged; only the LEG COUNT needed to cover
+  every actually-supported band changed, once there were three of them instead of two.
+  **Verified locally first, on macOS, then MEASURED for real on PR #26's own CI run:** locally,
+  `npm ci && npm run lint && npm test && npm run build` passed clean on Node v26.0.0 (default;
+  satisfies `>=22.12.0`) and Node 20.20.2 (Homebrew's closest available build to `20.19.x`;
+  satisfies `^20.19.0`) — but code-reviewer round 3 correctly flagged that claim as macOS-only:
+  `@napi-rs/lzma-linux-x64-gnu@1.5.1`, an OPTIONAL `linux-x64`-only dependency of `rollup`
+  declaring `engines.node: "^22.20 || ^24.12 || >=25"` (excludes ALL of `20.19.x`), cannot have
+  been exercised on macOS at all, since npm never even considers an optional dependency whose
+  `os`/`cpu` doesn't match the current platform. **Resolved by the actual CI run, not left as a
+  guess:** on PR #26 (<https://github.com/BlackRaptorAI/VibeCTX/actions/runs/35300888578>,
+  2026-09-18), `test-matrix (20.19.x)` (resolved to Node 20.19.6, the exact `ubuntu-latest`
+  platform where that package could matter) ran `npm ci` with NO `EBADENGINE` and no mention of
+  `napi-rs`/`lzma` anywhere in the job log at all — npm silently omitted the optional dependency
+  rather than warning about its unmet engines. PASS, 1m12s, 45 files / 1627 tests, clean build.
+  `test-matrix (22)` (resolved to Node 22.23.2) PASS likewise, same 45/1627 result. The required
+  `test` gate job PASSED under the bare name `test`, confirming empirically — not just by
+  analysis — that branch protection needed no settings change. This is the first run ever to
+  exercise `20.19.x`; the local proxies above were never cited as a substitute for it.
+  **Still open, unchanged by this entry:** `release-0.2.0` (unmerged) carries its own,
+  independently-written Node-floor row in `CR-20260917-release-0.2.0.md` §5, written before
+  this fix — it is now doubly stale (both "no CI leg at 20.19.x" and "engines is a plain
+  floor" no longer hold on this branch) and must be reconciled against this branch's own CR row
+  when `release-0.2.0` merges, not before; a `git merge-tree` check already confirmed a textual
+  conflict between the two rows.
+  Ref: `package.json`, `package-lock.json`, `.github/workflows/ci.yml`,
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CLAUDE.md`,
+  `CONTRIBUTING.md` (R-1 / PAR-829, commit `7907983`).
+
+  **2026-09-18 update (PAR-830 fallout): `vitest` bumped to 4.1.11 — clearing two moderate
+  advisories, unrelated to this item — and its own declared `engines.node` narrowed to
+  `^20.0.0 || ^22.0.0 || >=24.0.0`, DIFFERENT from and narrower than `vite`'s
+  `^20.19.0 || >=22.12.0` in the 22.x/23.x band. The 2026-09-17 fix above had derived
+  `engines.node` from `vite` alone; it never looked at `vitest`'s own range at all.**
+  **The diagnostic Tom asked for, before anything was changed:** run `npm test` after the
+  merge+`npm ci` and check whether `test/engines.test.ts` — which asserted `ours === vite's
+  engines.node` by STRING EQUALITY — still passed. It did. `vite` itself bumped to 8.3.0 in the
+  same `npm install` but kept the identical `^20.19.0 || >=22.12.0` string, so the equality
+  check had nothing to disagree with; it never once consulted `vitest`'s range, so it could not
+  have caught `vitest` narrowing regardless of what `vite` did. **This is finding (b) from the
+  item's own framing, not (a): the test was pinning a literal comparison, not enforcing an
+  invariant** — it would keep passing forever against a `vitest` bump that moved its range
+  anywhere, because nothing in it ever read `vitest`'s `package.json` at all.
+  **The real gap this exposed — "the Node 23 hole":** a bare `>=22.12.0` (the 2026-09-17 value)
+  admits Node 23.x. `vitest`'s new range does not: `^22.0.0` stops before 23.0.0, and the next
+  band starts at `>=24.0.0` — nothing covers 23.x. Left uncorrected, `engines.node` would have
+  silently re-admitted exactly the class of defect this whole item exists to close, one Node
+  major over from the one it already fixed.
+  **The fix:** `engines.node` is now the INTERSECTION of `vite`'s and `vitest`'s ranges —
+  `^20.19.0 || ^22.12.0 || >=24.0.0` — computed and VERIFIED with `semver.subset()`
+  (`semver@7.8.5`, added as a new devDependency; there was no existing semver-range library
+  anywhere in the tree to reuse, and Tom's own instruction was explicit: approximating this by
+  hand is the failure mode, not an acceptable shortcut — `semver.subset()` itself has a real
+  boundary quirk around caret-expanded prerelease exclusions (`<23.0.0` vs the internally
+  normalized `<23.0.0-0`) that was hit and worked around while deriving this, which is itself
+  evidence FOR using the library rather than hand-rolling the same interval algebra worse).
+  `test/engines.test.ts` was rewritten from a single string-equality assertion into three: `ours`
+  is a `semver.subset()` of `vite`'s range, `ours` is a `semver.subset()` of `vitest`'s range,
+  and — a non-vacuity check, D-24's own "an empty result is not a passing result" pattern
+  applied here — Node `23.0.0` is confirmed to fail `semver.satisfies(v, ours)`, so the test
+  cannot pass by accident against a range that silently reopened the hole. VERIFIED the new test
+  actually discriminates, not just that it passes: reverted `engines.node` to the OLD
+  `>=22.12.0` value locally and re-ran it — 2 of 3 assertions failed exactly as the subset/hole
+  checks predict — then restored the fix. `package-lock.json` regenerated via `npm install
+  --save-dev semver` and `npm install --package-lock-only`; `npm ci` afterward reinstalls clean
+  from it. An unrelated cosmetic side effect of `npm install` rewriting `package.json` (the
+  `description` field's em dash re-escaped from a literal character to `—`, and the
+  file's trailing newline added) was reverted by hand so the diff carries only the intended
+  two-line change (`engines.node`, the new `semver` devDependency) — neither is a semantic
+  difference, but an unexplained unrelated diff line is exactly what CLAUDE.md's own
+  diff-stat-by-eye rule (added this same day, PAR-831) exists to catch.
+  **Verified on the merged tree:** `npm ci && npm run lint && npm test && npm run build` clean
+  on Node v26.0.0 (this session's local machine — satisfies the range's `>=24.0.0` band, the
+  one CI did NOT cover until round 4's B-1 fix below added a third leg) — 45 files, 1629 tests
+  (was 1627: two new assertions in the rewritten `engines.test.ts`, later four — see round 4).
+  CI's own matrix legs are the actual proof for each band, re-run after this push — see the
+  round 4 review below for that result.
+  D-number re-checked against `origin/main`, `release-0.2.0`, and (now merged) `par-831` after
+  this merge: still only D-79 exists on any of them; D-80 stays D-80, no renumbering (per
+  CLAUDE.md/PAR-831's own new rule — pick right before opening the PR, which this already was).
+  Ref (2026-09-18 update): `package.json`, `package-lock.json`, `test/engines.test.ts`
+  (rewritten), `.github/workflows/ci.yml`, `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`
+  (PAR-830 fallout, R-1 / PAR-829).
+
+  **Round 3 review (code-reviewer — a fresh pass on the manifest fix; rounds 1/2 reviewed this
+  entry's now-superseded prior text and are not repeated here), PASS with should-fixes, no
+  blocking finding:**
+  - Independently verified: `engines.node` matches `node_modules/vite/package.json` (v7.3.6)
+    exactly; `npm ls vite --all` shows one resolved version; `package-lock.json` is
+    byte-identical to a from-scratch `npm install --package-lock-only` re-run (no hand-edit, no
+    drift); the "advisory, not enforced" claim MEASURED directly (a scratch package with an
+    impossible `engines.node` warns and exits 0 under plain `npm ci`, and exits 1 only once
+    `engine-strict=true` is added) rather than merely recalled; both matrix legs resolve inside
+    the new range (`20.19.x` → 20.19.6, `22` → 22.23.2 at review time, both confirmed against
+    `nodejs.org`'s and `actions/node-versions`' own version listings); `release-0.2.0`'s row is
+    confirmed still open and still conflicting via `git merge-tree`.
+  - **Should-fix, applied:** `D-3/PAR-778` in the CR row was a dangling reference (no such
+    entry exists; the real one is `D-75`) — corrected. This entry's and the CR row's dates said
+    2026-09-18; every commit carrying them is 2026-09-17 local time, and the file's own
+    convention (D-78, D-79) dates by commit day — corrected to 2026-09-17. The "neither
+    producing an EBADENGINE warning" claim (above) was gathered entirely on macOS and did not
+    account for `@napi-rs/lzma-linux-x64-gnu@1.5.1` — an optional, `linux-x64`-only dependency
+    of `rollup` whose own `engines.node` (`^22.20 || ^24.12 || >=25`) excludes ALL of `20.19.x`
+    and cannot have been exercised outside `ubuntu-latest` — narrowed to say so explicitly
+    rather than read as a platform-general claim. A drift guard was added
+    (`test/engines.test.ts`): nothing previously would have caught a future `vite`/`vitest`
+    bump moving its declared range out from under `engines.node` — the exact failure mode this
+    item exists to fix, now closed permanently rather than once. Two imprecise "at the floor
+    itself" claims (README, CONTRIBUTING) were corrected: `20.19.x` resolves to the latest
+    20.19 patch, not the literal `20.19.0` minimum, so CI proves the 20.19 LINE, not the exact
+    boundary value.
+  - **Explicitly considered and rejected:** setting `engine-strict=true` to make the exclusion
+    enforced, not merely documented. `@napi-rs/lzma-linux-x64-gnu`'s own range excludes ALL of
+    `20.19.x` — turning on tree-wide strict enforcement to defend the 20.19 line would risk
+    BREAKING install on the 20.19 line, via an optional native accelerator nobody is thinking
+    about. Advisory is the correct choice here, not merely the current one, and this is why.
+  Ref (round 3 fixes): `test/engines.test.ts` (new),
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`.
+
+  **Round 4 review (code-reviewer — the 2026-09-18 PAR-830-fallout fix above), CONCERNS with
+  one blocking finding, fixed before push:**
+  - Independently re-verified, by an INDEPENDENT route rather than trusting `semver.subset()`:
+    enumerated 20 boundary versions and compared membership in `engines.node` against a
+    hand-computed `inVite(v) && inVitest(v)` predicate — zero mismatches. Confirmed
+    `semver.subset()`'s argument order is order-sensitive and was not accidentally inverted
+    (the flipped calls both correctly return `false`). Reproduced the "revert and re-run"
+    regression check independently and got the same two failures. Confirmed the `package.json`
+    diff against `origin/main` carries exactly the two claimed semantic changes and nothing
+    else, and that `npm ci` reinstalls clean from the committed lockfile with 0 vulnerabilities.
+    Swept the whole repo for stale `>=22.12.0` references and found none outside legitimate
+    historical citations. Ran the full gate on Node v26.0.0: clean, 45 files / 1629 tests.
+  - **B-1 (BLOCKING):** the range grew from two bands to three (`^20.19.0`, `^22.12.0`,
+    `>=24.0.0`), but the CI matrix still had two legs (`20.19.x`, `22`) — and `22` is now the
+    MIDDLE band's representative, not the high end. The unbounded top band, `>=24.0.0`, had NO
+    CI leg at all — every "CI tests both ends" claim in `ci.yml`, `README.md`,
+    `CONTRIBUTING.md`, `CLAUDE.md`, this entry (above) and the CR row was therefore false, the
+    same class of defect this whole item exists to close. Pointedly: the reviewer's own gate
+    run was on Node v26.0.0, which satisfies the range only via the untested `>=24.0.0` band —
+    "verified locally on Node v26" was, without a third leg, verifying precisely the band CI
+    did not cover. Fixed by adding the missing leg (`"24"`, resolves to the latest ≥24.0.0)
+    rather than re-wording the coverage claim around the gap — CI now runs three legs, one per
+    band, and every "tests X" claim across the repo is true again, not just less false.
+  - **Should-fix, applied:** `test/engines.test.ts`'s module comment cited a nonexistent
+    `D-81` — dropped (there is no D-81 anywhere in the repo; this entry stays D-80). Added a
+    fourth test assertion (S-2): `semver.subset()` alone proves `engines.node` does not
+    OVER-claim support, but says nothing about UNDER-claiming it — `">=24.0.0"` alone, or any
+    other needlessly narrow range still fully inside both dependencies' bounds, would have
+    passed all three prior assertions. The new assertion requires each band's low edge
+    (`20.19.0`, `22.12.0`, `24.0.0`) to satisfy `engines.node`, MEASURED to actually fail
+    against the over-narrow example above before the fix, and to pass after it. The CR row's
+    correction (round 3's own addition) had landed in a trailing cell while the Evidence and
+    Status cells two columns over still asserted the superseded `^20.19.0 || >=22.12.0` value
+    in the present tense — rewritten as one coherent, non-contradictory row stating the current
+    truth first, with the round-by-round history pointed at this entry instead of duplicated.
+  Ref (round 4 fixes): `.github/workflows/ci.yml`, `test/engines.test.ts`,
+  `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`,
+  `CLAUDE.md`.
