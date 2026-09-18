@@ -309,7 +309,15 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  config-authored entry's URL is validated for scheme/host (`link-policy.ts`) but never
  *  re-serialized, so an embedded control character or newline could survive into a rendered
  *  stamp on the get_docs path only. One shared function is what makes "clean once, here" an
- *  actual guarantee rather than a convention two callers could independently forget.
+ *  actual guarantee rather than a convention two callers could independently forget. (PAR-811:
+ *  `stripStampQuery`'s successful-parse branch DOES now re-serialize through `new URL().href`
+ *  for its own reason — stripping the query/fragment/userinfo — with side effects beyond that
+ *  one goal: lower-cased host, a normalized default port, resolved `.`/`..` path segments, an
+ *  added trailing slash on a bare origin, and punycode on a non-ASCII host. All of those are
+ *  either invisible or a strict improvement for this render path — punycoding in particular
+ *  defuses the exact IDN-homograph shape S-1 exists to guard against — but the parse-FAILURE
+ *  fallback below still returns the ORIGINAL, un-re-serialized string, so this paragraph's
+ *  claim stays load-bearing on that branch.)
  *
  *  A11/PAR-724 closes the gap the comment here used to record (D-73: A17 shipped with no
  *  version/ref field because A11 had not been built): `version`, below, is the version or ref
@@ -391,9 +399,19 @@ const MAX_STAMP_VERSION_CHARS = 100;
  * reached the model's own context on every `get_docs`/`search` call this stamp appears in — a
  * wider exposure than any on-disk cache file, since it leaves the process on every response
  * rather than sitting in a local file. Same fix, same reasoning, as `activity-log.ts`'s
- * `sanitizeLoggedUrl` (D-51/PAR-792): strip the query, and the fragment for the same reason
- * (rarely survives this far — `link-policy.ts`'s `sanitizeRemoteUrl` already clears it on most
- * paths — stripped again here so this function does not depend on that holding).
+ * `sanitizeLoggedUrl` (D-51/PAR-792): strip the query and the fragment (rarely survives this
+ * far — `link-policy.ts`'s `sanitizeRemoteUrl` already clears it on most paths — stripped
+ * again here so this function does not depend on that holding) AND, since PAR-811 round 2
+ * (security-architect, S-1), userinfo — `https://svc:s3cr3t@host/…` is the OTHER syntax a
+ * credential can travel in a URL, and unlike the query string it is not gated by any
+ * upstream validator on every path: a cache hit's `finalUrl` (`fetcher.ts`'s
+ * `DocResult.finalUrl`) is read back from the persisted cache record through `cache-meta.ts`'s
+ * `validMetaUrl`, which checks only length and parseability, not scheme or userinfo — a cache
+ * directory written before PAR-776 round 1 (N-3, when `fetcher.ts`'s `isPublicHttpsUrl` first
+ * started rejecting userinfo on a redirect hop) can still hold one today. This function clears
+ * it unconditionally rather than depending on that gate holding, exactly as it already does
+ * for the query string — `sanitizeLoggedUrl` does the same, and this comment previously
+ * claimed that parity before it was actually true.
  *
  * Falls back to the ORIGINAL string on a parse failure: `f.url` is already a fetched or
  * config-validated URL by the time it reaches this render path, not something this function is
@@ -418,6 +436,8 @@ const MAX_STAMP_VERSION_CHARS = 100;
 function stripStampQuery(url: string): string {
   try {
     const u = new URL(url);
+    u.username = "";
+    u.password = "";
     u.search = "";
     u.hash = "";
     return u.href;
@@ -427,11 +447,22 @@ function stripStampQuery(url: string): string {
 }
 
 export function sourceStampLine(f: StampFacts): string {
-  const redirect = f.redirectedFrom !== undefined ? ` (redirected from ${clipText(stripStampQuery(f.redirectedFrom), MAX_STAMP_URL_CHARS)})` : "";
+  const url = clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS);
+  // code-reviewer, PAR-811 round 2, SF1: compare AFTER stripping/clipping, not on the raw
+  // strings `get-docs.ts` used to decide `redirectedFrom` was present at all. Stripping the
+  // query (or fragment, or now userinfo) can make two URLs that genuinely differed collapse to
+  // the SAME rendered string — an auth gateway that validates `?token=…` and 302s to the plain
+  // document is exactly that case, and it is exactly the flow this fix targets. Rendering
+  // "X (redirected from X)" would assert a move this same line's own text refutes; say nothing
+  // instead, matching `StampFacts.redirectedFrom`'s own contract ("present only when a redirect
+  // moved the fetch away from the candidate URL") — after stripping, for stamp purposes, it
+  // didn't.
+  const from = f.redirectedFrom !== undefined ? clipText(stripStampQuery(f.redirectedFrom), MAX_STAMP_URL_CHARS) : undefined;
+  const redirect = from !== undefined && from !== url ? ` (redirected from ${from})` : "";
   const version = f.version !== undefined ? ` · version ${clipText(f.version, MAX_STAMP_VERSION_CHARS)}` : "";
   const doctorDate = f.doctorCheckedAt !== undefined ? `, checked ${f.doctorCheckedAt}` : "";
   const doctor = f.doctorKind !== undefined ? ` · doctor check failed (${f.doctorKind}${doctorDate})` : "";
-  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}${doctor}`;
+  return `Source: ${url}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}${doctor}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit

@@ -1281,6 +1281,46 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
     expect(line).toBe("Source: not a valid url at all · fetched t · fresh · curated");
   });
 
+  /** code-reviewer, PAR-811 round 2, SF2: on a URL that DOES parse, `stripStampQuery`'s
+   *  `new URL().href` round trip re-serializes it — lower-cased host, a dropped default port,
+   *  resolved `.`/`..` segments, an added trailing slash on a bare origin, punycode on a
+   *  non-ASCII host — as a side effect of stripping the query/fragment/userinfo, not a
+   *  deliberate normalization feature. Pinned here so a future change to this function cannot
+   *  silently alter these without a test noticing. The parse-FAILURE fallback above stays
+   *  un-re-serialized (verbatim), which is what keeps the file's own "config URLs are never
+   *  re-serialized" comment load-bearing for THAT branch. */
+  it("(code-reviewer, PAR-811 round 2, SF2) a successfully-parsed url is re-serialized (lower-cased host, default port dropped, trailing slash on a bare origin) as a side effect of stripping", () => {
+    expect(sourceStampLine({ url: "https://EXAMPLE.com/Path", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/Path · fetched t · fresh · curated",
+    );
+    expect(sourceStampLine({ url: "https://example.com", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/ · fetched t · fresh · curated",
+    );
+    expect(sourceStampLine({ url: "https://example.com:443/x", fetchedAt: "t", stale: false, curated: true })).toBe(
+      "Source: https://example.com/x · fetched t · fresh · curated",
+    );
+  });
+
+  /** security-architect, PAR-811 round 2, S-1: a credential can travel in a URL as userinfo
+   *  (`https://user:pass@host/…`) as well as a query string — the OTHER half of the syntax
+   *  this fix's own doc comment claims parity with `sanitizeLoggedUrl` on. Unlike the query
+   *  string, userinfo is not gated by any upstream validator on every path a stamped URL can
+   *  arrive by (a cache hit's `finalUrl` is read back through `cache-meta.ts`'s `validMetaUrl`,
+   *  which checks only length/parseability), so this must be stripped unconditionally here,
+   *  the same as the query string, not left to depend on that gate holding. */
+  it("(security-architect, PAR-811 round 2, S-1) strips userinfo (username:password@) from the stamped url, not only the query string", () => {
+    const line = sourceStampLine({
+      url: "https://svc:s3cr3t-password@docs.internal.example.com/llms.txt?token=also-secret",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    });
+    expect(line).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("s3cr3t-password");
+    expect(line).not.toContain("svc");
+    expect(line).not.toContain("@");
+  });
+
   describe("PAR-776 (D-74) — redirectedFrom", () => {
     it("is omitted entirely when absent — byte-identical to the pre-776 line", () => {
       expect(sourceStampLine({ ...base, stale: false, curated: true })).toBe(
@@ -1323,6 +1363,42 @@ describe("sourceStampLine (A17/PAR-726): the standing facts every get_docs/searc
         "Source: https://docs.internal.example.com/llms.txt (redirected from https://old.internal.example.com/llms.txt) · fetched 2026-09-17T12:00:00.000Z · fresh · curated",
       );
       expect(line).not.toContain("super-secret");
+    });
+
+    /** code-reviewer, PAR-811 round 2, SF1: stripping the query (or fragment, or userinfo) can
+     *  make a candidate and its final URL — which genuinely differed pre-strip — collapse to
+     *  the IDENTICAL rendered string. An auth gateway validating `?token=…` then 302-ing to the
+     *  plain document is exactly this shape, and exactly the flow PAR-811 exists to protect.
+     *  Rendering "X (redirected from X)" would assert a move the line's own text refutes. */
+    it("(code-reviewer, PAR-811 round 2, SF1) omits the redirect parenthetical when stripping collapses redirectedFrom onto url — never asserts a move that (after stripping) didn't happen", () => {
+      const queryOnly = sourceStampLine({
+        ...base,
+        url: "https://docs.internal.example.com/llms.txt",
+        redirectedFrom: "https://docs.internal.example.com/llms.txt?token=super-secret",
+        stale: false,
+        curated: true,
+      });
+      expect(queryOnly).toBe("Source: https://docs.internal.example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+      expect(queryOnly).not.toContain("redirected from");
+
+      const fragmentOnly = sourceStampLine({
+        ...base,
+        url: "https://docs.internal.example.com/llms.txt",
+        redirectedFrom: "https://docs.internal.example.com/llms.txt#section",
+        stale: false,
+        curated: true,
+      });
+      expect(fragmentOnly).not.toContain("redirected from");
+
+      // A genuine host change must still render — collapsing must not become "never show it".
+      const genuineMove = sourceStampLine({
+        ...base,
+        url: "https://new.example.com/llms.txt",
+        redirectedFrom: "https://old.example.com/llms.txt?token=super-secret",
+        stale: false,
+        curated: true,
+      });
+      expect(genuineMove).toContain("(redirected from https://old.example.com/llms.txt)");
     });
   });
 });
@@ -1473,9 +1549,9 @@ describe("sourceStampLine / fitStampLine — doctorKind field (A19/PAR-728)", ()
  *  the strip from one of two independently-evolved code paths (exactly what happened once
  *  already on this branch before this fix — see the redirectedFrom tests above) would pass
  *  every field-specific test above and still leak a token through a path none of them combine. */
-describe("PAR-811 (merge invariant): no '?' or '#' from a source URL survives into any rendered stamp, at any degrade width, with any combination of optional fields", () => {
-  const hostileUrl = "https://docs.internal.example.com/a/b?token=super-secret&user=alice#frag-1";
-  const hostileRedirect = "https://old.internal.example.com/c/d?key=another-secret#frag-2";
+describe("PAR-811 (merge invariant): no '?', '#' or userinfo from a source URL survives into any rendered stamp, at any degrade width, with any combination of optional fields", () => {
+  const hostileUrl = "https://svc:s3cr3t@docs.internal.example.com/a/b?token=super-secret&user=alice#frag-1";
+  const hostileRedirect = "https://svc2:s3cr3t2@old.internal.example.com/c/d?key=another-secret#frag-2";
 
   const combos: Array<Parameters<typeof sourceStampLine>[0]> = [
     { url: hostileUrl, fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
@@ -1494,14 +1570,19 @@ describe("PAR-811 (merge invariant): no '?' or '#' from a source URL survives in
     },
   ];
 
-  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: full line carries neither '?' nor '#'", (_i, facts) => {
-    expect(sourceStampLine(facts)).not.toMatch(/[?#]/);
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: full line carries neither '?', '#' nor '@' (userinfo)", (_i, facts) => {
+    expect(sourceStampLine(facts)).not.toMatch(/[?#@]/);
   });
 
-  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: every fitStampLine degrade width — full, one-under, and down to the extreme minimum — carries neither '?' nor '#'", (_i, facts) => {
+  /** security-architect, PAR-811 round 2, S-2: a SAMPLED set of widths only proves the
+   *  invariant holds at those exact lengths — a future field added to the stamp shifts where
+   *  each degrade step's boundary falls, and a sample can silently stop covering it. This is
+   *  the ONE test meant to survive the NEXT merge the way it caught this one, so it sweeps
+   *  every width from the full line down to the extreme minimum, not a handful of samples. */
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: EVERY fitStampLine degrade width, full line down to 1, carries neither '?', '#' nor '@' (userinfo)", (_i, facts) => {
     const full = sourceStampLine(facts);
-    for (const width of [full.length, full.length - 1, 80, 60, 40, 20, 1]) {
-      expect(fitStampLine(facts, width), `width ${width}`).not.toMatch(/[?#]/);
+    for (let width = full.length; width >= 1; width--) {
+      expect(fitStampLine(facts, width), `width ${width}`).not.toMatch(/[?#@]/);
     }
   });
 });

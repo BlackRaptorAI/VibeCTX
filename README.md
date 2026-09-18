@@ -1326,16 +1326,20 @@ way to send credentials in a request header, only a user agent and a conditional
 `If-None-Match`, so the query string is the only form one can travel in at all),
 that token no longer reaches your agent's context through this log or through the
 `Source:` line every `get_docs`/`search` response carries (see [Tools](#tools)) —
-both strip the query string before rendering. **Other tool responses still print
-the URL whole**: `get_docs`'s "Candidates tried:" list, shown exactly when nothing
-could be fetched and nothing is cached — the moment a token has expired or
-rotated; `refresh`'s "refreshed from `<url>`" line; `resolve_library`'s "urls
-(probed in order)" list; and `warm_project`'s `url` column. The `--json` form of
-the CLI commands emits it whole too — `vibectx doctor --json` and
-`vibectx search --json` both serialize the resolved URL to stdout, where a
-terminal or a CI log can hold it as easily as an agent's context can. It is also
-unstripped, at default file permissions, in cache file names, `.meta.json`, the
-search index and project records. Treat a URL-borne token as visible to your
+both strip the query string and any userinfo (`user:pass@`) before rendering.
+**Other tool responses still print the URL whole**: `get_docs`'s "Candidates
+tried:" list, shown exactly when nothing could be fetched and nothing is cached —
+the moment a token has expired or rotated; `refresh`'s "refreshed from `<url>`"
+line; `resolve_library`'s "urls (probed in order)" list; and `warm_project`'s
+`url` column. The `--json` form of the CLI commands emits it whole too —
+`vibectx doctor --json` and `vibectx search --json` both serialize the resolved
+URL to stdout, where a terminal or a CI log can hold it as easily as an agent's
+context can. Setting `VIBECTX_DEBUG` prints it whole too, to stderr, on every
+fetch failure — exactly the moment (a stale or rotated token) an operator is
+most likely to turn debugging on, and many MCP clients capture server stderr to
+a persistent log file. It is also unstripped, at default file permissions, in
+cache file names, `.meta.json`, the search index and project records. Treat a
+URL-borne token as visible to your
 agent and to anyone who can read the cache directory — a VPN, a fronting proxy or an IP
 allow-list at the network level is the safer way to reach such an endpoint where
 you can use one. Closing the remaining response paths, a general redaction
