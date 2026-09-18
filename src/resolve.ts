@@ -3,19 +3,34 @@ import {
   MAX_METADATA_FETCHES,
   MAX_LLMS_CANDIDATES,
   MAX_README_CANDIDATES,
+  MAX_VERSION_TAG_VARIANTS,
+  MAX_VERSIONED_README_CANDIDATES,
+  MAX_VERSION_METADATA_FETCHES,
   MAX_FETCHES_PER_RESOLUTION,
   MAX_RESOLUTIONS_PER_HOUR,
   README_VARIANTS,
 } from "./limits.js";
 
-export { MAX_METADATA_FETCHES, MAX_LLMS_CANDIDATES, MAX_README_CANDIDATES, README_VARIANTS, MAX_URLS_PER_ENTRY, MAX_FETCHES_PER_RESOLUTION, MAX_RESOLUTIONS_PER_HOUR } from "./limits.js";
+export {
+  MAX_METADATA_FETCHES,
+  MAX_LLMS_CANDIDATES,
+  MAX_README_CANDIDATES,
+  MAX_VERSION_TAG_VARIANTS,
+  MAX_VERSIONED_README_CANDIDATES,
+  MAX_VERSION_METADATA_FETCHES,
+  README_VARIANTS,
+  MAX_URLS_PER_ENTRY,
+  MAX_FETCHES_PER_RESOLUTION,
+  MAX_RESOLUTIONS_PER_HOUR,
+} from "./limits.js";
 import { fetchUrl, getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
-import { npmNameError, normalisePyPiName, pypiNameError } from "./package-names.js";
+import { npmNameError, normalisePyPiName, pypiNameError, versionShapeError, MAX_VERSION_LENGTH } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { classifySourceKind, type SourceKind } from "./source-kind.js";
 import { recordActivity } from "./activity-log.js";
+import { clipText } from "./text.js";
 
 /**
  * resolve_library (PAR-655): any npm / PyPI package name → a docs source, with no
@@ -33,16 +48,21 @@ import { recordActivity } from "./activity-log.js";
  *      `<origin>/llms-full.txt`, `<origin>/llms.txt` on the docs URL (if any), then
  *      on the homepage; deduplicated; at most MAX_LLMS_CANDIDATES.
  *   4. GitHub README: `raw.githubusercontent.com/<o>/<r>/HEAD/<README variant>` — HEAD is
- *      the default branch, so no main/master guess; see README_VARIANTS.
+ *      the default branch, so no main/master guess; see README_VARIANTS. With a pinned
+ *      version (A11/PAR-724), `refs/tags/v<version>/<variant>` and `refs/tags/<version>/
+ *      <variant>` are tried FIRST, ahead of step 3, for the preferred ecosystem only.
  *   5. nothing usable → one plain line saying what was tried and how to pin it in config.
  *
- * Fetch bound per name (src/limits.ts): MAX_METADATA_FETCHES (2) + the preferred
- * ecosystem's candidates (≤ 8 llms + 4 README = 12) + — only if none of those served —
- * the other found ecosystem's (≤ 12): MAX_FETCHES_PER_RESOLUTION = 26 (R2). In
- * practice the second list is 4 (an ecosystem held back as README-only has no llms
- * candidates), so the reachable maximum is 18. Candidates are probed by getLibraryDoc,
- * which stops at the first usable document and caches it under the entry name, so
- * get_docs serves it immediately afterwards. A process may start at most
+ * Fetch bound per name (src/limits.ts): MAX_METADATA_FETCHES (2) + one version metadata
+ * fetch when a version is pinned (MAX_VERSION_METADATA_FETCHES, 1) + the preferred
+ * ecosystem's candidates (≤ 8 versioned README + 8 llms + 4 README = 20 with a version, 12
+ * without) + — only if none of those served — the other found ecosystem's (≤ 4, README-only
+ * by construction: only the docs-site ecosystem is ever `order[0]`, so a second ecosystem in
+ * `order` never has llms candidates): MAX_FETCHES_PER_RESOLUTION = 43 with a version, 26
+ * without (R2). The version-tag candidates are never offered to a fallback ecosystem, so the
+ * reachable maximum is 27 with a version pinned, 18 without. Candidates are probed by
+ * getLibraryDoc, which stops at the first usable document and caches it under the entry
+ * name, so get_docs serves it immediately afterwards. A process may start at most
  * MAX_RESOLUTIONS_PER_HOUR resolutions (L2).
  *
  * Everything a registry returns is attacker-influenced (anyone can publish a package):
@@ -102,6 +122,35 @@ export interface ResolveOutcome {
   /** True when the per-hour resolution cap refused this name before any fetch (L2) — so a
    *  caller running many names (`warm`) can tell "try later" from "not resolvable". */
   limited?: true;
+  /** A16/PAR-725 — true when every ecosystem this call actually queried (not one skipped for
+   *  an invalid name or an `ecosystem` restriction) answered its metadata lookup with a genuine
+   *  HTTP 404: the name does not exist in npm or PyPI, distinct from "exists, but nothing
+   *  usable was found" (see `couldNotResolveMessage`'s two distinct wordings). Undefined —
+   *  never `false` — whenever existence could not be established either way (a network error,
+   *  a name-validation skip, or a real document was found), so a caller reads "undefined" as
+   *  "no claim", not as "confirmed to exist". */
+  notFound?: true;
+  /** A11/PAR-724 — the version `resolvePackage` was asked to match, when one was given, whether
+   *  or not it was actually matched (see `versionMatched`). Absent when no version was
+   *  requested. */
+  requestedVersion?: string;
+  /** A11/PAR-724 — true when `chosen` is a version-SPECIFIC document (a GitHub tag README
+   *  probed at `requestedVersion`), never merely because a version was requested. Undefined —
+   *  including when `requestedVersion` is set — means the chain fell back to the unversioned
+   *  candidates; the caller states that fallback explicitly (see `retrieval.ts`'s
+   *  `versionFallbackNote`) rather than leaving the substitution silent (D-50). */
+  versionMatched?: true;
+  /** A11/PAR-724 (code-reviewer round 1, B1) — set ONLY when it differs from `entry`: the
+   *  entry a caller should INSTALL into the live registry and is what actually got persisted
+   *  to `resolved.json` — with any version-pinned candidates stripped back out, so a later
+   *  UNVERSIONED lookup of this name never silently resolves to the version-pinned document
+   *  `entry` above was built to serve THIS call. `entry` itself keeps the full (version +
+   *  unversioned) candidate list — it is what a caller uses to actually render THIS response,
+   *  via `getLibraryDoc`'s cache-first lookup finding the just-written version-tag document —
+   *  so `entry` must not be replaced by `persistedEntry` for that purpose. Undefined whenever
+   *  no version was involved (`entry` is already what should be installed). See callers in
+   *  `get-docs.ts`/`warm.ts`: `installResolvedEntry(registry, out.persistedEntry ?? out.entry)`. */
+  persistedEntry?: LibraryEntry;
   /** PAR-744 (F-7) — true when `chosen`'s content is NOT new: either a 304 revalidation
    *  (`doc.notModified`) or a stale-cache fallback because the network was unreachable
    *  (`doc.staleNote`). `refresh.ts`'s resolved-entry branch uses this to decide whether a
@@ -128,6 +177,12 @@ export interface ResolveOutcome {
 const LABEL: Record<Ecosystem, string> = { npm: "npm", pypi: "PyPI" };
 const GITHUB_HOSTS = new Set(["github.com", "www.github.com"]);
 const REPO_SEGMENT = /^[A-Za-z0-9_.-]+$/;
+
+// A11/PAR-724 (security-architect finding S-1/S-2) — `versionShapeError`/`MAX_VERSION_LENGTH`
+// are imported from `./package-names.js`, the one place a version/ref shape is defined (D-48: a
+// shared fact belongs in exactly one place, never a local variant per module, and the reporter
+// is the gate — round 2's N-1 finding — not a second string a caller could drift from). See
+// that module's own comment for the full rationale.
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -236,8 +291,50 @@ export function parsePyPiMetadata(json: unknown, metadataUrl: string): PackageMe
   return meta;
 }
 
+/** A11/PAR-724 — `v<version>` and bare `<version>`, the two GitHub tag-name spellings this
+ *  chain tries; see `MAX_VERSION_TAG_VARIANTS`'s own comment for why only these two. */
+export function versionTagVariants(version: string): string[] {
+  return [`v${version}`, version];
+}
+
+/** A11/PAR-724 — README variants at `refs/tags/<tag>` for each tag spelling, in probe order
+ *  (tag first, then filename — so `v<version>/README.md` is tried before `<version>/README.md`),
+ *  capped at MAX_VERSIONED_README_CANDIDATES. `refs/tags/<tag>` rather than the bare tag name as
+ *  the ref segment (the form `synthesizeCandidates` already uses for `HEAD`): unlike `HEAD`, a
+ *  tag name can collide with a branch of the same name, and the explicit `refs/tags/` form is
+ *  the one that disambiguates on raw.githubusercontent.com. */
+export function versionReadmeCandidates(repo: GitHubRepo, version: string): string[] {
+  const urls: string[] = [];
+  // security-architect, A11/PAR-724 round 1, S-2 — `resolvePackage` only ever calls this with a
+  // VERSION_SHAPE-validated version (no `/`, `\`, `..` segment or control character can occur),
+  // which is what actually makes a path escape out of `raw.githubusercontent.com/<owner>/<repo>/`
+  // structurally impossible. This function is exported and could be called directly by future
+  // code with an unvalidated string, so it re-proves the same property itself rather than
+  // trusting every caller to remember the precondition: each built URL is round-tripped through
+  // `new URL()` and kept only if it still starts with the intended prefix — the same
+  // "validated AND re-serialized" discipline `sanitizeRemoteUrl` already applies elsewhere.
+  const prefix = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/refs/tags/`;
+  for (const tag of versionTagVariants(version)) {
+    for (const f of README_VARIANTS) {
+      const candidate = `${prefix}${tag}/${f}`;
+      let normalised: string;
+      try {
+        normalised = new URL(candidate).href;
+      } catch {
+        continue;
+      }
+      if (normalised.startsWith(prefix)) urls.push(candidate);
+    }
+  }
+  return urls.slice(0, MAX_VERSIONED_README_CANDIDATES);
+}
+
 /** Candidate URLs in probe order: llms-full.txt / llms.txt under the docs URL's path and
- *  origin, then the homepage's; then the GitHub README variants at `HEAD`. */
+ *  origin, then the homepage's; then the GitHub README variants at `HEAD`. Never includes
+ *  version-specific candidates — those are a separate, higher-priority list the caller
+ *  (`resolvePackage`) prepends itself (via `versionReadmeCandidates`) only for the ecosystem it
+ *  actually looked up a version for; this function stays the same unversioned chain every
+ *  caller, versioned or not, still falls back to. */
 export function synthesizeCandidates(meta: PackageMetadata): string[] {
   const llms: string[] = [];
   const push = (u: string) => {
@@ -279,18 +376,50 @@ function describeMeta(meta: PackageMetadata): string {
   return parts.join(", ");
 }
 
-/** The one-line failure text: what was tried, then how to pin the library by hand. */
-export function couldNotResolveMessage(name: string, attempts: string[]): string {
+/** A16/PAR-725 — the two distinct existence wordings, and the generic (existence-not-
+ *  established) one, all sharing the same `Could not resolve "<name>": ` lead and pin-it-by-hand
+ *  tail so `runResolveCli`'s `text.startsWith("Could not resolve")` exit-code check keeps working
+ *  under every variant. `"not-found"`: every ecosystem this call actually queried answered with
+ *  a genuine 404 — the SAFETY signal (a name an LLM could have invented, distinct from a real
+ *  package with no reachable docs). `"exists"`: at least one ecosystem's metadata was found, so
+ *  the name is real, but no document was reachable — the ordinary documentation-miss case.
+ *  Undefined: existence was never established either way (bad network, invalid name, rate
+ *  limit) — no claim is made, per the same discipline `ResolveOutcome.notFound` documents.
+ *  Claim discipline (PAR-725 Shape): the ONLY existence claim made anywhere is "this name does
+ *  not exist in npm or PyPI" — never phrased as preventing hallucination in general. */
+export function couldNotResolveMessage(
+  name: string,
+  attempts: string[],
+  opts: { existence?: "not-found" | "exists"; notFoundEcosystems?: Ecosystem[] } = {},
+): string {
+  // A16/PAR-725 — "not-found" is scoped to whichever registry (or registries) actually
+  // confirmed the absence: "npm or PyPI" for an unrestricted call that checked both, or just
+  // "npm" / "PyPI" for a caller that deliberately restricted the lookup to one (`warm.ts`
+  // always does, per the manifest's own ecosystem) — narrower, not broader, so it is never an
+  // overclaim. Falls back to the general "npm or PyPI" phrasing if this is ever called with
+  // `existence: "not-found"` and no ecosystem list (defensive; every real call site supplies one).
+  const registries = opts.notFoundEcosystems?.length ? opts.notFoundEcosystems.map((e) => LABEL[e]).join(" or ") : "npm or PyPI";
+  const existence =
+    opts.existence === "not-found"
+      ? `"${name}" does not exist in ${registries}. `
+      : opts.existence === "exists"
+        ? `"${name}" exists but publishes no documentation VibeCTX can reach — this is not a sign the package doesn't exist. `
+        : "";
   return (
-    `Could not resolve "${name}": ${attempts.join("; ")}. ` +
+    `Could not resolve "${name}": ${existence}${attempts.join("; ")}. ` +
     `Add it to vibectx.config.json like: { "name": "${name}", "urls": ["https://..."] }`
   );
 }
 
-async function fetchMetadata(url: string): Promise<{ json?: unknown; why?: string }> {
+async function fetchMetadata(url: string): Promise<{ json?: unknown; why?: string; notFound?: true }> {
   const out = await fetchUrl(url, { maxBytes: METADATA_MAX_BYTES, publicFinalUrl: true });
   if (out.status === "too-large") return { why: `larger than ${METADATA_MAX_BYTES / (1024 * 1024)} MiB` };
-  if (out.status !== "ok" || out.body === undefined) return { why: "404 or unreachable" };
+  // A16/PAR-725 — `httpStatus` (fetcher.ts) is set only for a real, received 404/etc response
+  // (the "http-status" miss reason); every other miss (redirect loop, DNS failure, a timeout)
+  // leaves it undefined, so this is the one branch that can honestly say "the registry said no
+  // such package" rather than "something went wrong asking".
+  if (out.status === "miss" && out.httpStatus === 404) return { why: "404 (not found)", notFound: true };
+  if (out.status !== "ok" || out.body === undefined) return { why: "unreachable" };
   try {
     return { json: JSON.parse(out.body) };
   } catch {
@@ -298,11 +427,18 @@ async function fetchMetadata(url: string): Promise<{ json?: unknown; why?: strin
   }
 }
 
-function metadataUrlFor(eco: Ecosystem, name: string): string {
+/** A11/PAR-724 — `version` selects the exact-version metadata document instead of `/latest`:
+ *  npm's `registry.npmjs.org/<name>/<version>` and PyPI's `pypi.org/pypi/<name>/<version>/json`
+ *  are both real, documented per-version endpoints (the same shape the unversioned lookup
+ *  already uses, with the version in place of `latest`). */
+function metadataUrlFor(eco: Ecosystem, name: string, version?: string): string {
   // npm's conventional scoped form keeps the leading "@" and encodes the "/" (`@scope%2Fname`).
-  return eco === "npm"
-    ? `https://registry.npmjs.org/${encodeURIComponent(name).replace(/^%40/, "@")}/latest`
-    : `https://pypi.org/pypi/${encodeURIComponent(normalisePyPiName(name))}/json`;
+  if (eco === "npm") {
+    const base = `https://registry.npmjs.org/${encodeURIComponent(name).replace(/^%40/, "@")}`;
+    return `${base}/${encodeURIComponent(version ?? "latest")}`;
+  }
+  const base = `https://pypi.org/pypi/${encodeURIComponent(normalisePyPiName(name))}`;
+  return version ? `${base}/${encodeURIComponent(version)}/json` : `${base}/json`;
 }
 
 /** Resolutions started in the current sliding hour (L2); process-wide. */
@@ -332,9 +468,23 @@ function formatResolved(out: ResolveOutcome): string {
   const saved = out.saved === false
     ? `  NOT saved: ${out.saveNote ?? "resolved.json could not be written"} — this resolution lives in memory until restart; get_docs("${out.entry?.name}") works now.`
     : `  saved to ${resolvedStorePath()} — get_docs("${out.entry?.name}") works now; pin or override it in vibectx.config.json.`;
+  // A11/PAR-724 — non-silent per D-50: whenever a version was requested, say plainly whether
+  // it was matched or the resolution fell back to the latest available document. Not reachable
+  // from any current production caller (code-reviewer round 2, should-fix #6): neither
+  // `resolve_library` (`resolveToolText`) nor `vibectx resolve` accepts a `version` argument
+  // today (a deliberate A11 scope decision — see the PR record — not an oversight), and the
+  // two `resolvePackage` callers that DO pass one (`get-docs.ts`, `warm.ts`) never render
+  // `out.text` on a success path. Kept, not removed: `resolvePackage`'s own contract is
+  // version-aware regardless of which caller exercises it, `formatResolved` is its one
+  // rendering of that contract, and this line is real, tested behaviour for any direct caller
+  // (including a future `resolve_library`/`--version` addition) — not a placeholder.
+  const version = out.requestedVersion
+    ? [`  version:    ${out.requestedVersion} (${out.versionMatched ? "matched" : "no versioned document found; showing latest"})`]
+    : [];
   return [
     `Resolved "${out.name}" via ${LABEL[out.source!]} — ${out.metadataUrl}`,
     ...(out.entry?.description ? [`  description: (package-supplied) ${out.entry.description}`] : []),
+    ...version,
     `  homepage:   ${out.homepage ?? "—"}`,
     `  docs:       ${out.docsUrl ?? "—"}`,
     `  repository: ${repo}`,
@@ -380,12 +530,47 @@ function hasDocsSite(meta: PackageMetadata): boolean {
  */
 export async function resolvePackage(
   rawName: string,
-  opts: { ecosystem?: Ecosystem; now?: () => Date; warn?: (message: string) => void } = {},
+  opts: { ecosystem?: Ecosystem; version?: string; now?: () => Date; warn?: (message: string) => void } = {},
 ): Promise<ResolveOutcome> {
   const name = rawName.trim();
   const folded = name.toLowerCase(); // the registry's fold()
   const attempts: string[] = [];
-  const fail = (): ResolveOutcome => ({ name, ok: false, candidates: [], attempts, text: couldNotResolveMessage(name, attempts) });
+  // A16/PAR-725 — ecosystems this call actually queried (not skipped for an invalid name or an
+  // `ecosystem` restriction), and which of those came back a genuine 404. Declared here, ahead
+  // of `fail`, so `fail`'s own closure sees the values phase 1 fills in — both start empty for
+  // the two early-return cases below, where nothing has been queried yet.
+  const triedEcosystems: Ecosystem[] = [];
+  const notFoundIn: Ecosystem[] = [];
+  // A11/PAR-724 (security-architect S-1/S-2) — `opts.version`, verbatim, is untrusted: it is
+  // either an MCP tool argument (any string an agent can supply) or captured from a committed
+  // manifest file (`project-deps.ts`'s version parsers, threaded through by `warm.ts` — a path
+  // that never passes through the MCP schema at all, so a schema-level bound alone would not
+  // cover it). `version` below is the ONE value the rest of this function is allowed to build a
+  // URL from or fetch with; `safeRequestedVersion` is the ONE value it is allowed to render —
+  // both are computed here, once, rather than trusting every downstream site to remember to
+  // gate or clip `opts.version` itself.
+  const versionError = opts.version !== undefined ? versionShapeError(opts.version) : undefined;
+  const version = versionError === undefined ? opts.version : undefined;
+  const safeRequestedVersion = opts.version !== undefined ? clipText(opts.version, MAX_VERSION_LENGTH) : undefined;
+  if (versionError !== undefined) {
+    attempts.push(`version "${safeRequestedVersion}" is ${versionError}; ignored`);
+  }
+  // A16/PAR-725 — `existence` names which of the two distinct wordings applies; undefined makes
+  // no claim either way (see `couldNotResolveMessage`'s own comment for the three cases). When
+  // "not-found", `notFoundIn` (by then populated) says WHICH registry/registries confirmed the
+  // absence — `opts.ecosystem` narrows the claim to just that one, an equally honest, narrower
+  // reading of the same signal ("does not exist in npm" is still true and useful when the
+  // caller deliberately asked only about npm — see `warm.ts`, which always restricts by the
+  // manifest's own ecosystem and could never reach the two-registry claim otherwise).
+  const fail = (existence?: "not-found" | "exists"): ResolveOutcome => ({
+    name,
+    ok: false,
+    candidates: [],
+    attempts,
+    notFound: existence === "not-found" ? true : undefined,
+    requestedVersion: safeRequestedVersion,
+    text: couldNotResolveMessage(name, attempts, { existence, notFoundEcosystems: notFoundIn }),
+  });
   const now = opts.now ?? (() => new Date());
 
   const nameErrors: Record<Ecosystem, string | undefined> = { npm: npmNameError(folded), pypi: pypiNameError(name) };
@@ -412,15 +597,22 @@ export async function resolvePackage(
       continue;
     }
     if (fetched >= MAX_METADATA_FETCHES) break;
+    triedEcosystems.push(eco);
     const metadataUrl = metadataUrlFor(eco, eco === "npm" ? folded : name);
     fetched += 1;
-    const { json, why } = await fetchMetadata(metadataUrl);
+    const { json, why, notFound } = await fetchMetadata(metadataUrl);
     if (json === undefined) {
       attempts.push(`${label}: no metadata (${why})`);
+      if (notFound) notFoundIn.push(eco);
       continue;
     }
     const meta = eco === "npm" ? parseNpmMetadata(json, metadataUrl) : parsePyPiMetadata(json, metadataUrl);
     if (eco === "npm" && isNpmPlaceholder(meta)) {
+      // A16/PAR-725 (code-reviewer round 1, should-fix #1) — deliberately NOT pushed to
+      // `notFoundIn`: a security-holder placeholder is a real, registered npm record (a 200
+      // with real metadata), not a genuine 404 — the "does not exist in npm or PyPI" claim is
+      // reserved for exactly that case (see `couldNotResolveMessage`'s own comment). Counting
+      // this as absence would be the narrow overclaim this repo's claim discipline forbids.
       attempts.push("npm: name is held by npm's security-holder placeholder (no package)");
       continue;
     }
@@ -434,17 +626,73 @@ export async function resolvePackage(
   }
   // Docs-site ecosystem first, then the rest in registry order (R2: a dead end falls through).
   const order = [...found.filter((f) => hasDocsSite(f.meta)), ...found.filter((f) => !hasDocsSite(f.meta))];
-  if (order.length === 0) return fail();
+  // A16/PAR-725 (code-reviewer round 1, nit) — the claim is specifically "does not exist in
+  // npm OR PyPI", so it is only honest when BOTH were actually queried and BOTH came back a
+  // genuine 404 (npm alone 404ing proves nothing about PyPI, and vice versa) — UNLESS the
+  // caller explicitly restricted the lookup to one ecosystem (`opts.ecosystem`), which already
+  // narrows the question to just that registry, so its own 404 answers it in full. See `fail`'s
+  // own comment above for the full rationale.
+  const doesNotExist =
+    triedEcosystems.length > 0 &&
+    triedEcosystems.every((eco) => notFoundIn.includes(eco)) &&
+    (opts.ecosystem !== undefined || triedEcosystems.length === 2);
+  if (order.length === 0) return fail(doesNotExist ? "not-found" : undefined);
+
+  // A11/PAR-724 — Phase 1.5: when a SHAPE-VALID version is pinned, one extra metadata fetch
+  // (MAX_VERSION_METADATA_FETCHES) at the exact version, for the chosen ecosystem only
+  // (order[0]) — confirms the version is registered and may reveal a repository that differs
+  // from `/latest`'s (a package that moved forges between releases, say). Never blocks
+  // resolution either way: the unversioned fallback chain below still runs regardless of what
+  // this fetch finds. Reads `version` (the shape-gated local), never `opts.version` directly —
+  // see the top of this function for why.
+  let versionRepo: GitHubRepo | undefined;
+  if (version !== undefined) {
+    const { eco, meta } = order[0];
+    const label = LABEL[eco];
+    const versionUrl = metadataUrlFor(eco, eco === "npm" ? folded : name, version);
+    fetched += MAX_VERSION_METADATA_FETCHES;
+    const { json, why } = await fetchMetadata(versionUrl);
+    if (json !== undefined) {
+      const vMeta = eco === "npm" ? parseNpmMetadata(json, versionUrl) : parsePyPiMetadata(json, versionUrl);
+      versionRepo = vMeta.repository ?? meta.repository;
+      attempts.push(`${label}: version ${clipText(version, MAX_VERSION_LENGTH)} metadata found`);
+    } else {
+      versionRepo = meta.repository; // still try the version-tag README against the latest repo
+      attempts.push(`${label}: version ${clipText(version, MAX_VERSION_LENGTH)} not found in registry metadata (${why})`);
+    }
+  }
 
   // Phase 2: probe each found ecosystem's candidates in order; the first usable document wins.
   let budget = MAX_FETCHES_PER_RESOLUTION - fetched;
-  for (const { eco, meta, candidates } of order) {
-    const urls = candidates.slice(0, Math.max(0, budget)); // the hard ceiling; structurally never binding
+  for (let orderIndex = 0; orderIndex < order.length; orderIndex++) {
+    const { eco, meta, candidates } = order[orderIndex];
+    // A11/PAR-724 — version-specific candidates only for the ecosystem the version metadata
+    // fetch above actually ran against (order[0]); an ecosystem tried later in this loop only
+    // as R2's dead-end fallback gets the unversioned chain, same as an unversioned call always did.
+    // `version`, not `opts.version`: a shape-invalid version never reaches URL construction.
+    const versionCandidates = orderIndex === 0 && version !== undefined && versionRepo ? versionReadmeCandidates(versionRepo, version) : [];
+    const versionUrlSet = new Set(versionCandidates);
+    const urls = [...versionCandidates, ...candidates].slice(0, Math.max(0, budget)); // the hard ceiling
     budget -= urls.length;
     if (urls.length === 0) break;
     // PyPI names are keyed by their PEP 503 form (L3): typing_extensions and Typing-Extensions are one record.
     const entryName = eco === "pypi" ? normalisePyPiName(name) : folded;
     const entry = buildEntry(entryName, meta, urls, now());
+    // A11/PAR-724 (code-reviewer round 1, B1) — `persistedEntry` is what gets SAVED to
+    // resolved.json and what a caller should INSTALL into the live registry; `entry` above (used
+    // for THIS call's fetch, and returned as `out.entry`) keeps the full candidate list so this
+    // call's own document — already cached under the version-tag URL by the `getLibraryDoc`
+    // call below — is actually reachable. Without this split, a version-pinned resolution would
+    // replace the library's live registry entry AND `resolved.json` with the version-tag URL
+    // first in `urls` — so a later, plain `get_docs("<lib>")` (no version) would resolve through
+    // `lookupLibrary` straight to that entry and silently serve the pinned document, with no
+    // `version` field in the stamp (nothing upstream of `getLibraryDoc` re-derives a match on an
+    // unversioned call). That is exactly the silent substitution D-50 forbids, just in the other
+    // direction — "you asked for latest, got a pin" instead of "you asked for a pin, got
+    // latest". The version-matched document THIS call serves stays reachable (cached under its
+    // own URL, and re-resolvable by name on a future versioned call) without becoming what an
+    // unversioned call resolves to afterward.
+    const persistedEntry = versionCandidates.length > 0 ? { ...entry, urls: candidates } : entry;
     // A5 (PAR-718): this function's contract is "never throws for bad input or bad network"
     // (see the docstring above) — but `getLibraryDoc` also WRITES the document to the cache
     // (`cache.ts`'s `writeCache`), and that write throws on EACCES/ENOSPC/EROFS (a read-only
@@ -502,20 +750,20 @@ export async function resolvePackage(
     // "not saved" outcome BY DESIGN rather than surfacing as a distinct crash — the same
     // trade-off this item makes everywhere else, made explicit rather than left implicit.
     try {
-      saved = saveResolvedEntry(entry, (m) => {
+      saved = saveResolvedEntry(persistedEntry, (m) => {
         saveNote = m.replace(/^vibectx: not saving "[^"]*" — /, "").trim();
         (opts.warn ?? ((x: string) => process.stderr.write(x)))(m);
       });
     } catch (e) {
       saved = false;
       saveNote = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, " ").trim();
-      (opts.warn ?? ((x: string) => process.stderr.write(x)))(`vibectx: resolution not saved for "${entry.name}": ${saveNote}\n`);
+      (opts.warn ?? ((x: string) => process.stderr.write(x)))(`vibectx: resolution not saved for "${persistedEntry.name}": ${saveNote}\n`);
     }
     // …and the index is written only once the RECORD is, in that order. Indexing first filed a
     // posting list under a library name that a refused save leaves no trace of anywhere else —
     // an orphan no later process could ever use, spending the index's size budget (D-40) that a
     // library the registry does know might then be shed to make room in.
-    if (saved) indexCachedDocument(entry.name, doc.url, doc.content, undefined, opts.warn);
+    if (saved) indexCachedDocument(persistedEntry.name, doc.url, doc.content, undefined, opts.warn);
     const out: ResolveOutcome = {
       name,
       ok: true,
@@ -529,18 +777,27 @@ export async function resolvePackage(
       kind: classifySourceKind(doc.url, doc.content),
       chars: doc.content.length,
       contentHash: documentHash(doc.content),
+      // `entry` (full candidate list) is what serves THIS call; `persistedEntry` (set only when
+      // it differs) is what a caller should install/persist instead — see that variable's own
+      // comment above and `ResolveOutcome.persistedEntry`'s doc comment for the full rationale.
       entry,
+      persistedEntry: persistedEntry === entry ? undefined : persistedEntry,
       saved,
       saveNote,
       attempts,
+      requestedVersion: safeRequestedVersion,
       text: "",
     };
     if (isDocUnchanged(doc)) out.unchanged = true;
     if (doc.staleNote !== undefined) out.stale = true;
+    if (versionUrlSet.has(doc.url)) out.versionMatched = true;
     out.text = formatResolved(out);
     return out;
   }
-  return fail();
+  // A16/PAR-725 — every ecosystem in `order` was reached because its metadata fetch succeeded
+  // (the `order.length === 0` case above already returned), so the name is confirmed to exist —
+  // this is the ordinary "no reachable document" case, not "does not exist".
+  return fail("exists");
 }
 
 /** The lookup the tools use before resolving. `resolveLibrary` already tries the PEP 503
@@ -576,7 +833,7 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
     ].join("\n");
   }
   const out = await resolvePackage(name, { ecosystem });
-  if (out.ok && out.entry) installResolvedEntry(registry, out.entry); // refuses a curated key (S2); replaces a resolved one
+  if (out.ok && out.entry) installResolvedEntry(registry, out.persistedEntry ?? out.entry); // refuses a curated key (S2); replaces a resolved one
   recordActivity({
     tool: "resolve_library",
     library: out.entry?.name ?? name,

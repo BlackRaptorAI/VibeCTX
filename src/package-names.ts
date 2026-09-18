@@ -42,3 +42,27 @@ export function packageNameError(name: string): string | undefined {
   if (npmNameError(name) === undefined || pypiNameError(name) === undefined) return undefined;
   return `"${name}" is not a valid npm or PyPI package name`;
 }
+
+/** Longest `version` any caller trusts — matches VERSION_SHAPE's own cap. */
+export const MAX_VERSION_LENGTH = 128;
+
+/** A11/PAR-724 (security-architect finding S-1/S-2) — the ONE shape a version/ref is trusted
+ *  in, shared by every module that either builds a URL from one (`resolve.ts`'s
+ *  `versionReadmeCandidates`/`metadataUrlFor`) or captures one out of an untrusted file
+ *  (`project-deps.ts`'s manifest version parsers): alphanumeric first, then letters, digits,
+ *  `.`, `+`, `_` or `-`, up to MAX_VERSION_LENGTH. No `/`, `\`, control character or whitespace
+ *  can ever appear in a shape-valid version — the property that makes both a forged response
+ *  line (needs a newline) and a path escape out of a GitHub `refs/tags/<tag>/` URL (needs a
+ *  `/` or a bare `..` segment) structurally impossible, not merely encoded or cleaned away
+ *  after the fact. One definition (D-48's lesson: a shared fact belongs in exactly one place,
+ *  every caller uses it, never a local variant) rather than one regex per module that happens
+ *  to agree today. */
+export const VERSION_SHAPE = /^[A-Za-z0-9][A-Za-z0-9.+_-]{0,127}$/;
+
+/** Why `version` is not a trusted version/ref shape, or undefined when it is. */
+export function versionShapeError(version: string): string | undefined {
+  if (!VERSION_SHAPE.test(version)) {
+    return `not a valid version/ref (letters, digits, "." "+" "_" "-" only, up to ${MAX_VERSION_LENGTH} characters)`;
+  }
+  return undefined;
+}

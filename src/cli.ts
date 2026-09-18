@@ -229,6 +229,17 @@ function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** PAR-780: `--help`/`-h` anywhere in a command's own arguments short-circuits parsing — the
+ *  same "help always wins" convention git/npm follow — so it wins over a missing flag value or
+ *  an unknown option rather than being rejected as one. Position-blind (checked before any
+ *  option-with-value pairing is resolved), so a value slot that happens to hold the literal
+ *  text "-h" (e.g. `--config -h`) also triggers help rather than being read as that value —
+ *  harmless in practice (nothing is ever really named "-h") but worth knowing when reading
+ *  the callers below. */
+function isHelpFlag(args: string[]): boolean {
+  return args.includes("--help") || args.includes("-h");
+}
+
 /**
  * Every subcommand resolves its config the same way the stdio server does (PAR-657 D-14):
  * `--config` when given, else `VIBECTX_CONFIG`, else the project file found by walking up to
@@ -256,6 +267,10 @@ function configError(e: unknown): string {
 /** Run `vibectx doctor <args>`; returns the process exit code:
  *  0 all healthy · 1 something unhealthy · 2 usage / config / unknown-library error. */
 export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
+  if (isHelpFlag(args)) {
+    io.stdout(`${DOCTOR_USAGE}\n`);
+    return 0;
+  }
   let parsed: DoctorCliArgs;
   try {
     parsed = parseDoctorArgs(args);
@@ -272,7 +287,7 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
   }
   let report;
   try {
-    report = await runDoctor(registry, { library: parsed.library, offline: parsed.offline });
+    report = await runDoctor(registry, { library: parsed.library, offline: parsed.offline, warn: io.stderr });
   } catch (e) {
     io.stderr(`${message(e)}\n`);
     return 2;
@@ -284,6 +299,10 @@ export async function runDoctorCli(args: string[], io: CliIo): Promise<number> {
 /** Run `vibectx resolve <package>`; prints the same report the MCP tool returns.
  *  Exit 0 resolved (or already in the registry) · 1 could not resolve · 2 usage / config error. */
 export async function runResolveCli(args: string[], io: CliIo): Promise<number> {
+  if (isHelpFlag(args)) {
+    io.stdout(`${RESOLVE_USAGE}\n`);
+    return 0;
+  }
   let parsed: ResolveCliArgs;
   try {
     parsed = parseResolveArgs(args);
@@ -318,6 +337,10 @@ export async function runResolveCli(args: string[], io: CliIo): Promise<number> 
 /** Run `vibectx warm [dir]`; prints the table (or `--json`) on stdout.
  *  Exit 0 every attempted dependency cached · 1 something not cached · 2 usage / config / no-manifest error. */
 export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
+  if (isHelpFlag(args)) {
+    io.stdout(`${WARM_USAGE}\n`);
+    return 0;
+  }
   let parsed: WarmCliArgs;
   try {
     parsed = parseWarmArgs(args);
@@ -349,6 +372,10 @@ export async function runWarmCli(args: string[], io: CliIo): Promise<number> {
  * Never touches the network (D-35), so there is no offline flag: it is always offline.
  */
 export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
+  if (isHelpFlag(args)) {
+    io.stdout(`${SEARCH_USAGE}\n`);
+    return 0;
+  }
   let parsed: SearchCliArgs;
   try {
     parsed = parseSearchArgs(args);
@@ -395,6 +422,10 @@ export async function runSearchCli(args: string[], io: CliIo): Promise<number> {
  *  no `--config`: the log names no entries to resolve, it reads back what other commands
  *  already resolved (A20/PAR-729). */
 export async function runLogCli(args: string[], io: CliIo): Promise<number> {
+  if (isHelpFlag(args)) {
+    io.stdout(`${LOG_USAGE}\n`);
+    return 0;
+  }
   let parsed: LogCliArgs;
   try {
     parsed = parseLogArgs(args);
@@ -407,7 +438,30 @@ export async function runLogCli(args: string[], io: CliIo): Promise<number> {
   return 0;
 }
 
-const SUBCOMMANDS = new Set(["doctor", "resolve", "warm", "search", "log"]);
+/** One line per command for the top-level `--help`/`-h` listing (PAR-780) — the single source
+ *  both `GLOBAL_USAGE` and `SUBCOMMANDS` build from, so a command can't be added to one and
+ *  forgotten in the other. Order and wording matches the README's "Command line" section. */
+const COMMANDS: readonly { name: string; summary: string }[] = [
+  { name: "doctor", summary: "prove retrieval works per library" },
+  { name: "resolve", summary: "turn a package name into a docs source" },
+  { name: "warm", summary: "cache a project's dependency docs" },
+  { name: "search", summary: "search every cached library at once" },
+  { name: "log", summary: "show recorded tool activity" },
+];
+
+const SUBCOMMANDS = new Set(COMMANDS.map((c) => c.name));
+
+const MAX_COMMAND_NAME_LEN = Math.max(...COMMANDS.map((c) => c.name.length));
+
+export const GLOBAL_USAGE = [
+  "usage: vibectx <command> [options]",
+  "",
+  "Commands:",
+  ...COMMANDS.map(({ name, summary }) => `  ${name.padEnd(MAX_COMMAND_NAME_LEN)}  ${summary}`),
+  "",
+  "Run 'vibectx <command> --help' for that command's usage.",
+  "Run with no command to start the MCP stdio server.",
+].join("\n");
 
 /** Options whose VALUE must be skipped when looking for the subcommand token, so a library,
  *  package, directory or config path named "doctor" / "resolve" / "warm" / "search" / "log"
@@ -435,7 +489,15 @@ function findSubcommand(argv: string[]): number {
  *  leading); without one anywhere, argv is left to the server path. */
 export async function dispatchCli(argv: string[], io: CliIo): Promise<number | undefined> {
   const at = findSubcommand(argv);
-  if (at === -1) return undefined;
+  if (at === -1) {
+    // PAR-780: `vibectx --help` / `vibectx -h` with no command — a command's own --help is
+    // handled inside its runXCli, once findSubcommand has located it below.
+    if (isHelpFlag(argv.slice(2))) {
+      io.stdout(`${GLOBAL_USAGE}\n`);
+      return 0;
+    }
+    return undefined;
+  }
   const rest = [...argv.slice(2, at), ...argv.slice(at + 1)];
   switch (argv[at]) {
     case "doctor":

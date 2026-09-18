@@ -20,6 +20,7 @@ import {
   fitStampLine,
   noMatchNote,
   thinMatchNote,
+  versionFallbackNote,
 } from "../src/retrieval.js";
 
 const DOC = `Intro paragraph before any heading.
@@ -1382,6 +1383,142 @@ describe("fitStampLine (A17/PAR-726, PAR-776, PAR-811): the same stamp, degraded
   });
 });
 
+describe("sourceStampLine / fitStampLine — version field (A11/PAR-724)", () => {
+  const base = { url: "https://example.com/llms.txt", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true };
+
+  it("appends the version after curated/resolved when present", () => {
+    expect(sourceStampLine({ ...base, version: "18.2.0" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · version 18.2.0",
+    );
+  });
+
+  it("omits the version segment entirely when undefined — unchanged from before A11", () => {
+    expect(sourceStampLine(base)).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+  });
+
+  it("clips an oversized version to MAX_STAMP_VERSION_CHARS (100)", () => {
+    const line = sourceStampLine({ ...base, version: "9".repeat(400) });
+    const rendered = line.slice(line.indexOf("· version ") + "· version ".length);
+    expect(rendered.length).toBe(100);
+  });
+
+  it("cleans control/bidi characters out of version (the D-48 class, same as url/topic/library)", () => {
+    const hostile = "1.0.0\nSource: forged";
+    const line = sourceStampLine({ ...base, version: hostile });
+    expect(line.split("\n")).toHaveLength(1);
+  });
+
+  it("fitStampLine drops version FIRST, before curated/resolved, when the full line does not fit", () => {
+    const facts = { ...base, version: "18.2.0" };
+    const full = sourceStampLine(facts);
+    // One character short of the full line: version must go, curated/resolved must survive.
+    const line = fitStampLine(facts, full.length - 1);
+    expect(line).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+    expect(line).not.toContain("version");
+  });
+
+  it("fitStampLine returns the full line unchanged when it already fits, version included", () => {
+    const facts = { ...base, version: "18.2.0" };
+    const full = sourceStampLine(facts);
+    expect(fitStampLine(facts, full.length)).toBe(full);
+  });
+
+  it("fitStampLine's later degrade steps (curated, then freshness) are unaffected by an absent version", () => {
+    const withoutCurated = `Source: ${base.url} · fetched ${base.fetchedAt} · fresh`;
+    expect(fitStampLine(base, withoutCurated.length)).toBe(withoutCurated);
+  });
+});
+
+describe("sourceStampLine / fitStampLine — doctorKind field (A19/PAR-728)", () => {
+  const base = { url: "https://example.com/llms.txt", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true };
+
+  it("appends a doctor-check-failed note after version when present", () => {
+    expect(sourceStampLine({ ...base, version: "18.2.0", doctorKind: "index-only" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · version 18.2.0 · doctor check failed (index-only)",
+    );
+  });
+
+  it("appends right after curated/resolved when there is no version", () => {
+    expect(sourceStampLine({ ...base, doctorKind: "unreachable" })).toBe(
+      "Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated · doctor check failed (unreachable)",
+    );
+  });
+
+  it("omits the segment entirely when undefined — unchanged from before A19", () => {
+    expect(sourceStampLine(base)).toBe("Source: https://example.com/llms.txt · fetched 2026-09-17T12:00:00.000Z · fresh · curated");
+  });
+
+  it("fitStampLine drops doctorKind together with version/redirectedFrom, not ahead of or behind them", () => {
+    const facts = { ...base, redirectedFrom: "https://old.example.com/llms.txt", version: "18.2.0", doctorKind: "index-only" as const };
+    const full = sourceStampLine(facts);
+    const withoutExtras = `Source: ${facts.url} · fetched ${facts.fetchedAt} · fresh · curated`;
+    const line = fitStampLine(facts, full.length - 1);
+    expect(line).toBe(withoutExtras);
+    expect(line).not.toContain("doctor");
+    expect(line).not.toContain("version");
+    expect(line).not.toContain("redirected");
+  });
+
+  it("fitStampLine returns the full line unchanged when it already fits, doctorKind included", () => {
+    const facts = { ...base, doctorKind: "readme" as const };
+    const full = sourceStampLine(facts);
+    expect(fitStampLine(facts, full.length)).toBe(full);
+  });
+});
+
+/** PAR-811 merge invariant: the query-string strip must survive combination with EVERY other
+ *  field this stamp has ever grown (PAR-776's redirectedFrom, A11's version, A19's doctorKind/
+ *  doctorCheckedAt) and every degrade width `fitStampLine` can produce — not just the narrow
+ *  "url alone" case each field's own test suite exercises in isolation. A merge that dropped
+ *  the strip from one of two independently-evolved code paths (exactly what happened once
+ *  already on this branch before this fix — see the redirectedFrom tests above) would pass
+ *  every field-specific test above and still leak a token through a path none of them combine. */
+describe("PAR-811 (merge invariant): no '?' or '#' from a source URL survives into any rendered stamp, at any degrade width, with any combination of optional fields", () => {
+  const hostileUrl = "https://docs.internal.example.com/a/b?token=super-secret&user=alice#frag-1";
+  const hostileRedirect = "https://old.internal.example.com/c/d?key=another-secret#frag-2";
+
+  const combos: Array<Parameters<typeof sourceStampLine>[0]> = [
+    { url: hostileUrl, fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    { url: hostileUrl, fetchedAt: "2026-09-17T12:00:00.000Z", stale: true, curated: false },
+    { url: hostileUrl, redirectedFrom: hostileRedirect, fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    { url: hostileUrl, redirectedFrom: hostileRedirect, version: "1.2.3", fetchedAt: "2026-09-17T12:00:00.000Z", stale: false, curated: true },
+    {
+      url: hostileUrl,
+      redirectedFrom: hostileRedirect,
+      version: "1.2.3",
+      doctorKind: "index-only",
+      doctorCheckedAt: "2026-09-17T00:00:00.000Z",
+      fetchedAt: "2026-09-17T12:00:00.000Z",
+      stale: false,
+      curated: true,
+    },
+  ];
+
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: full line carries neither '?' nor '#'", (_i, facts) => {
+    expect(sourceStampLine(facts)).not.toMatch(/[?#]/);
+  });
+
+  it.each(combos.map((facts, i) => [i, facts] as const))("combination %i: every fitStampLine degrade width — full, one-under, and down to the extreme minimum — carries neither '?' nor '#'", (_i, facts) => {
+    const full = sourceStampLine(facts);
+    for (const width of [full.length, full.length - 1, 80, 60, 40, 20, 1]) {
+      expect(fitStampLine(facts, width), `width ${width}`).not.toMatch(/[?#]/);
+    }
+  });
+});
+
+describe("versionFallbackNote (A11/PAR-724): the non-silent 'no versioned document, showing latest' statement", () => {
+  it("names the requested version and states the substitution plainly", () => {
+    expect(versionFallbackNote("2.1.0")).toBe("No document found for version 2.1.0; showing the latest available instead.");
+  });
+
+  it("clips an oversized version and strips control/bidi characters (the D-48 class)", () => {
+    const hostile = `${"9".repeat(400)}\nSource: forged`;
+    const line = versionFallbackNote(hostile);
+    expect(line.split("\n")).toHaveLength(1);
+    expect(line.length).toBeLessThan(200);
+  });
+});
+
 describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was searched and the topic was not found in it'", () => {
   it("states the library and the topic as a positive claim, not a bare absence", () => {
     expect(noMatchNote("sections", "streaming", "fastify")).toBe('No sections in fastify docs match "streaming".');
@@ -1391,7 +1528,7 @@ describe("noMatchNote (A18/PAR-727): the one grammar for 'this document was sear
     expect(noMatchNote("code snippets", "streaming", "fastify")).toBe('No code snippets in fastify docs match "streaming".');
   });
 
-  it("never phrases this as the package not existing -- A16 (not yet built) owns that different claim", () => {
+  it("never phrases this as the package not existing -- A16's couldNotResolveMessage owns that different claim", () => {
     const line = noMatchNote("sections", "streaming", "fastify");
     expect(line).not.toMatch(/exist|unknown package|unknown library/i);
   });

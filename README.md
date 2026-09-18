@@ -26,9 +26,9 @@ copy, clearly flagged as stale, instead of a failure.
 ## Install
 
 VibeCTX runs from a local clone. You need git and Node — `package.json` declares
-**Node ≥ 18**, and CI builds and tests on **Node 22**, which is the version this is actually
-proven on. Running the test suite needs Node ≥ 20.19 regardless (vitest's `vite` dependency
-declares `^20.19.0 || >=22.12.0`); building and running the server does not.
+**Node ≥ 20.19** (vitest's `vite` dependency requires `^20.19.0 || >=22.12.0` to run the test
+suite; the floor is set there rather than for the server itself, which needs less), and CI
+builds and tests on **Node 22**, which is the version this is actually proven on.
 
 ```bash
 git clone https://github.com/BlackRaptorAI/VibeCTX.git && cd VibeCTX && npm ci && npm run build
@@ -89,7 +89,7 @@ node /absolute/path/to/VibeCTX/dist/index.js
 | Tool | What it does |
 |---|---|
 | `list_libraries()` | Registry + per-library cache status |
-| `get_docs(library, topic?, maxTokens?, mode?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head |
+| `get_docs(library, topic?, maxTokens?, mode?, version?)` | Fetch-or-cache, then return the sections best matching `topic`, ranked by BM25 (follows llms.txt index links when needed). `mode: "snippets"` returns just the code blocks. No topic → table of contents + document head. `version` matches docs to an exact release — falls back to the latest available document if none is found, and always says so; see [Version-matched docs](#version-matched-docs) |
 | `search(query, maxTokens?, libraries?)` | Search **every cached library at once** and get the best sections grouped by library — for when you don't know which library owns a concept. Cache-only and offline; see [Don't know which library? `search`](#dont-know-which-library-search) |
 | `refresh(library?)` | Force refetch past the TTL (all libraries when omitted; a resolved entry is re-resolved). A successful refresh also drops that library's other cached pages — the ones followed from links in the document being replaced — so a later `get_docs` re-follows fresh links rather than blending old followed pages into new content. The dropped pages are re-fetched the next time `get_docs` follows a link online; until then, an offline read or an upstream outage reports them as unavailable rather than serving the older copy. Omitting `library` (a full refresh of everything) is capped at a few calls per hour per running server; a call past the cap is refused with a stated reason. Refreshing one named library at a time has no such cap |
 | `resolve_library(name, ecosystem?)` | Turn any npm / PyPI package name into a docs source and report how — see [Any library, no config](#any-library-no-config) |
@@ -98,6 +98,23 @@ node /absolute/path/to/VibeCTX/dist/index.js
 
 `library` is a name from `list_libraries`, one of its aliases (`next`, `tailwind`, `remix`, …),
 or **any npm / PyPI package name** — an unknown name is resolved on the spot.
+
+## Command line
+
+Every subcommand below also runs from the shell — the same reports the MCP tools above
+return, without a client:
+
+| Command | What it does |
+|---|---|
+| `vibectx doctor [--json] [--library <name>] [--config <path>] [--offline]` | Prove retrieval works per library — see [Checking coverage: `vibectx doctor`](#checking-coverage-vibectx-doctor) |
+| `vibectx resolve <package> [--npm \| --pypi] [--config <path>]` | Turn a package name into a docs source — see [Any library, no config](#any-library-no-config) |
+| `vibectx warm [dir] [--offline] [--force] [--json] [--config <path>]` | Cache a project's dependency docs — see [Warm your project's docs](#warm-your-projects-docs) |
+| `vibectx search <query> [--library <name>]… [--max-tokens <n>] [--json] [--config <path>]` | Search every cached library at once — see [Don't know which library? `search`](#dont-know-which-library-search) |
+| `vibectx log [--json]` | Show recorded tool activity — see [Activity log: `vibectx log`](#activity-log-vibectx-log) |
+
+`vibectx --help` and `vibectx -h` print this list and exit `0`; `vibectx <command> --help`
+(or `-h`) prints that command's own usage and exits `0`. An unknown option still exits `2`,
+printing the error and that command's usage as two lines on stderr.
 
 ### How ranking works
 
@@ -235,12 +252,14 @@ out of its block, and the whole thing is clipped to `maxTokens`. `mode` needs a 
 matches you get, in full:
 
 ```
-Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved
+Source: <url> [(redirected from <url>)] · fetched <ISO timestamp> · fresh|stale · curated|resolved [· version <v>] [· doctor check failed (<kind>, checked <date>)]
 No code snippets in <library> docs match "<topic>". Try mode "sections" or broader terms.
 ```
 
 `<url>` is the URL the document was actually served from; the `(redirected from <url>)`
-clause appears only when a redirect moved it away from the one that was requested.
+clause appears only when a redirect moved it away from the one that was requested. The
+`· doctor check failed (…)` segment (0.2.0) appears only when the last `vibectx doctor`
+run found this library unhealthy — see [Checking coverage](#checking-coverage-vibectx-doctor).
 
 ## Don't know which library? `search`
 
@@ -476,13 +495,15 @@ to a name the registry has since learned (pinned in config, or resolved another 
 
 **Statuses:** `cached` · `already fresh` · `resolved+cached` · `unresolved` (the resolver's
 attempt summary is printed below the table) · `unresolved (recent)` (see above) ·
+`not found` (the name does not exist in npm or PyPI — see
+[The package-existence signal](#the-package-existence-signal)) ·
 `denied (noise list)` · `skipped (rate cap)` (the 100-resolutions-per-hour cap was reached
 mid-run; the run continues; run `warm` again later) · `unreachable` (nothing fetched — a
 stale copy, if any, is kept and said so).
 
 **Exit code** `0` when every attempted dependency is `cached`, `already fresh` or
 `resolved+cached` (denied names do not count); `1` when any is `unresolved`,
-`unresolved (recent)`, `unreachable` or `skipped (rate cap)` — the promise is "your stack's
+`unresolved (recent)`, `not found`, `unreachable` or `skipped (rate cap)` — the promise is "your stack's
 docs are on disk", and they are not yet; `2` for a usage error, an unreadable config, a
 directory that is not a directory, or a directory with no manifest to read. `vibectx warm
 [dir]` takes any directory (default: the current one); the `warm_project` tool accepts only
@@ -491,7 +512,7 @@ symlink inside the working directory that points elsewhere, or a sibling that me
 the prefix (`/a/proj-evil` against `/a/proj`), is refused — and answers "outside the project
 directory" for anything else. `--offline` prints a cache-only report (fresh / stale / missing
 per name, unknown names `unresolved`) without touching the network or writing anything;
-`--force` retries recent failures; `--json` emits `{ schemaVersion: 1, generatedAt, dir,
+`--force` retries recent failures; `--json` emits `{ schemaVersion: 2, generatedAt, dir,
 offline, manifests, notes, dependencies: [{ name, ecosystem, source, library?, status, url?,
 note?, failedAt? }], cached, attempted, denied, total }` — keys in that order (each row's
 keys in that order too); new keys may be appended; read keys by name. `schemaVersion` is
@@ -515,7 +536,7 @@ tells you which you got. It does not re-resolve entries already resolved (that i
 manifest exists.
 
 **Project record.** Each run (not `--offline`) writes `projects/<hash of the absolute
-directory>.json` in the cache directory — `{ schemaVersion: 1, dir, manifests,
+directory>.json` in the cache directory — `{ schemaVersion: 2, dir, manifests,
 dependencies, warmedAt }`, atomically and validated on read. A file with an **older**
 `schemaVersion` is replaced; one with a **newer** `schemaVersion` (written by a newer
 vibectx) is left alone with a note on stderr and a `project record not written: newer schema
@@ -534,20 +555,21 @@ absolute, never containing `..`) drops the whole row, as do a bad `name`, `ecosy
 form `2026-09-06T06:00:00.000Z` — `Date.parse` on its own accepts a "date" with a trailing
 parenthesised comment, and `warmedAt` is printed verbatim in the `list_libraries` summary
 line, so a bad `warmedAt` makes the whole record read as absent. That accepted timestamp
-shape is part of `schemaVersion` 1: a reader of this version rejects anything else, so
-widening it — accepting a `+01:00` offset, say — requires a version bump, exactly as adding
-or removing a status value does. Control, bidi and zero-width characters are stripped from
-every field.
+shape is part of the schema itself: a reader rejects anything else, so widening it —
+accepting a `+01:00` offset, say — requires a version bump, exactly as adding or removing a
+status value does (the reason `schemaVersion` moved from 1 to 2 when `not found` was added
+— see [The package-existence signal](#the-package-existence-signal)). Control, bidi and
+zero-width characters are stripped from every field.
 
 **The `list_libraries` summary line.** When a record exists for the server's working
 directory, `list_libraries` ends with `Project deps (<dir>): N cached, M unresolved, K
 denied — warmed <time>`. Two things to know about that line:
 
 - **`unresolved` is a bucket, not a status.** It counts every row that is not cached and not
-  denied — `unresolved`, `unresolved (recent)`, `unreachable` and `skipped (rate cap)`
-  together. So a run that hit the resolution cap, and one whose network was down, both read
-  as "unresolved" here. Run `vibectx warm` for the per-name breakdown; the summary is
-  deliberately one line. (Splitting the bucket is a queued follow-up.)
+  denied — `unresolved`, `unresolved (recent)`, `not found`, `unreachable` and
+  `skipped (rate cap)` together. So a run that hit the resolution cap, and one whose network
+  was down, both read as "unresolved" here. Run `vibectx warm` for the per-name breakdown;
+  the summary is deliberately one line. (Splitting the bucket is a queued follow-up.)
 - **It emits the absolute project directory** — the value of `dir` — to whatever model is
   reading `list_libraries`. That is the path the server was started in; it is not secret, but
   it is not nothing either.
@@ -615,17 +637,29 @@ The first two candidates report `no document` because that sandbox cannot reach
    not count as a document.
 4. **GitHub README** — for a `github.com` repository only, via
    `raw.githubusercontent.com/<owner>/<repo>/HEAD/<README.md | readme.md | Readme.md | README.rst>`
-   (`HEAD` is the default branch, whatever it is called).
-5. Otherwise one plain line: what was tried, and the config snippet to pin the library.
+   (`HEAD` is the default branch, whatever it is called). With a pinned
+   [version](#version-matched-docs), the same four filenames at
+   `refs/tags/v<version>/…` and `refs/tags/<version>/…` are tried FIRST, ahead of steps 3–4.
+5. Otherwise one plain line: what was tried, and the config snippet to pin the library. A
+   name that genuinely does not exist in npm or PyPI (both registries actually queried,
+   both a real 404) says so — distinct from a real package that just has no reachable
+   documentation; see [The package-existence signal](#the-package-existence-signal).
 
-**Fetch bound.** A resolution makes at most **26 requests**: 2 metadata documents, then
-the preferred ecosystem's candidates (8 llms.txt probes + 4 README variants), then — only
-if none of those served — the other ecosystem's candidates; it stops as soon as one
-document is usable (in practice the worst case is 18, since an ecosystem held back as
-README-only has no llms.txt probes). Metadata responses over 8 MiB are treated as absent;
+**Fetch bound.** An unversioned resolution makes at most **26 requests**: 2 metadata
+documents, then the preferred ecosystem's candidates (8 llms.txt probes + 4 README
+variants), then — only if none of those served — the other ecosystem's candidates; it
+stops as soon as one document is usable (in practice the worst case is 18, since an
+ecosystem held back as README-only has no llms.txt probes). A version-pinned resolution
+adds one more metadata fetch and up to 8 more README probes (2 tag spellings × 4
+filenames) for the preferred ecosystem only — the version-tag candidates are never tried
+against a fallback ecosystem — raising the ceiling to **43 requests**. The preferred
+ecosystem is always the one WITH a docs site when either has one (up to 20: 8 versioned +
+8 llms.txt + 4 README), and a fallback ecosystem, when there is one, is by construction
+always README-only (≤ 4) — so the reachable worst case is 27 (2 + 1 + 20 + 4), not the
+full 43. Metadata responses over 8 MiB are treated as absent;
 documents keep the normal 25 MiB cap. A process starts at most **100 resolutions per
-hour**; beyond that, unknown names get a "resolution limit reached" line until the
-window slides (pin the library in config if you hit it).
+hour**; beyond that, unknown names get a "resolution limit reached" line until the window
+slides (pin the library in config if you hit it).
 
 **Where it persists.** Successful resolutions are written to `resolved.json` in the
 cache directory (`~/.vibectx/`, or `VIBECTX_CACHE_DIR`) via a temp file and rename —
@@ -696,14 +730,87 @@ with no GitHub repository and no `llms.txt` cannot be resolved; pin it in config
 into fetches. Every URL is checked by name (https only; no IP literals, `localhost`,
 `.local`, `.internal`, single-label or trailing-dot hosts; GitHub repositories only via
 `raw.githubusercontent.com`; redirects checked hop by hop), and per-name and per-hour
-bounds cap the volume (up to 26 requests per unknown name, 100 resolutions per hour per
-process, so *N* unknown names can mean up to 26·*N* requests to the registries, docs hosts
-and GitHub). Name-based checks cannot see through DNS: a hostname such as
+bounds cap the volume (up to 26 requests per unknown name, 43 when a version is pinned,
+100 resolutions per hour per process, so *N* unknown names can mean up to 43·*N* requests
+to the registries, docs hosts and GitHub). Name-based checks cannot see through DNS: a hostname such as
 `127.0.0.1.nip.io` resolves to a loopback address and the connection will be attempted;
 TLS certificate-name verification then prevents a body from being read from a host that
 cannot present a certificate for that name. If your environment has internal services on
 routable names, run vibectx where they are not reachable, or pin libraries in config and
 do not rely on resolution.
+
+## Version-matched docs
+
+Pass `version` to `get_docs` to match documentation to an exact release instead of
+whatever the resolution chain would otherwise land on:
+
+```jsonc
+// tool call
+{ "library": "some-lib", "topic": "middleware", "version": "1.2.3" }
+```
+
+For a name that is unknown or was previously auto-resolved, this tries, before the usual
+llms.txt / homepage / README chain: `registry.npmjs.org/<name>/<version>` (or PyPI's
+equivalent) to confirm the version is published, then a GitHub README at
+`raw.githubusercontent.com/<owner>/<repo>/refs/tags/v<version>/<file>` and
+`refs/tags/<version>/<file>` (both tag spellings, four filenames each). When one serves a
+document, the `Source:` line names the version:
+
+```
+Source: https://raw.githubusercontent.com/o/r/refs/tags/v1.2.3/README.md · fetched <ISO timestamp> · fresh · resolved · version 1.2.3
+```
+
+**When no versioned document exists**, the response falls back to the latest available
+document — and always says so, never silently:
+
+```
+No document found for version 9.9.9; showing the latest available instead.
+Source: https://example.com/llms.txt · fetched <ISO timestamp> · fresh · resolved
+```
+
+**A curated entry** (the default registry, or one pinned in your config) is never
+re-resolved for a version — its `urls` are hand-picked doc sources, not derived from
+registry metadata, so there is no version-specific candidate to try. The response says so
+explicitly and still serves the entry's normal (unversioned) document:
+
+```
+Version 1.2.3 was requested, but "react" is a curated entry — version-matching applies only to packages resolved automatically.
+Source: https://react.dev/llms-full.txt · fetched <ISO timestamp> · fresh · curated
+```
+
+`vibectx warm` also matches a manifest's pinned version when it names one unambiguously —
+a bare semver (`"1.2.3"`, package.json), a PEP 508 `==` pin (`django==4.2.3`,
+requirements.txt / pyproject.toml), or a plain Poetry string with no range character
+(`django = "4.2.3"`). A range (`^1.2.3`, `>=1.2.3`) names no single version to match
+against and is left unpinned, same as calling `get_docs` without `version`.
+
+## The package-existence signal
+
+A name that genuinely does not exist in npm or PyPI is reported distinctly from a real
+package that just has no documentation vibectx can reach — `resolve_library`, `get_docs`,
+the CLI and `warm`'s status column all carry the distinction:
+
+```
+Could not resolve "definitely-not-a-real-package": "definitely-not-a-real-package" does not exist in npm or PyPI. …
+```
+
+```
+Could not resolve "some-real-pkg": "some-real-pkg" exists but publishes no documentation VibeCTX can reach — this is not a sign the package doesn't exist. …
+```
+
+The first wording is used only when both registries were actually queried and both
+answered a genuine HTTP 404 — never for a timeout, a DNS failure, or a lookup you
+restricted to one registry yourself (`ecosystem: "npm" | "pypi"`, or `vibectx warm`, which
+always checks only the ecosystem a dependency's own manifest names): a restricted lookup
+gets the same claim scoped to just that registry ("does not exist in npm"), never a
+two-registry claim it did not earn. `vibectx warm`'s status column reports this as `not
+found`, distinct from `unresolved` (a real package, no reachable docs); this added a new
+status value, so `--json`'s `schemaVersion` moved to `2` (readers on an older version
+refuse the file rather than silently dropping the new status).
+
+This is the one claim vibectx makes about invented package names: it flags a name that
+does not exist in npm or PyPI. It is not a general defense against hallucination, and does
+not claim to be one.
 
 ## Configuration
 
@@ -898,15 +1005,25 @@ Unknown top-level keys in the config (for example `$comment`) are ignored.
 Names and aliases are trimmed and lower-cased before anything else, so `"name": "Next.js"`
 overrides `next.js`. Precedence:
 
-- **Config beats default alias.** A config entry whose `name` or alias equals a *default's
-  alias* wins; that alias is silently dropped from the default (`{"name": "next"}` loads and
-  `next` is yours, while `next.js` and `nextjs` still reach the default).
-- **Alias vs. canonical name is an error.** A config alias equal to any library's `name`
-  (default or config), the same alias on two config entries, or an alias equal to its own
-  entry's name fails to load, with a message naming both sides.
-- **An override keeps the default's aliases unless you say otherwise.** Overriding a default
-  (same `name`) and omitting `aliases` inherits them; `"aliases": []` clears them; an
-  explicit list replaces them.
+- **Config beats default alias — including its PEP 503 twin.** A config entry whose `name` or
+  alias equals a *default's alias*, or a PEP 503 twin of one (`-`, `_`, `.` runs collapse to
+  one `-`), wins; that alias is silently dropped from the default (`{"name": "next"}` loads
+  and `next` is yours; `{"name": "react_dom"}` claims the default `react-dom` alias the same
+  way, while `next.js`/`react` still reach their own remaining aliases).
+- **Two spellings of one name are one entry, not two.** `foo-bar`, `foo_bar` and `Foo.Bar` are
+  the same package under PEP 503, so `{"name": "ai.sdk"}` *overrides* the default `ai-sdk` —
+  inheriting its aliases (see below) and taking its place under your spelling, in the same
+  registry slot — rather than adding a second entry. The library's on-disk cache is keyed by
+  name, so an override under a different spelling starts a fresh cache directory; the old one
+  is unused, not deleted. Two entries in the *same* config file that are PEP 503 twins of each
+  other fail to load, naming both.
+- **Alias vs. canonical name is an error, exact spelling or PEP 503 twin alike.** A config
+  alias equal to — or a PEP 503 twin of — any library's `name` (default or config), the same
+  alias (or its twin) on two config entries, or an alias equal to its own entry's name fails
+  to load, with a message naming both sides.
+- **An override keeps the replaced entry's aliases unless you say otherwise.** Overriding a
+  default or another entry (same name, or a PEP 503 twin of it) and omitting `aliases`
+  inherits them; `"aliases": []` clears them; an explicit list replaces them.
 - **A pin also claims its PEP 503 spelling.** A config (or default) name or alias owns the
   form with runs of `-`, `_`, `.` collapsed to `-` as well, so `{"name": "typing_extensions"}`
   answers `typing-extensions` and `Typing.Extensions`, and no auto-resolved record can sit
@@ -1098,19 +1215,41 @@ never stops the rest of the table. At most three libraries are checked at a time
 `--json` emits `{ schemaVersion: 1, generatedAt, libraries: [{ library, kind, url,
 cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed, dropped }],
 followed, dropped, healthy, reasons }], healthy, total, configIssues: [{ path, scope,
-reason }] }` — keys in that order, `null` for a missing URL or age. `configIssues` (added
-in 0.2.0) lists discovered config files that were skipped; while it is non-empty the exit
-code is `1` however healthy the libraries look, because the entries those files pin are
-simply missing. New keys may be appended in later versions; consumers should
-read keys by name and must not assert exact key sets. `reasons[]` strings are
-human-readable and not a contract. If you snapshot the output, note that `generatedAt`,
-`cacheAgeHours`, `url` (which candidate resolved) and `reasons[]` are non-deterministic
-run to run; `schemaVersion` is bumped only when a key is renamed, removed or changes meaning.
+reason }], eviction?, notes? }` — keys in that order, `null` for a missing URL or age.
+`configIssues` (added in 0.2.0) lists discovered config files that were skipped; while it
+is non-empty the exit code is `1` however healthy the libraries look, because the entries
+those files pin are simply missing. `eviction` (0.2.0) carries the same "documents evicted
+under the cache size cap" summary the human table already prints as a `cache: evicted …`
+line, present only when the last eviction in this process actually evicted something —
+not necessarily triggered by this specific run. `notes` (0.2.0) reports a best-effort
+failure to persist this run's verdicts (see below) — a newer `doctor.json` on disk than
+this version writes, or a write error — so a `--json` caller (which never sees stderr)
+still learns about it; present only when something went wrong. New keys may be appended
+in later versions; consumers should read keys by name and must not assert exact key sets.
+`reasons[]` strings are human-readable and not a contract. If you snapshot the output,
+note that `generatedAt`, `cacheAgeHours`, `url` (which candidate resolved) and `reasons[]`
+are non-deterministic run to run; `schemaVersion` is bumped only when a key is renamed,
+removed or changes meaning.
 
 Honest limit: doctor measures **retrieval, not correctness**. A ✓ means an agent
 asking that question today gets sections back; it does not check that they are the
 right ones. `list_libraries` shows the same kind per library, classified from the
 cache without touching the network (`unknown` until something is cached).
+
+**Doctor's verdict follows you to `list_libraries` and `get_docs` (0.2.0).** Each run
+persists every checked library's `{kind, healthy, reasons, checkedAt}` to `doctor.json` in
+the cache directory (skipped for `--offline` runs — an offline "unreachable" is the
+expected answer for that call, not a real probe failure, and persisting it would poison
+later online responses). `list_libraries` then appends `[doctor: check failed (<kind>),
+checked <date>]` to a row whose last check was unhealthy, and `get_docs`'s `Source:` stamp
+gains `· doctor check failed (<kind>, checked <date>)` on the same condition — closing the
+gap where a library can be cleanly cached and still fail every probe with no warning
+anywhere outside a manual `doctor` run. Neither surface repeats doctor's free-text
+`reasons` — the persisted verdict is shared across every project on the machine, so only
+the closed `kind` and the check date are shown; run `vibectx doctor` in the project itself
+for the detail. Absent entirely when doctor has never checked a library, so the note never
+overclaims health the way the `unknown` kind already declines to, and the verdict is only
+as fresh as the last `doctor` run — the check date is there so you can tell.
 
 ## Activity log: `vibectx log`
 

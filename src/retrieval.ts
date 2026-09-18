@@ -1,5 +1,6 @@
 import { clipText } from "./text.js";
 import { tokenize } from "./tokenize.js";
+import type { SourceKind } from "./source-kind.js";
 
 /** A heading and the text under it, with where it sits in the heading tree (D-25). */
 export interface SplitSection {
@@ -310,11 +311,15 @@ function renderedPath(s: { heading: string; path: string[] }): string {
  *  stamp on the get_docs path only. One shared function is what makes "clean once, here" an
  *  actual guarantee rather than a convention two callers could independently forget.
  *
- *  Does NOT include a package/document VERSION or ref: A11/PAR-724 (manifest-derived version
- *  matching), the item this one's own Linear description names as the source of that field,
- *  has not been built — there is no version or ref tracked anywhere in this codebase today.
- *  Recorded as a deliberate, flagged gap rather than invented or silently dropped; see D-73 in
- *  .vibectx-plan/DECISIONS.md. */
+ *  A11/PAR-724 closes the gap the comment here used to record (D-73: A17 shipped with no
+ *  version/ref field because A11 had not been built): `version`, below, is the version or ref
+ *  the document was actually matched to — set only when the resolution chain found a
+ *  version-SPECIFIC document (a GitHub tag README, an npm/PyPI version-pinned metadata
+ *  lookup), never merely echoing back what was requested. When a version was requested but no
+ *  versioned document could be found, the stamp says nothing about a version at all — the
+ *  caller states the fallback explicitly instead (see `versionFallbackNote`), so "no version
+ *  field" and "version field says X" are the only two readings, never a stamp that implies a
+ *  match that did not happen. See D-73 in .vibectx-plan/DECISIONS.md for the history. */
 export interface StampFacts {
   /** The URL the content actually came from — the FINAL URL after any redirect, not
    *  necessarily the candidate URL the caller started from (PAR-776, D-74: before this, a
@@ -343,12 +348,38 @@ export interface StampFacts {
   /** True for a default-registry or config-file entry; false for one `resolve_library`
    *  synthesized this session (`entry.resolved !== undefined`). */
   curated: boolean;
+  /** A11/PAR-724 — the version or ref this document was matched to, set only on a genuine
+   *  version-specific match. Undefined on every unversioned call and on a versioned call that
+   *  fell back to the latest available document. */
+  version?: string;
+  /** A19/PAR-728 — the source kind `vibectx doctor` classified this entry as on its LAST run,
+   *  set only when that run also found it unhealthy (index-only with no link followed, or a
+   *  probe that returned no match — see doctor.ts's `LibraryReport.healthy`). Never set merely
+   *  because the entry IS index-only or readme; many such entries are perfectly healthy. This
+   *  is doctor's stated verdict, not a live re-probe — get_docs does not re-run doctor's checks
+   *  on every call — so it can be stale relative to a fix made since doctor last ran; that is
+   *  the same staleness `list_libraries`' own `[doctor: ...]` note (list-libraries.ts) accepts
+   *  for the same reason. A closed enum (`SourceKind`), so unlike `version`/`url`/
+   *  `redirectedFrom` it needs no separate cleaning here — there is no free-form text to forge. */
+  doctorKind?: SourceKind;
+  /** A19/PAR-728, code-reviewer round 1, B3 — WHEN doctor reached that verdict (its
+   *  `checkedAt`), always set together with `doctorKind` and never alone: an unhealthy verdict
+   *  with no date reads as a present-tense fact forever, even long after the library was fixed
+   *  and simply never re-checked. Already shape-bounded on read (`doctor-store.ts`'s
+   *  `ISO_INSTANT` check), so — like `doctorKind` — nothing here needs its own cleaning. */
+  doctorCheckedAt?: string;
 }
 
 /** Longest `url` gets to be in the stamp — matches search.ts's own pre-existing `MAX_URL_CHARS`,
  *  so a caller that used to clip separately sees no change in outcome, only in ownership. Also
  *  the bound `redirectedFrom` uses (PAR-776): the same field, appearing under a different name. */
 const MAX_STAMP_URL_CHARS = 300;
+/** Longest `version` gets to be in the stamp. A11/PAR-724 — generous headroom over any real
+ *  npm/PyPI version string or git tag; not load-bearing (see `sourceStampLine`'s own url
+ *  cleaning for the load-bearing defense against a forged second stamp line — `version` gets
+ *  the same treatment here for the same reason: it originates from a manifest file or a
+ *  registry response, neither trusted). */
+const MAX_STAMP_VERSION_CHARS = 100;
 
 /**
  * PAR-811 (security-architect, surfaced verifying PAR-791/792): the query string is the ONLY
@@ -397,30 +428,35 @@ function stripStampQuery(url: string): string {
 
 export function sourceStampLine(f: StampFacts): string {
   const redirect = f.redirectedFrom !== undefined ? ` (redirected from ${clipText(stripStampQuery(f.redirectedFrom), MAX_STAMP_URL_CHARS)})` : "";
-  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}`;
+  const version = f.version !== undefined ? ` · version ${clipText(f.version, MAX_STAMP_VERSION_CHARS)}` : "";
+  const doctorDate = f.doctorCheckedAt !== undefined ? `, checked ${f.doctorCheckedAt}` : "";
+  const doctor = f.doctorKind !== undefined ? ` · doctor check failed (${f.doctorKind}${doctorDate})` : "";
+  return `Source: ${clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS)}${redirect} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"} · ${f.curated ? "curated" : "resolved"}${version}${doctor}`;
 }
 
 /** `sourceStampLine`, or a shorter COMPLETE variant when the full line would not fit
- *  `maxChars` — dropping whole trailing fields (PAR-776's `redirectedFrom` annotation first,
- *  then curated/resolved, then fresh/stale, then fetched-at) rather than leaving that to a
- *  caller's own final length-based backstop clip to cut mid-field (code-reviewer, A17 round 1,
- *  B2). A mid-field cut is not merely ugly: `· fetched 2026-09-1` — the true fetch date sliced
- *  at its 9th character — is a plausible, well-formed, WRONG date presented as fact, which is
- *  worse than the missing stamp A17 exists to fix. `redirectedFrom` is dropped FIRST, ahead of
- *  every field that predates it: it is the newest, most optional fact this line states, and
- *  the URL it carries is never the only place that URL is known (the caller already had it as
- *  the candidate URL going in) — unlike `url`, `fetchedAt`, `stale` and `curated`, which this
- *  line is the sole rendered statement of. At the extreme (`maxChars` too small even for
- *  `Source: <url>`), this returns that shortest variant anyway and leaves it to the caller's
- *  own backstop — unchanged from get_docs' pre-A17 behaviour for an oversized `Source:` line
- *  alone, already accepted and pinned by test. */
+ *  `maxChars` — dropping whole trailing/inline fields rather than leaving that to a caller's
+ *  own final length-based backstop clip to cut mid-field (code-reviewer, A17 round 1, B2). A
+ *  mid-field cut is not merely ugly: `· fetched 2026-09-1` — the true fetch date sliced at its
+ *  9th character — is a plausible, well-formed, WRONG date presented as fact, which is worse
+ *  than the missing stamp A17 exists to fix.
+ *
+ *  `version` (A11/PAR-724), `redirectedFrom` (PAR-776) and `doctorKind` (A19/PAR-728) drop
+ *  TOGETHER as the first degrade step, none ahead of the others: each is an optional annotation
+ *  added after url/fetched-at/fresh-stale/curated already existed, each built without knowledge
+ *  of the others, and none's own presence is the SOLE place that fact is known the way `url`
+ *  itself is (the caller already had the requested version, the pre-redirect candidate URL and
+ *  the persisted doctor verdict going in). Picking an order between three independently-added
+ *  "drop me first" fields would be inventing a priority none of the three features actually
+ *  depends on; dropping them together avoids that. At the
+ *  extreme (`maxChars` too small even for `Source: <url>`), this returns that shortest variant
+ *  anyway and leaves it to the caller's own backstop — unchanged from get_docs' pre-A17
+ *  behaviour for an oversized `Source:` line alone, already accepted and pinned by test. */
 export function fitStampLine(f: StampFacts, maxChars: number): string {
   const full = sourceStampLine(f);
   if (full.length <= maxChars) return full;
-  if (f.redirectedFrom !== undefined) {
-    const withoutRedirect = sourceStampLine({ ...f, redirectedFrom: undefined });
-    if (withoutRedirect.length <= maxChars) return withoutRedirect;
-  }
+  const withoutExtras = sourceStampLine({ ...f, version: undefined, redirectedFrom: undefined, doctorKind: undefined, doctorCheckedAt: undefined });
+  if (withoutExtras.length <= maxChars) return withoutExtras;
   const url = clipText(stripStampQuery(f.url), MAX_STAMP_URL_CHARS);
   const withoutCurated = `Source: ${url} · fetched ${f.fetchedAt} · ${f.stale ? "stale" : "fresh"}`;
   if (withoutCurated.length <= maxChars) return withoutCurated;
@@ -447,8 +483,10 @@ const MAX_NOTE_LIBRARY_CHARS = 300;
  *  ambiguous between "I looked and it isn't here" and "I didn't really look," and a quiet gap
  *  is what invites an agent to invent an answer instead (the problem this item exists to
  *  close). Deliberately does NOT say "this package does not exist" or anything that could be
- *  read that way — that is A16's (not-yet-built) claim, a different fact from "this document
- *  does not cover the topic," and the two must stay visibly distinct once A16 lands. */
+ *  read that way — that is A16's claim (`resolve.ts`'s `couldNotResolveMessage`, "does not
+ *  exist in npm or PyPI"), a different fact from "this document does not cover the topic," and
+ *  the two stay visibly distinct: a name that resolved successfully enough to reach this note
+ *  is, by construction, one A16 has already confirmed exists. */
 export function noMatchNote(what: string, topic: string, library: string): string {
   return `No ${what} in ${clipText(library, MAX_NOTE_LIBRARY_CHARS)} docs match "${clipText(topic, MAX_NOTE_TOPIC_CHARS)}".`;
 }
@@ -458,6 +496,16 @@ export function noMatchNote(what: string, topic: string, library: string): strin
  *  the stamp and nothing else, indistinguishable from "found nothing at all" to a reader who
  *  cannot see the structured `matched` count. States the positive fact (content exists) rather
  *  than leaving a short response to be misread as an empty one. */
+/** A11/PAR-724 — the non-silent fallback statement D-50 requires: a version was requested and
+ *  no document specific to it could be found, so the latest available document is served
+ *  instead. Never omitted when that is what happened (the whole point of this item is that this
+ *  substitution must be stated, not silent) — paired with a stamp carrying no `version` field
+ *  (see `StampFacts`), so the two together read as "you asked for X; this is not X, it's the
+ *  latest" rather than a stamp that could be misread as confirming the match. */
+export function versionFallbackNote(version: string): string {
+  return `No document found for version ${clipText(version, MAX_STAMP_VERSION_CHARS)}; showing the latest available instead.`;
+}
+
 export function thinMatchNote(what: string, matchedCount: number): string {
   // `what` is always passed as its plural noun ("sections", "code snippets"); naive
   // de-pluralization (drop a trailing "s") reads correctly for both callers this file has —

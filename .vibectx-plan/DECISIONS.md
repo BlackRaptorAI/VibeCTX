@@ -76,7 +76,7 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 | **D-47** | A library `urls` entry must clear the same host policy a followed link clears. Internal, loopback and non-routable hosts are reachable only through an explicit per-entry `allowInternalHosts: true`. | A1 / PAR-714 |
 | **D-48** | One exported control and bidi character class is the contract for every render path. Adding a character to it is a D-30 amendment; a local variant is a defect. | A7 / PAR-720 |
 | **D-49** | The URL trust decision lives in `src/link-policy.ts`, the one file that owns host policy, and every caller — config included — calls it rather than re-implementing a subset. | A14, folded into A1 |
-| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. | A11 / PAR-724 |
+| **D-50** | Documentation is served for the version the project's manifest pins where a versioned document exists, and the fallback to latest is always stated, never silent. **Executed 2026-09-17 — see D-76.** | A11 / PAR-724 |
 | **D-51** | VibeCTX records its own activity, locally, bounded and content-free, readable through the same `--json` envelope as every other command. It never records what was *said*, only what was *looked at*. | A20 / PAR-729 |
 | **D-52** | Agent packs are consumed as Claude Code plugins from the `blackraptor` marketplace, never vendored into the repository. Verdict enforcement lives in the pack's `Stop` hook, not in VibeCTX's CI. Supersedes D-44. | governance |
 | **D-53** | The operating pack version for 0.2.0 is **2.1.0**. Gate verdicts follow the 2.0.0 schema (integer confidence, required `standards`, string `evidence`, no `N/A`); the 13 pre-existing Change Records predate it and are re-emitted rather than hand-patched. | governance |
@@ -575,6 +575,160 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `StampFacts`/`sourceStampLine`, not a rework of this item's plumbing.
   Ref: `src/retrieval.ts` (`sourceStampLine`), `src/get-docs.ts`, `src/search.ts`,
   `src/fetcher.ts`, `src/cache.ts` (A17 / PAR-726).
+  **Superseded 2026-09-17 by D-76**, which closes this gap exactly the way predicted above —
+  `StampFacts` gained an optional `version` field, `sourceStampLine`/`fitStampLine` extended,
+  nothing about A17's own plumbing reworked.
+
+---
+
+## D-76 — decided 2026-09-17, executing A11 / PAR-724
+
+- **D-76** 2026-09-17 — **D-50 executed: documentation is version-matched where a manifest
+  names an unambiguous exact pin, and the fallback to latest is always stated, never silent.**
+  Checked against the tree before starting: no version field existed anywhere (`ProjectDependency`,
+  `LibraryEntry`, `ResolveOutcome`, `StampFacts`) — D-73's premise (that A11 had already landed
+  when A17 was built) was confirmed false, exactly as D-73 itself found.
+  **What "an unambiguous exact pin" means, precisely** — the premise in A11's own Shape ("`warm`
+  already parses the version specifier next to every dependency name, then discards it") was
+  ALSO checked against the tree and found false: no version specifier was parsed anywhere in
+  `src/project-deps.ts` before this item, discarded or otherwise (`ProjectDependency` had no
+  version-shaped field to discard into). Parsing was built from scratch, scoped deliberately
+  narrow: a bare semver in package.json (`"1.2.3"`, never `"^1.2.3"`), a PEP 508 `==` pin in
+  requirements.txt / `[project].dependencies` (`django==4.2.3`, never `>=`/`~=`/a second
+  comma-separated constraint), and a plain quoted Poetry string with no range character
+  (`django = "4.2.3"`, never `^`/`~`/an inline table). A range is not a pin — `get_docs` has no
+  single version to match documentation against for one, and inventing the range's lower bound
+  as "the" version would itself be a silent fabrication of the kind D-50 forbids. Lockfile
+  resolved-version capture (`package-lock.json`'s `packages["node_modules/<name>"].version`,
+  pnpm's equivalent) is NOT built — those lockfiles are read today only when the manifest itself
+  is ABSENT (an existing, pre-A11 constraint unrelated to this item), so wiring resolved-version
+  capture through them would need restructuring that discovery path, out of this item's scope.
+  Filed as a follow-up, not silently dropped.
+  **The resolution chain, per the Shape's own naming** — when `get_docs(library, topic?,
+  version?)` is given a version: for an unknown name, `resolvePackage` gains one extra
+  metadata fetch at the exact pinned version (`registry.npmjs.org/<name>/<version>`,
+  `pypi.org/pypi/<name>/<version>/json` — both real, documented per-version registry endpoints)
+  to confirm the version is registered and read its (possibly different) repository field, then
+  tries GitHub tag-README candidates at `refs/tags/v<version>/<file>` and
+  `refs/tags/<version>/<file>` (the explicit `refs/tags/` ref form, not a bare tag name as the
+  ref segment — the same shape the existing `HEAD` candidates already use, `refs/tags/`
+  disambiguates a tag from a same-named branch) BEFORE the existing unversioned llms.txt/README
+  chain. A CURATED (default-registry or config) entry is deliberately never re-resolved for a
+  version — its `urls` are hand-picked doc sources, not registry-metadata-derived, so there is
+  no version-specific candidate to try; `get_docs` says so explicitly rather than silently
+  ignoring the argument. An already-RESOLVED (non-curated) entry IS re-resolved for a version,
+  reusing the same re-resolution machinery `warm.ts`'s D-11 ecosystem-mismatch handling already
+  established.
+  **Non-silent fallback (D-50's own words), both directions:** `StampFacts` gained an optional
+  `version` field, set ONLY on a genuine version-specific match — never merely because a version
+  was requested. When a version was requested and none was matched, the response states the
+  substitution explicitly (`retrieval.ts`'s `versionFallbackNote`) rather than leaving a stamp
+  with no version field to be silently misread as "no version was asked for".
+  **Cache keys are already version-aware, no structural change needed:** the cache is keyed by
+  `(library, url)` (D-71/PAR-749), and a version-specific candidate URL
+  (`.../refs/tags/v1.2.3/README.md`) is a different string from an unversioned one, so it
+  already lands in a distinct cache entry — verified, not merely assumed, by a regression test
+  proving two different pinned versions of the same library get isolated cache entries. The
+  UNVERSIONED fallback candidates (llms.txt, homepage) are, by contrast, genuinely
+  version-agnostic URLs and deliberately DO share one cache entry across every version that
+  falls back to them — that is the correct behaviour (one fetch, not one per requested version,
+  for content that is not actually version-partitioned), made safe by the fallback statement
+  above rather than by adding a cache dimension that would just paper over the same fact.
+  Ref: `src/limits.ts`, `src/resolve.ts`, `src/retrieval.ts`, `src/project-deps.ts`,
+  `src/get-docs.ts`, `src/warm.ts`, `src/server.ts` (A11 / PAR-724).
+
+  **Round 1 review (code-reviewer + security-architect), two blocking findings fixed before
+  merge:**
+  - **security-architect S-1/S-2 (BLOCKING):** `version` — an MCP tool argument or a
+    manifest-captured string, neither trusted — reached a URL template
+    (`versionReadmeCandidates`'s `raw.githubusercontent.com/<owner>/<repo>/refs/tags/<tag>/…`)
+    and a rendered response (`resolvePackage`'s attempt lines) with no shape check: a `version`
+    containing `../../../../evil/repo/HEAD` escaped the intended GitHub path via ordinary URL
+    dot-segment normalisation, and a `version` containing a newline could forge a fake second
+    response line, the exact A17/S-1 class one interpolation over. Fixed with one shared gate,
+    `VERSION_SHAPE` (`src/package-names.ts`, D-48: one definition, not a local variant per
+    module) — alnum-first, then alnum/`.`/`+`/`_`/`-` only, which makes both attacks
+    structurally impossible (no `/`, `\`, or control character can ever appear) rather than
+    merely encoded or cleaned away. A version failing the shape is refused for fetching but
+    still named, safely clipped, in a non-silent note. Belt-and-braces: `versionReadmeCandidates`
+    itself re-proves the built URL still starts with the intended prefix after a `new URL()`
+    round-trip, and the Poetry manifest branch (the one parser whose old range-character
+    denylist did not exclude `/`) now shares the same gate.
+  - **code-reviewer B1 (BLOCKING):** a version-pinned resolution replaced the library's live
+    registry entry AND `resolved.json` with the version-tag URL first in `urls`, so a LATER,
+    plain `get_docs("<lib>")` (no version) would resolve straight to it and silently serve the
+    pinned document — D-50's rule violated in the other direction ("asked for latest, got a
+    pin"). Fixed by splitting what serves THIS call from what gets installed/persisted:
+    `ResolveOutcome.entry` keeps the full candidate list (so the document this call just cached
+    is actually reachable); a new `ResolveOutcome.persistedEntry`, set only when it differs,
+    carries the unversioned candidates alone and is what every caller now installs
+    (`installResolvedEntry(registry, out.persistedEntry ?? out.entry)`) and what
+    `saveResolvedEntry` writes. Regression test: resolve a version, then call `get_docs` again
+    with no version in the same process — the second call must not carry the pinned document.
+  - **code-reviewer B2 (BLOCKING):** re-resolving an already-resolved entry for a version could
+    fail outright (network down, rate-limited) without ever checking anything, and the response
+    still said "No document found for version X" — an affirmative claim the run never earned.
+    Fixed with a distinct, honest note for that case ("Could not check version X — the
+    resolution limit was reached / the check failed; showing the previously cached document
+    instead"), and `offline` is now honoured on this branch too (should-fix #4, same round).
+  - **code-reviewer B3:** this entry originally claimed a regression test proved the
+    cache-isolation reasoning above before that test existed. It exists now
+    (`test/resolve.test.ts`, "cache isolation across pinned versions"); the claim is no longer
+    aspirational.
+  - **should-fix, applied:** the npm `security-holder` placeholder is no longer counted toward
+    A16's existence claim (it is a real, registered record, not a genuine 404); the thin-match
+    comment no longer claims a mitigation that cannot apply at that exact budget.
+  Ref (round 1 fixes): `src/package-names.ts`, `src/resolve.ts`, `src/get-docs.ts`,
+  `src/project-deps.ts`, `src/server.ts`.
+
+---
+
+## D-77 — decided 2026-09-17, executing A16 / PAR-725
+
+- **D-77** 2026-09-17 — **A name that does not exist in npm or PyPI is now a structurally
+  distinct signal from a name that exists but has no reachable documentation.** Before this,
+  `resolve.ts` already queried both registries and already produced two different free-text
+  attempt strings for the two cases internally, but neither the `ResolveOutcome` type nor the
+  rendered message distinguished them for a caller — both read as one undifferentiated
+  "unresolved" outcome.
+  **The wording is scoped to what was actually checked, never broader:** "does not exist in npm
+  or PyPI" is used ONLY when both registries were genuinely queried and both answered a real
+  HTTP 404 (`fetcher.ts`'s new `FetchOutcome.httpStatus`, set only on a received response —
+  never on a timeout, a DNS failure or any other miss reason, which stay ambiguous and make no
+  existence claim). A caller that deliberately restricts the lookup to one registry
+  (`resolvePackage`'s `ecosystem` option — `warm.ts` always does this, matching a dependency to
+  the ecosystem its own manifest names) gets the narrower, equally honest claim scoped to just
+  that registry ("does not exist in npm"), never the two-registry phrasing it did not earn.
+  This is why `warm`'s own "not found" status is reachable at all: `warm` never queries both
+  registries for one dependency (by design, to halve metadata fetches and avoid the
+  same-name-on-both-registries ambiguity — a pre-existing decision, unchanged here), so the
+  two-registry claim alone would have made this status permanently unreachable from `warm`.
+  **Claim discipline (this repo's CLAUDE.md):** the only existence claim produced anywhere is
+  the fact itself — "X does not exist in npm or PyPI" (or the registry-scoped variant) — worded
+  so it cannot be read as "VibeCTX prevents hallucination" in general; the sibling wording for
+  the other case ("exists but publishes no documentation VibeCTX can reach") says in the same
+  sentence that this is NOT a sign the package doesn't exist, so the two cases cannot be
+  confused for each other even by a careless read.
+  **Four surfaces, one signal:** `resolve_library` / `get_docs` (both render
+  `couldNotResolveMessage`'s text directly, so no separate wiring was needed once the message
+  itself carried the distinction), the CLI (`vibectx resolve` prints the same text; the exit-code
+  check on the literal prefix `Could not resolve` still holds under every wording variant — pinned
+  by test), and `warm`'s status column (`"not found"` added to `WarmStatus`, distinct from
+  `"unresolved"`).
+  **Schema bump, per this repo's own K3 rule:** `PROJECT_RECORD_SCHEMA_VERSION` 1 → 2 — the
+  first REAL exercise of the bump machinery every schema-version constant in this codebase had
+  been carrying since 0.2.0 planning began, still at 1 everywhere else. An older reader that
+  stayed on version 1 and saw a `"not found"` row under an unchanged version would have silently
+  dropped it (K3's own stated reason for the rule); the bump makes that reader refuse the whole
+  file instead, with a visible "newer schemaVersion" note — the honest failure mode.
+  Ref: `src/fetcher.ts`, `src/resolve.ts`, `src/project-store.ts`, `src/warm.ts`,
+  `src/server.ts` (A16 / PAR-725).
+
+  **Round 1 review, one should-fix applied:** npm's `security-holder` placeholder (a real,
+  registered record — a taken-down name parked on npm's own security-holder account, not a
+  genuine 404) is no longer counted toward the "does not exist" claim — see D-76's own round-1
+  addendum for the full history; this line exists here because it is squarely an A16 claim-
+  discipline concern, not an A11 fetch-path one.
 
 ---
 
@@ -613,3 +767,173 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `src/get-docs.ts`, `src/retrieval.ts` (`StampFacts.redirectedFrom`) (PAR-776).
 
 ---
+
+## D-75 — decided 2026-09-17, executing PAR-778
+
+- **D-75** 2026-09-17 — **`package.json`'s `engines.node` floor is `>=20.19.0`, exactly matching
+  the version `vitest`'s `vite` dependency requires (`^20.19.0 || >=22.12.0`) at its low end,
+  not the fuller range.** The declared floor (`>=18` before this) covered building and running
+  the server but not the test toolchain, so a fresh clone on Node 18 installed successfully and
+  then failed `npm test` with no warning at install time (`engine-strict` is off, MEASURED —
+  npm reports `EBADENGINE` but does not refuse the install). CI already runs Node 22, which
+  satisfies both ends of `vite`'s range regardless of which floor `engines` states.
+  **Known, accepted gap:** `>=20.19.0` alone does not reject Node 22.0.0–22.11.x, which passes
+  the `engines` check but still fails on `vite`'s actual requirement (the gap between
+  `20.19.0` and `22.12.0`'s lower bound in a plain `>=` comparison). The fully accurate value
+  would be the disjunctive range itself (`"^20.19.0 || >=22.12.0"`); PAR-778's Done-when
+  specified the simpler `>=20.19.0` exactly, and that is what shipped — the simpler promise,
+  not a tighter enforcement gate. `engines` remains advisory either way (`engine-strict` is not
+  set), so neither form actually blocks an install; the value it did have was accuracy of the
+  documented claim, which this closes for the common case.
+  Ref: `package.json`, `package-lock.json`, `README.md`, `CONTRIBUTING.md` (PAR-778).
+
+---
+
+## D-78 — decided 2026-09-17, executing PAR-777
+
+- **D-78** 2026-09-17 — **Two spellings of a name that differ only by PEP 503 punctuation
+  folding (`foo-bar` / `foo_bar` / `Foo.Bar`) are the SAME package for registry identity —
+  applied with no ecosystem check — but remain DISTINCT for cache-directory key derivation
+  (D-71).** `normalisePyPiName` (`src/package-names.ts`) already existed and was already used,
+  with no ecosystem check, at three read-only/fail-safe call sites (`resolveLibrary`'s lookup
+  fallback; `curatedKeys`/`isTaken`'s resolved-record guard) — this item extends the SAME rule
+  to `validateAliases` and `applyLayer`'s config-layer merge, the two places PAR-777's own
+  Problem statement named as still comparing by exact case-fold only.
+  **The two decisions are not in tension, though they look it side by side:** D-71 calls
+  `foo.bar`/`foo_bar` "two DISTINCT, independently valid npm names" for `urlSlug`/`libDirName`
+  — a cache key only needs to be collision-RESISTANT (every key is hash-suffixed regardless of
+  spelling), so folding punctuation there would buy nothing and cost the human-readable prefix
+  its meaning. A REGISTRY name needs the opposite property: recognising that two spellings name
+  the SAME PyPI project is the entire point (that recognition is what PAR-777 was filed to
+  restore). Two different questions, each answered consistently on its own terms.
+  **Accepted, examined risk, not an unexamined one:** unlike the three precedent call sites
+  (which only ever find-or-refuse, never remove anything), `applyLayer`'s merge can DELETE an
+  existing canonical entry and replace it with a different one under a twin spelling. If two
+  genuinely unrelated packages ever shared a PEP 503 form, a config entry for one would
+  silently evict the other from the registry — the shipped defaults contain no such pair
+  (checked by hand and pinned by test), and npm's own registry has rejected new names differing
+  only by punctuation runs since well before this was written, but a pair predating that rule
+  is not impossible. Accepted for the same reason the three precedent sites already accepted
+  the parallel risk: the failure costs a confusing override or config error to diagnose, never
+  a wrong document silently served through a hijacked cache entry.
+  **A related, adjacent gap NOT closed by this item:** `resolved-store.ts`'s persisted
+  `resolved.json` still dedupes by exact name only, so it can hold both `typing-extensions` and
+  `typing_extensions` on disk (the in-memory `installResolvedEntry` guard catches it at use
+  time; the file itself does not). Filed separately as a Linear follow-up — PAR-777's own
+  Problem statement names only `validateAliases` and the config merge.
+  Ref: `src/registry.ts` (`validateAliases`, `applyLayer`), `src/package-names.ts`
+  (`normalisePyPiName`) (PAR-777).
+
+---
+
+## D-79 — decided 2026-09-17, executing A19 / PAR-728
+
+- **D-79** 2026-09-17 — **`vibectx doctor`'s per-library verdict is persisted (new store,
+  `doctor.json`) so `list_libraries` and `get_docs` can surface it without re-running a probe on
+  every call, and `DoctorReport` gains an optional `eviction` key with no schema bump.**
+  **Premise check against the tree first:** A19's own problem statement ("the classification
+  appears in neither `list_libraries` nor any `get_docs` response") was partly stale —
+  `list_libraries` already showed `[${kind}]` per row, derived directly from the cached document
+  via `classifySourceKind` (PAR-707), independent of any doctor run. What was genuinely missing,
+  and is the actual PAR-704 gap this item closes, is a PROBE verdict: whether a real topic query
+  against the entry actually answered, which only `doctor` computes and — before this — never
+  persists, so a library can be cleanly cached, `[index-only]`, and still fail every real query
+  with no warning anywhere outside a manual `vibectx doctor` run.
+  **Persistence, not re-probing:** doctor's verdict requires running probe queries through
+  `getDocsDetailed`, which can touch the network — not something `list_libraries` (documented as
+  network-free) or `get_docs` (a per-call budget, not a batch job) can afford to redo on every
+  call. `runDoctor` now writes each `LibraryReport`'s `{kind, healthy, reasons}` to a new store
+  (`src/doctor-store.ts`), mirroring `resolved-store.ts`'s exact K1 (every field re-validated on
+  read, a malformed record dropped whole rather than partially trusted)/K2 (a file with a newer
+  schemaVersion is left alone)/atomic-write shape; `list-libraries.ts` and `get-docs.ts` read it
+  back cheaply. The verdict is therefore only as fresh as the last `doctor` run — stated in the
+  store module's own doc comment, the same staleness the README already accepts for `doctor`
+  results in general.
+  **Where it surfaces, and how:** `list_libraries` gets a new `[doctor: <first reason>]` bracket,
+  appended after the existing `[resolved]` tag, present only when a persisted verdict for that
+  entry is unhealthy — absent (not "healthy") when doctor has never checked it, so the note never
+  overclaims the way the existing `[unknown]` kind already declines to. `get_docs`'s stamp
+  (`StampFacts`/`sourceStampLine`, A17/PAR-726) gains an optional `doctorKind`, set to the source
+  kind doctor found ONLY when unhealthy, rendered as `· doctor check failed (<kind>)` and
+  dropped together with `version`/`redirectedFrom` in `fitStampLine`'s existing "no invented
+  priority between independently-added optional fields" degrade step — the same idiom `version`
+  (D-76) and `redirectedFrom` (D-74) already established, reused rather than a new mechanism
+  invented for a third field.
+  **`DoctorReport.eviction` (CR-20260907-par-652-governance, `doctor-json-eviction`):** the
+  cache-eviction summary `formatDoctorTable` has always rendered in its TEXT output
+  (`lastEvictionSummary()`, PAR-652 item 7a) now also appears on the JSON report, as a plain new
+  optional key — no schemaVersion bump, per `DOCTOR_SCHEMA_VERSION`'s own documented rule that a
+  new key may be appended without one. Computed once in `runDoctor` and stored on the report;
+  `formatDoctorTable` was changed to read `report.eviction` rather than calling
+  `lastEvictionSummary()` a second time itself, so the text table and the JSON output can never
+  state two different answers to the same question from two separate reads of that process-wide
+  singleton.
+  Ref: `src/doctor-store.ts` (new), `src/doctor.ts`, `src/list-libraries.ts`, `src/get-docs.ts`,
+  `src/retrieval.ts` (A19 / PAR-728).
+
+  **Round 1 review (code-reviewer + security-architect), findings fixed before merge:**
+  - **security-architect S-1 (BLOCKING):** the cache directory — and `doctor.json` with it — is
+    process-global, but a library's config (and so `reasons`, built in part from config-authored
+    `probeQueries` text and from raw error messages that can carry filesystem paths or internal
+    hostnames) is per project. Rendering `reasons` in `list_libraries` would have leaked one
+    project's config-authored or error text into another project's tool response. Fixed by never
+    rendering `reasons` in either surface — `list-libraries.ts`'s `[doctor: ...]` note and
+    `get_docs`'s stamp both state only the closed `kind` enum and the check date; `reasons`
+    stays persisted (a same-project `doctor --json` reader can still see it) and still
+    cleaned/clipped on read, but no caller may treat that cleaning as sufficient to render it
+    across a project boundary.
+  - **security-architect S-2 / code-reviewer B2 (BLOCKING, found independently by both):**
+    `saveDoctorVerdicts`'s `warn` defaulted to a no-op, so a K2 refusal or a write failure was
+    silent forever — no stderr line, no report note, exactly the "fallbacks are stated, never
+    silent" rule this file's own D-13 exists to prevent. Fixed by defaulting `warn` to stderr
+    (matching `resolved-store.ts`/`writeProjectRecord`'s own default exactly) and adding
+    `DoctorReport.notes?: string[]` — a new optional key, no schema bump — rendered by
+    `formatDoctorTable` as `note: ...` lines, the same pattern `warm.ts` already established for
+    its own best-effort persistence failures.
+  - **security-architect S-3 (BLOCKING):** `checkedAt` was validated only by
+    `Number.isFinite(Date.parse(...))`, which is not a length backstop (`cache-meta.ts`'s own
+    MEASURED finding: an arbitrarily long fractional-seconds run still parses to a finite
+    timestamp) — a third, unbounded copy of a gap that file's own comment already tracks for two
+    OTHER stores. Fixed by exporting `cache-meta.ts`'s `ISO_INSTANT` and reusing it here (D-48:
+    one definition, not a third local variant) rather than duplicating the gap. Verdict COUNT was
+    also unbounded (the file merges by name and never prunes) — fixed with a new
+    `MAX_DOCTOR_VERDICTS` (`limits.ts`, 500, ~1.71 MiB worst case), oldest-by-`checkedAt` dropped
+    first once a save would exceed it, the same rule `ACTIVITY_LOG_MAX_ENTRIES` applies to its
+    own file.
+  - **code-reviewer B1 (BLOCKING):** an `--offline` doctor run's "unreachable" is the EXPECTED,
+    correct answer for that call (README's own documented `--offline` behaviour), not a genuine
+    probe failure — persisting it poisoned every later ONLINE response with a stale, misleading
+    warning the moment the library was actually fetched and answered fine. Fixed: `runDoctor`
+    skips persistence entirely for an offline run; an earlier online verdict already on disk is
+    left untouched.
+  - **code-reviewer B3 (BLOCKING):** an unhealthy verdict's stamp/note carried no date, so it
+    read as a present-tense fact forever, even long after the library was fixed and simply never
+    re-checked. Fixed: `checkedAt` is now rendered in both surfaces (`retrieval.ts`'s new
+    `StampFacts.doctorCheckedAt`, always set together with `doctorKind`; `list-libraries.ts`'s
+    note gained `, checked <date>`).
+  - **Should-fix, applied:** N-2 (a persisted `reasons` element that was not a string used to be
+    silently filtered rather than dropping the whole record — the K1 doc comment's own claim);
+    N-3 (a forged `reasons` array was filtered/sliced in full before being bounded — now bounded
+    to `MAX_RAW_REASONS` first); N-4 (`SOURCE_KINDS` is now a `Record<SourceKind, true>`, which
+    fails to compile if `SourceKind` gains a member this file does not also list, rather than
+    silently rejecting the new kind at runtime); N-5 (`saveDoctorVerdicts` now round-trips each
+    verdict through `toDoctorVerdict(toRecord(v))` before writing, matching
+    `saveResolvedEntry`'s "the write side must produce something the read side would accept");
+    README updated for all three user-visible contract changes (the stamp shape, the `doctor
+    --json` key list, and the new `list_libraries`/`get_docs` doctor-verdict surfacing) —
+    code-reviewer S1.
+  - **Filed as Linear follow-ups, not fixed here** (all explicitly non-blocking): a persisted
+    verdict is keyed by bare library name with no URL/config scoping, so two projects with
+    different configs for the same name share one verdict (security-architect's accepted
+    fixed-vocabulary display closes the information-leak half of this; the correctness half —
+    a same-named-different-library verdict misapplied — is not); `readDoctorVerdicts()` has no
+    memoisation on what is now a per-call hot path; `doctor`'s own probes read their own
+    just-persisted verdict, adding a small self-referential stamp cost to the very measurement
+    that produced it; nothing prunes a verdict for a library removed from every registry (bounded
+    by `MAX_DOCTOR_VERDICTS`, not actively pruned); `doctor.json` is read without an `lstat`
+    regular-file gate first, a gap shared with `resolved-store.ts`'s own read path (parity, not a
+    new regression, but a new HOT-PATH exposure); `search` responses do not carry the same
+    doctor-verdict note `get_docs` does.
+  Ref (round 1 fixes): `src/doctor-store.ts`, `src/doctor.ts`, `src/list-libraries.ts`,
+  `src/get-docs.ts`, `src/retrieval.ts`, `src/cache-meta.ts`, `src/limits.ts`, `src/cli.ts`,
+  `README.md`.

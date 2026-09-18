@@ -6,11 +6,14 @@ import {
   DEPENDENCY_DENYLIST,
   isDeniedDependency,
   parsePackageJsonDeps,
+  parsePackageJsonVersions,
   parsePyprojectDeps,
+  parsePyprojectVersions,
   parseRequirementsTxt,
   parsePackageLockDeps,
   parsePnpmLockDeps,
   requirementName,
+  requirementVersion,
   discoverProjectDependencies,
   MANIFEST_MAX_BYTES,
   cleanText,
@@ -127,6 +130,38 @@ describe("parsePackageJsonDeps", () => {
   });
 });
 
+describe("parsePackageJsonVersions (A11/PAR-724): an exact pin, never a range's lower bound", () => {
+  it("captures a bare semver as an exact pin", () => {
+    const versions = parsePackageJsonVersions(JSON.stringify({ dependencies: { next: "15.0.0" } }));
+    expect(versions.get("next")).toBe("15.0.0");
+  });
+
+  it("does NOT capture a range — a range names no single version to match docs against", () => {
+    const versions = parsePackageJsonVersions(
+      JSON.stringify({ dependencies: { react: "^19.0.0", tilde: "~1.2.3", star: "*", xrange: "1.2.x", or: "^1 || ^2" } }),
+    );
+    expect(versions.size).toBe(0);
+  });
+
+  it("excludes npm: aliases and local (file:/link:/workspace:/portal:) specs — neither is a version of the name", () => {
+    const versions = parsePackageJsonVersions(
+      JSON.stringify({ dependencies: { "my-react": "npm:react@19.0.0", local: "file:../local", sibling: "workspace:*" } }),
+    );
+    expect(versions.size).toBe(0);
+  });
+
+  it("dependencies then devDependencies, first occurrence wins", () => {
+    const versions = parsePackageJsonVersions(JSON.stringify({ dependencies: { a: "1.0.0" }, devDependencies: { a: "2.0.0" } }));
+    expect(versions.get("a")).toBe("1.0.0");
+  });
+
+  it("a pre-release / build-metadata exact pin is still exact", () => {
+    const versions = parsePackageJsonVersions(JSON.stringify({ dependencies: { a: "1.0.0-beta.1", b: "1.0.0+build.5" } }));
+    expect(versions.get("a")).toBe("1.0.0-beta.1");
+    expect(versions.get("b")).toBe("1.0.0+build.5");
+  });
+});
+
 describe("requirementName (PEP 508 → project name)", () => {
   it.each([
     ["requests", "requests"],
@@ -151,6 +186,32 @@ describe("requirementName (PEP 508 → project name)", () => {
   );
 });
 
+describe("requirementVersion (A11/PAR-724): an == pin, never a range's lower bound", () => {
+  it.each([
+    ["Django==5.0", "5.0"],
+    ["httpx[http2]==0.27.0", "0.27.0"],
+    ['uvicorn==0.30.0 ; python_version >= "3.10"', "0.30.0"],
+    ["  numpy==1.26.4  # trailing comment", "1.26.4"],
+  ])("%s → %s", (spec, version) => {
+    expect(requirementVersion(spec)).toBe(version);
+  });
+
+  it.each([
+    "requests>=2.31,<3", // a range, not a pin
+    "Typing.Extensions~=4.0", // ~= is a range
+    "requests", // no version at all
+    "pytest!=7.0.0", // != names an exclusion, not a pin
+    'httpx==0.27.0,!=0.27.1 ; python_version >= "3.10"', // a second, comma-separated constraint
+  ])("skips %j (not a single exact pin)", (spec) => {
+    expect(requirementVersion(spec)).toBeUndefined();
+  });
+
+  it("undefined for anything requirementName itself would skip (not a plain requirement)", () => {
+    expect(requirementVersion("-r other.txt")).toBeUndefined();
+    expect(requirementVersion("./local/path")).toBeUndefined();
+  });
+});
+
 describe("parseRequirementsTxt", () => {
   it("strips versions, extras, markers, comments and continuation lines; reports -r includes", () => {
     const { names, includes } = parseRequirementsTxt(
@@ -172,6 +233,13 @@ describe("parseRequirementsTxt", () => {
     );
     expect(names).toEqual(["fastapi", "uvicorn", "sqlalchemy", "typing-extensions"]);
     expect(includes).toEqual(["requirements-base.txt", "requirements-extra.txt"]);
+  });
+
+  it("A11/PAR-724: captures an == pin per name, first occurrence wins; a range or unpinned name is absent from the map", () => {
+    const { versions } = parseRequirementsTxt(["django==4.2.3", "fastapi>=0.110", "uvicorn", "django==9.9.9  # ignored, first wins"].join("\n"));
+    expect(versions.get("django")).toBe("4.2.3");
+    expect(versions.has("fastapi")).toBe(false);
+    expect(versions.has("uvicorn")).toBe(false);
   });
 });
 
@@ -246,6 +314,65 @@ dependencies = ["nope"]
 
   it("returns [] for a file with none of the tables", () => {
     expect(parsePyprojectDeps('[tool.black]\nline-length = 88\n')).toEqual([]);
+  });
+});
+
+describe("parsePyprojectVersions (A11/PAR-724): PEP 508 == pins and Poetry exact strings", () => {
+  it("PEP 508 == pins from [project].dependencies / optional-dependencies / dependency-groups", () => {
+    const versions = parsePyprojectVersions(`
+[project]
+dependencies = ["fastapi==0.110.0", "httpx[http2]>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.0.0"]
+
+[dependency-groups]
+test = ["pytest-cov==5.0.0"]
+`);
+    expect(versions.get("fastapi")).toBe("0.110.0");
+    expect(versions.has("httpx")).toBe(false); // >= is a range, not a pin
+    expect(versions.get("pytest")).toBe("8.0.0");
+    expect(versions.get("pytest-cov")).toBe("5.0.0");
+  });
+
+  it("Poetry: a plain quoted string with no range character is an exact pin; ^/~/*/inline-table are not", () => {
+    const versions = parsePyprojectVersions(`
+[tool.poetry.dependencies]
+python = "^3.11"
+requests = "^2.31"
+django = "4.2.3"
+"Typing_Extensions" = "4.9.0"
+star = { version = "*", optional = true }
+boto3 = { version = "1.0.0", extras = ["s3"] }
+`);
+    expect(versions.has("python")).toBe(false); // excluded the same way parsePyprojectDeps excludes it from names
+    expect(versions.has("requests")).toBe(false); // ^2.31 is a range
+    expect(versions.get("django")).toBe("4.2.3");
+    expect(versions.get("typing-extensions")).toBe("4.9.0"); // PEP 503 folded, matching requirementName
+    expect(versions.has("star")).toBe(false); // an inline table, not a plain string
+    expect(versions.has("boto3")).toBe(false); // ditto — inline table wins even though its version field looks exact
+  });
+
+  it("skips a path/git/url Poetry source, same as parsePyprojectDeps does for names (R2)", () => {
+    const versions = parsePyprojectVersions(`
+[tool.poetry.dependencies]
+local-lib = { path = "../local-lib", develop = true }
+`);
+    expect(versions.size).toBe(0);
+  });
+
+  it("returns an empty map for a file with none of the tables", () => {
+    expect(parsePyprojectVersions("[tool.black]\nline-length = 88\n").size).toBe(0);
+  });
+
+  it("(security-architect, A11/PAR-724 round 1 S-2 / round 2 T-1) rejects a path-traversal or slash-bearing Poetry version string — this is the manifest path that bypasses the MCP schema entirely, so the shape gate must hold here on its own", () => {
+    const versions = parsePyprojectVersions(`
+[tool.poetry.dependencies]
+evil = "../../../../evil/repo/HEAD"
+alsoevil = "1.2/3"
+backslash = "1.2\\\\3"
+`);
+    expect(versions.size).toBe(0);
   });
 });
 
@@ -327,6 +454,21 @@ describe("discoverProjectDependencies", () => {
       { name: "pytest", ecosystem: "pypi", source: "requirements-dev.txt" },
     ]);
     expect(out.notes).toEqual([]);
+  });
+
+  it("A11/PAR-724: an exact pin from each manifest format threads through to ProjectDependency.version; a range does not", () => {
+    write("package.json", JSON.stringify({ dependencies: { next: "15.0.0", react: "^19.0.0" } }));
+    write("pyproject.toml", '[project]\ndependencies = ["fastapi==0.110.0", "httpx>=0.27"]\n');
+    write("requirements.txt", "django==4.2.3\nuvicorn\n");
+    const out = discoverProjectDependencies(dir);
+    expect(out.dependencies).toEqual([
+      { name: "next", ecosystem: "npm", source: "package.json", version: "15.0.0" },
+      { name: "react", ecosystem: "npm", source: "package.json" }, // range: no version claimed
+      { name: "fastapi", ecosystem: "pypi", source: "pyproject.toml", version: "0.110.0" },
+      { name: "httpx", ecosystem: "pypi", source: "pyproject.toml" },
+      { name: "django", ecosystem: "pypi", source: "requirements.txt", version: "4.2.3" },
+      { name: "uvicorn", ecosystem: "pypi", source: "requirements.txt" },
+    ]);
   });
 
   it("-r includes are followed one level only, relative to the including file, and never outside the project directory", () => {
@@ -485,6 +627,12 @@ describe("S1 — no super-linear parsing: 1 MiB pathological lines finish inside
       new Set([
         "\\r\\n?", // fixed width
         "\\\\\\n\\s*", // anchored on a literal backslash-newline
+        // A11/PAR-724: two more, both a single character class (no nested quantifier, no
+        // alternation) applied linearly, the same class this tripwire already accepts —
+        // POETRY_RANGE_CHARS was removed (security-architect S-2): the Poetry version branch
+        // now shares VERSION_SHAPE (imported from package-names.ts, so no new literal here).
+        "^\\d+\\.\\d+\\.\\d+(?:[-+][0-9A-Za-z.-]+)?$", // EXACT_SEMVER — anchored, one optional group
+        "^[A-Za-z0-9][A-Za-z0-9.+!_-]*$", // the exact-version-token shape in requirementVersion
       ]),
     );
   });

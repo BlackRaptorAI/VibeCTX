@@ -47,8 +47,15 @@ import { cleanText } from "./text.js";
  *  grounds: `warmedAt` and `failedAt` are strict ISO-8601 UTC instants (`…Z`), and a reader
  *  of this version treats any other shape as a corrupt record (`warmedAt`) or a bad row
  *  (`failedAt`) — so widening it, to an offset like `+01:00` for instance, requires a version
- *  bump exactly as the status vocabulary does. Version 1 is the first shipped shape (0.2.0). */
-export const PROJECT_RECORD_SCHEMA_VERSION = 1;
+ *  bump exactly as the status vocabulary does. Version 1 is the first shipped shape (0.2.0).
+ *
+ *  Bumped to 2 (A16/PAR-725): "not found" added to WARM_STATUSES — the existence signal (a
+ *  dependency name that does not exist in npm or PyPI, distinct from `unresolved`'s "exists,
+ *  no reachable docs"). Per the K3 rule above: a reader still on version 1 that saw a "not
+ *  found" row under an unchanged schemaVersion would silently drop it with no warning; the
+ *  bump makes that reader refuse the whole file instead (K2's "newer schemaVersion" note),
+ *  which is the honest failure mode. */
+export const PROJECT_RECORD_SCHEMA_VERSION = 2;
 
 export type WarmStatus =
   | "cached"
@@ -56,6 +63,7 @@ export type WarmStatus =
   | "resolved+cached"
   | "unresolved"
   | "unresolved (recent)"
+  | "not found"
   | "denied (noise list)"
   | "skipped (rate cap)"
   | "unreachable";
@@ -66,6 +74,7 @@ export const WARM_STATUSES: readonly WarmStatus[] = [
   "resolved+cached",
   "unresolved",
   "unresolved (recent)",
+  "not found",
   "denied (noise list)",
   "skipped (rate cap)",
   "unreachable",

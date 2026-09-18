@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeCache, urlSlug, libDirName } from "../src/cache.js";
@@ -14,6 +14,8 @@ import {
   DOCTOR_CONCURRENCY,
   type DoctorReport,
 } from "../src/doctor.js";
+import { readDoctorVerdicts } from "../src/doctor-store.js";
+import { enforceCacheSizeCap, lastEvictionSummary, resetCacheEvictionState } from "../src/cache-evict.js";
 
 let dir: string;
 
@@ -621,5 +623,137 @@ describe("doctorToolText (MCP doctor tool body)", () => {
     );
     expect(out).toMatch(/\nelysia\s+readme\s+0\.0h\s+"ergonomic framework" \(derived\) → answered/);
     expect(out).toContain("1/1 libraries healthy");
+  });
+});
+
+describe("A19/PAR-728: runDoctor persists each library's verdict to doctor-store", () => {
+  it("saves kind, healthy and reasons, keyed by library name, after a full-registry run", async () => {
+    writeCache("fastify", FASTIFY_INDEX_URL, fastifyIndex());
+    stubFetch({}); // every followed page 404s: unhealthy, index-only
+    writeCache("react", REACT_URL, REACT_DOC);
+    await runDoctor(
+      reg(
+        { name: "fastify", urls: [FASTIFY_INDEX_URL], probeQueries: ["querystring parsing"] },
+        { name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] },
+      ),
+    );
+    const verdicts = readDoctorVerdicts();
+    expect(verdicts.get("fastify")).toMatchObject({ name: "fastify", kind: "index-only", healthy: false });
+    expect(verdicts.get("fastify")?.reasons.join(" ")).toMatch(/index-only.*no links followed/);
+    expect(verdicts.get("react")).toMatchObject({ name: "react", kind: "full-text", healthy: true, reasons: [] });
+  });
+
+  it("a --library run merges into the store rather than replacing it: an earlier library's verdict survives", async () => {
+    writeCache("fastify", FASTIFY_INDEX_URL, fastifyIndex());
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    await runDoctor(
+      reg(
+        { name: "fastify", urls: [FASTIFY_INDEX_URL], probeQueries: ["querystring parsing"] },
+        { name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] },
+      ),
+    );
+    await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }), { library: "react" });
+    expect(readDoctorVerdicts().get("fastify")).toBeDefined(); // not erased by the react-only run
+    expect(readDoctorVerdicts().get("react")?.healthy).toBe(true);
+  });
+
+  it("code-reviewer round 1, B1 (BLOCKING): an --offline run never persists a verdict — its 'unreachable' is the expected answer for that call, not a genuine probe failure", async () => {
+    const spy = vi.fn();
+    vi.stubGlobal("fetch", spy);
+    await runDoctor(reg({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"], probeQueries: ["x"] }), { offline: true });
+    expect(spy).not.toHaveBeenCalled();
+    expect(readDoctorVerdicts().size).toBe(0); // nothing written at all
+  });
+
+  it("B1: an --offline run never overwrites an earlier ONLINE run's good verdict with a misleading offline 'unreachable' one", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] })); // online: healthy
+    expect(readDoctorVerdicts().get("react")?.healthy).toBe(true);
+    vi.stubGlobal("fetch", vi.fn());
+    await runDoctor(reg({ name: "ghost", urls: ["https://ghost.example.com/llms.txt"] }), { offline: true });
+    expect(readDoctorVerdicts().get("react")?.healthy).toBe(true); // untouched by the unrelated offline run
+  });
+
+  it("code-reviewer/security-architect round 1, B2/S-2 (BLOCKING): a save refused under K2 is reported on stderr AND as a report note, not silently", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "doctor.json"), JSON.stringify({ schemaVersion: 99, verdicts: [] }), "utf8");
+    const warned: string[] = [];
+    const report = await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }), {
+      warn: (m) => warned.push(m),
+    });
+    expect(warned.some((m) => m.includes("newer schemaVersion"))).toBe(true);
+    expect(report.notes).toBeDefined();
+    expect(report.notes!.join(" ")).toContain("doctor verdicts not saved");
+    expect(formatDoctorTable(report)).toContain("note: doctor verdicts not saved");
+    const raw = JSON.parse(readFileSync(join(dir, "doctor.json"), "utf8"));
+    expect(raw.verdicts).toEqual([]); // untouched
+  });
+
+  it("B2/S-2: with no warn given, the default writes to process.stderr, not nowhere", async () => {
+    writeCache("react", REACT_URL, REACT_DOC);
+    stubFetch({});
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "doctor.json"), JSON.stringify({ schemaVersion: 99, verdicts: [] }), "utf8");
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }));
+      expect(spy).toHaveBeenCalled();
+      expect(spy.mock.calls.map((c) => String(c[0])).join(" ")).toContain("newer schemaVersion");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("A19/PAR-728: DoctorReport.eviction (the doctor --json eviction key)", () => {
+  beforeEach(() => resetCacheEvictionState());
+  afterEach(() => {
+    delete process.env.VIBECTX_CACHE_MAX_MB;
+    resetCacheEvictionState();
+  });
+
+  it("carries the last eviction summary when this process has evicted something", async () => {
+    writeCache("react", REACT_URL, REACT_DOC.repeat(200));
+    writeCache("react", REACT_URL + "2", REACT_DOC.repeat(200));
+    resetCacheEvictionState(); // a later run: nothing here was written by "this" run
+    process.env.VIBECTX_CACHE_MAX_MB = String(2000 / (1024 * 1024));
+    enforceCacheSizeCap(dir, { warn: () => {} });
+    const summary = lastEvictionSummary();
+    expect(summary?.evicted.length).toBeGreaterThan(0);
+    stubFetch({});
+    const report = await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }));
+    expect(report.eviction).toEqual(summary);
+  });
+
+  it("is absent (not just undefined-valued) in the JSON report when nothing has been evicted", async () => {
+    stubFetch({});
+    const report = await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }));
+    expect(report.eviction).toBeUndefined();
+    const json = JSON.parse(JSON.stringify(report));
+    expect("eviction" in json).toBe(false);
+  });
+
+  it("formatDoctorTable renders report.eviction, not a live re-read of lastEvictionSummary()", async () => {
+    stubFetch({});
+    const report = await runDoctor(reg({ name: "react", urls: [REACT_URL], probeQueries: ["useEffect cleanup"] }));
+    const withEviction: DoctorReport = {
+      ...report,
+      eviction: {
+        sweptAt: "2026-09-17T00:00:00.000Z",
+        capBytes: 1000,
+        totalBytesBefore: 2000,
+        totalBytesAfter: 500,
+        evicted: [{ library: "zod_abcdef012345", document: "slug", bytes: 1500, fetchedAt: "2026-09-01T00:00:00.000Z" }],
+        protectedFromEviction: 0,
+        stillOverCap: false,
+      },
+    };
+    expect(formatDoctorTable(withEviction)).toContain("cache: evicted 1 least-recently-fetched document(s)");
+    expect(formatDoctorTable(withEviction)).toContain("zod/slug"); // hash suffix stripped, display-only
+    expect(formatDoctorTable(report)).not.toContain("cache: evicted");
   });
 });
