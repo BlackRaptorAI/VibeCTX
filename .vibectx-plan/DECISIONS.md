@@ -1132,3 +1132,65 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref (round 4 fixes): `.github/workflows/ci.yml`, `test/engines.test.ts`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`, `CONTRIBUTING.md`,
   `CLAUDE.md`.
+
+---
+
+## D-81 — decided 2026-09-18, executing PAR-832a
+
+- **D-81** 2026-09-18 — **A followed index link that comes back `text/html` gets one retry, not
+  a shrug: first with `Accept: text/markdown, text/plain;q=0.9, */*;q=0.1` on the SAME url,
+  then — only if still HTML — once more with a `.md`-suffixed url. Scoped to followed index
+  links only; the primary-document fetch path is deliberately untouched.**
+  **The investigation this executes (PAR-832, findings-only):** five of the shipped top-30 —
+  next.js, shadcn, hono, clerk, motion — were `index-only` with zero links followed, and
+  `curl`-ing every dropped link directly against the real sites found TWO independent root
+  causes, not five bespoke ones. Root cause A (four libraries): `src/fetcher.ts` sent no
+  `Accept` header and refused any `text/html` response whose url didn't already end in `.md`,
+  with no retry — and every dropped same-host link on next.js, shadcn, motion and hono was
+  exactly that: a real 200 response, just HTML instead of markdown. Root cause B (clerk alone,
+  NOT fixed by this item): the curated entry's first URL, `clerk.com/llms-full.txt`, is a
+  766-byte META-index of other llms-full.txt files, not a content index — none of its six link
+  titles match any real query, so nothing even reaches the follow stage. A registry-config fix,
+  unrelated to fetching, deferred to its own item.
+  **No single convention was universal, which is why the fix has two strategies, not one:**
+  MEASURED directly against the real sites (2026-09-18) — hono.dev and motion.dev honour
+  `Accept: text/markdown` on the FIRST request (no `.md` needed); ui.shadcn.com ignores
+  `Accept` entirely but serves markdown at the same path plus `.md`; nextjs.org's `/docs/` and
+  `/blog/` pages honour `Accept` but its `/learn/*` interactive-tutorial pages return HTML
+  under either convention — genuinely no markdown form exists there, next.js's own `llms.txt`
+  design, not a vibectx defect. Neither strategy alone would have closed more than one or two
+  of the four libraries; the two together, tried in that order, close three fully (shadcn,
+  hono, motion) and next.js as far as its own site allows.
+  **Scope, held deliberately narrow:** `FetchOptions` gained one field, `accept?: string`,
+  read only when present — `getLibraryDoc` (the primary-document path) never sets it, so
+  primary-document fetches are byte-for-byte unchanged; content negotiation there would risk
+  changing what gets cached for a library that already works today, a far larger blast radius
+  than this item's own scope. Verified, not merely asserted: a test pins that `getLibraryDoc`
+  sends no `accept` header and performs exactly one request against an HTML response, same as
+  before this item.
+  **Security — the retry is re-validated, not trusted because its parent was:** the `.md` url
+  is built by `URL`-parsing the original (`u.pathname += ".md"`), never string concatenation,
+  so it cannot change host or protocol. The retry is issued by `fetchLinkedPage` calling
+  ITSELF with the new url — which re-runs the function's own `isAllowedLink` check from its own
+  top, the identical gate any other followed link gets, not a weaker or skipped one. Verified
+  with a test: a retry whose response redirects to a host outside the policy is refused, exactly
+  like any other followed link's redirect would be. No infinite loop is possible: the recursive
+  call's url always ends in `.md`, and `fetchUrl`'s own `!url.endsWith(".md")` guard means an
+  `.md` url can never itself be classified `htmlNotText` — so the recursive call can take this
+  branch at most zero further times.
+  **Budget:** this does not add a new followed-LINK to any call's budget — `get-docs.ts`'s
+  `followLimit()` (3, or 5 for a large index) still bounds how many DISTINCT candidate links one
+  `get_docs`/`doctor` probe may attempt. What changes is the cost of ONE attempted link: up to 2
+  requests instead of 1 (the negotiated attempt, then the `.md` retry only when that came back
+  HTML) — a bounded, proportional at-most-doubling of request count for a call that previously
+  followed nothing useful anyway, not an unbounded or per-call-uncapped increase.
+  **Verified against the real sites, not just fixtures:** `vibectx doctor` before this branch
+  (fresh cache): next.js/shadcn/hono/motion/clerk all unhealthy, `followed: 0` each. After:
+  next.js `healthy: true, followed: 1, dropped: 2` (the two genuinely unfixable `/learn/*`
+  pages); shadcn `healthy: true, followed: 5, dropped: 0`; hono `healthy: true, followed: 9`;
+  motion `healthy: true, followed: 10, dropped: 0`; clerk unchanged, still unhealthy — root
+  cause B, out of this item's scope, exactly as predicted. A full-registry `doctor --json` run
+  went from the CR-20260917 record's own 24/30 to **28/30** — the two still unhealthy are
+  clerk (root cause B) and tailwindcss (a pre-existing, unrelated `readme`-kind no-match gap
+  already recorded in that same CR, untouched by this item).
+  Ref: `src/fetcher.ts`, `test/fetcher.test.ts`, `test/debug.test.ts` (PAR-832a, PAR-832).

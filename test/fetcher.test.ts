@@ -750,3 +750,114 @@ describe("fetchUrl — httpStatus (A16/PAR-725)", () => {
     expect(ok.httpStatus).toBeUndefined();
   });
 });
+
+/** PAR-832a — real-site shapes found in the PAR-832 investigation, reproduced as fixtures:
+ *  hono.dev/motion.dev negotiate `Accept` correctly; ui.shadcn.com does not negotiate but
+ *  serves markdown at the same path plus `.md`; nextjs.org's `/learn/*` tutorial pages have no
+ *  markdown form under either convention and must fail as `unavailable`, not loop. */
+describe("fetchLinkedPage content negotiation and .md-suffix retry (PAR-832a)", () => {
+  const source = "https://docs.example.com/llms.txt";
+  const html = (body = "<!doctype html><html><body>rendered page</body></html>") =>
+    new Response(body, { status: 200, headers: { "content-type": "text/html" } });
+  const markdown = (body: string) => new Response(body, { status: 200, headers: { "content-type": "text/markdown" } });
+
+  it("hono/motion shape: the site honours Accept, so the FIRST request already carries it and succeeds in one fetch", async () => {
+    const link = "https://docs.example.com/guide/middleware";
+    const spy = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const accept = (init?.headers as Record<string, string> | undefined)?.["accept"];
+      return accept?.includes("text/markdown") ? markdown("# Middleware\n\nUse app.use().") : html();
+    });
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    expect(result).toMatchObject({ status: "ok", page: { content: "# Middleware\n\nUse app.use().", url: link } });
+    expect(spy).toHaveBeenCalledTimes(1); // negotiated on the first attempt — no retry needed
+    expect(readCache("lib", link, 999)?.content).toBe("# Middleware\n\nUse app.use().");
+  });
+
+  it("shadcn shape: Accept is ignored (always HTML), but the .md-suffixed URL serves markdown — exactly one retry, cached under the .md URL", async () => {
+    const link = "https://docs.example.com/components/button";
+    const mdLink = "https://docs.example.com/components/button.md";
+    const spy = vi.fn(async (url: unknown) => (String(url) === mdLink ? markdown("# Button\n\nA button component.") : html()));
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    expect(result).toMatchObject({ status: "ok", page: { content: "# Button\n\nA button component.", url: mdLink } });
+    expect(spy).toHaveBeenCalledTimes(2); // the negotiated attempt (still HTML), then the .md retry
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([link, mdLink]);
+    // Two distinct URLs, two distinct cache entries — never conflated (D-71/PAR-749).
+    expect(readCache("lib", mdLink, 999)?.content).toBe("# Button\n\nA button component.");
+    expect(readCache("lib", link, 999)).toBeUndefined();
+  });
+
+  it("next.js /learn/* shape: HTML even negotiated, and the .md retry 404s — fails cleanly as unavailable after exactly 2 requests, never loops", async () => {
+    const link = "https://docs.example.com/learn/dashboard-app";
+    const mdLink = "https://docs.example.com/learn/dashboard-app.md";
+    const spy = vi.fn(async (url: unknown) =>
+      String(url) === mdLink ? new Response("not found", { status: 404 }) : html(),
+    );
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    expect(result).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls.map((c) => String(c[0]))).toEqual([link, mdLink]);
+    expect(readCache("lib", link, 999)).toBeUndefined();
+    expect(readCache("lib", mdLink, 999)).toBeUndefined();
+  });
+
+  it("next.js mixed shape in one probe: a link whose Accept-negotiated request already succeeds costs 1 fetch; a sibling link needing the full retry-then-fail path costs 2 — the two links' budgets don't interact", async () => {
+    const blogLink = "https://docs.example.com/blog/next-16";
+    const tutorialLink = "https://docs.example.com/learn/dashboard-app";
+    const tutorialMdLink = "https://docs.example.com/learn/dashboard-app.md";
+    const spy = vi.fn(async (url: unknown, init?: RequestInit) => {
+      const u = String(url);
+      if (u === blogLink) return markdown("# Next 16\n\nRelease notes.");
+      if (u === tutorialMdLink) return new Response("not found", { status: 404 });
+      return html();
+    });
+    vi.stubGlobal("fetch", spy);
+    const blog = await fetchLinkedPage("lib", blogLink, source);
+    const tutorial = await fetchLinkedPage("lib", tutorialLink, source);
+    expect(blog).toMatchObject({ status: "ok", page: { content: "# Next 16\n\nRelease notes." } });
+    expect(tutorial).toEqual({ status: "unavailable" });
+    expect(spy).toHaveBeenCalledTimes(3); // 1 for blogLink, 2 for tutorialLink (negotiated + .md retry)
+  });
+
+  it("does not retry a URL that already ends in .md — no infinite recursion, and the html-not-text guard itself already exempts .md URLs", async () => {
+    const link = "https://docs.example.com/already-markdown.md";
+    const spy = vi.fn(async () => html()); // an .md URL serving HTML is trusted as-is (fetchUrl's own rule)
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source);
+    // fetchUrl's `!url.endsWith(".md")` guard means this is never classified htmlNotText at
+    // all — the HTML body is accepted as the document content, exactly as before PAR-832a.
+    expect(result).toMatchObject({ status: "ok", page: { content: expect.stringContaining("rendered page"), url: link } });
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the .md retry is re-validated through link-policy, not trusted because the original URL was allowed: a redirect on the retry to a disallowed host is refused, exactly like any other followed link", async () => {
+    const policy = { allowedHosts: ["docs.example.com"] };
+    const link = "https://docs.example.com/components/button";
+    const mdLink = "https://docs.example.com/components/button.md";
+    const spy = vi.fn(async (url: unknown) => {
+      if (String(url) === mdLink) return responseAt("https://evil.example.net/button.md", "SECRET"); // redirected off-policy
+      return html();
+    });
+    vi.stubGlobal("fetch", spy);
+    const result = await fetchLinkedPage("lib", link, source, 168, false, policy);
+    expect(result).toEqual({ status: "refused" });
+    expect(spy).toHaveBeenCalledTimes(2); // the negotiated attempt, then the retry that got refused
+    expect(readCache("lib", mdLink, 999)).toBeUndefined();
+  });
+
+  it("a followed link's primary-document counterpart (getLibraryDoc) never sends Accept and never retries with .md — the scope is followed links only", async () => {
+    const spy = vi.fn(async () => html());
+    vi.stubGlobal("fetch", spy);
+    const entry = { name: "lib", urls: ["https://docs.example.com/llms.txt"] };
+    const doc = await getLibraryDoc(entry);
+    // An HTML response on the PRIMARY path is (unchanged by this item) still a plain miss —
+    // no candidate URL left, no cache, so the call returns undefined. What this test pins is
+    // the REQUEST: exactly one, and it carries no `accept` header — no .md retry was attempted.
+    expect(doc).toBeUndefined();
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [, init] = spy.mock.calls[0];
+    expect((init?.headers as Record<string, string> | undefined)?.["accept"]).toBeUndefined();
+  });
+});
