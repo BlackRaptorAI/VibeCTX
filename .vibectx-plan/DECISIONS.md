@@ -954,12 +954,18 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   code-reviewed, already exists on the unmerged `release-0.2.0` branch (`cf610d6`, sharpened by
   `5715301`/`7c4af55`), which was never checked. That row makes a finding this item does NOT
   close — see below — so the CR row here is written narrowly, as partial progress against
-  `release-0.2.0`'s existing row rather than as its (nonexistent-on-`main`) replacement, with an
-  editorial note pointing at `par-831-pretag-reconciliation` (itself branched from
-  `release-0.2.0`, already touching the same file) as the place the two get reconciled before
-  the 0.2.0 tag. This is a sharper version of the same lesson D-73 recorded: a premise check is
-  only as good as the ref it's checked against, and "the committed tree" can mean more than one
-  unmerged branch at once.
+  `release-0.2.0`'s existing row rather than as its (nonexistent-on-`main`) replacement, noting
+  the two rows must be reconciled when `release-0.2.0` merges (`git merge-tree` confirms they
+  conflict textually in this exact table, so the merge will force a resolution). This is a
+  sharper version of the same lesson D-73 recorded: a premise check is only as good as the ref
+  it's checked against, and "the committed tree" can mean more than one unmerged branch at once
+  — a lesson round 1's OWN fix then repeated once more (code-reviewer round 2, B-2): the first
+  draft of this correction named `par-831-pretag-reconciliation` as "branched from
+  `release-0.2.0`, already touching the same file," asserted without checking. Checked: it is
+  branched from `main` (same merge-base as `release-0.2.0`'s own base, `032549b`), touches only
+  `CLAUDE.md`/`CONTRIBUTING.md`/`RELEASING.md`, and its `RELEASING.md` checklist has no step
+  covering §5 row deduplication — it is not where this gets handled, and the record no longer
+  claims it is.
   **What this item actually closes, and what it does not:** `release-0.2.0`'s row observes that
   `vite`'s own declared range is `^20.19.0 || >=22.12.0` — a disjunction — so `engines.node
   >=20.19.0` silently admits Node 21.x and 22.0.0–22.11.x, neither of which `vite` itself
@@ -1001,8 +1007,8 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
     branch, dropping a real finding (the vite-disjunction gap) and setting up a guaranteed
     conflicting duplicate row at merge/tag time. Fixed: both the CR row and this record now cite
     `release-0.2.0`'s row explicitly, narrow the disposition to "the floor's lower bound is
-    measured, the disjunction gap is not," and point at `par-831-pretag-reconciliation` as where
-    the two rows get reconciled — see above.
+    measured, the disjunction gap is not," and name a reconciliation venue — round 2 (below)
+    found that venue claim itself unchecked and wrong; see there for the corrected version.
   - **Should-fix, applied:** the `if: always()` rationale was backwards (it said a skipped
     dependent leaves "no status," when GitHub actually reports `skipped` and branch protection
     treats that as passing — the opposite risk); corrected in both the workflow comment and
@@ -1021,3 +1027,23 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
     per-leg `if:`.
   Ref (round 1 fixes): `.github/workflows/ci.yml`,
   `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`, `README.md`.
+
+  **Round 2 review (code-reviewer, a genuine re-verification since round 1 found a blocking
+  issue — D-70's own rule), one blocking finding fixed before push:**
+  - **B-2 (BLOCKING):** round 1's own fix for B-1 named `par-831-pretag-reconciliation` as
+    "branched from `release-0.2.0`, already touching the same file" — the exact same failure
+    B-1 was about (a branch-state claim asserted without running the check), re-committed
+    inside the fix for it. Checked: `git merge-base par-831-pretag-reconciliation release-0.2.0`
+    equals `git merge-base par-831-pretag-reconciliation main` (`032549b`) — it is branched from
+    `main`, not `release-0.2.0` — and `git diff --name-only origin/main..par-831-pretag-reconciliation`
+    touches only `CLAUDE.md`/`CONTRIBUTING.md`/`RELEASING.md`, never the CR file; its
+    `RELEASING.md` checklist has no step covering §5 row deduplication. Fixed: both the CR row
+    and this record now say only what `git merge-tree 032549b HEAD release-0.2.0` actually shows
+    — the two rows conflict textually in this exact table, so `release-0.2.0`'s eventual merge
+    will force a human to resolve it — without claiming any specific existing branch already
+    handles that.
+  - **Nits, applied:** the CR row's editorial note pointed at "Why acceptable" for where the
+    vite-disjunction finding lives; it is actually in the Decision cell — corrected. `test`
+    (the gate job) had no `timeout-minutes` while `test-matrix` gained one — added, matching.
+  Ref (round 2 fixes): `.vibectx-plan/change-records/CR-20260917-release-0.2.0.md`,
+  `.github/workflows/ci.yml`.

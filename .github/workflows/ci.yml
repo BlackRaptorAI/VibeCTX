@@ -61,6 +61,7 @@ jobs:
     needs: test-matrix
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Require every matrix leg to have passed
         env:
