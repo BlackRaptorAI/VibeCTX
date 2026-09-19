@@ -1,8 +1,19 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, rmSync, readdirSync, readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
-import { readCache, writeCache, touchCache, cacheRoot, toCacheMeta, dropFollowedPageCache, urlSlug, libDirName } from "../src/cache.js";
+import {
+  readCache,
+  writeCache,
+  touchCache,
+  cacheRoot,
+  toCacheMeta,
+  dropFollowedPageCache,
+  urlSlug,
+  libDirName,
+  resetCacheRootState,
+  MAX_CACHED_CONTENT_BYTES,
+} from "../src/cache.js";
 import { sweepTempFiles, sweepCacheTempFiles, tempPathFor, SWEEP_MIN_AGE_MS } from "../src/atomic-store.js";
 
 let dir: string;
@@ -791,5 +802,352 @@ describe("D-71 (PAR-749) — call-site enumeration: every `.meta.json` reader is
       expect(evictSrc).toMatch(new RegExp(`function ${name}\\(`));
     }
     expect(evictSrc).not.toMatch(/JSON\.parse/);
+  });
+});
+
+/**
+ * PAR-786 — the cache root, the per-library directory, and the `.md` content file are each
+ * hardened against a symlink planted at that exact position, for the per-library DOCUMENTATION
+ * cache reached through `readCache`/`writeCache`/`touchCache` specifically — mirroring the D-46
+ * leaf-`lstat` policy `cache-evict.ts`'s `rootIsSweepable` and this file's own
+ * `dropFollowedPageCache` already apply to DELETION, now applied to ordinary reads and writes of
+ * this one cache too (not the rest of the cache directory — see the README's own scope note and
+ * D-83 in DECISIONS.md for what is and is not covered). Independently verified (PAR-786's own
+ * investigation, findings F-2a/F-2b/F-10): before this, `readCache`'s content half had no
+ * `lstat` guard at all (F-2a: a symlinked `.md` was followed and its target's content returned
+ * verbatim) and no size ceiling (F-10: a planted 31 MB `.md` was read wholesale), `writeCache`
+ * could be made to write through a symlinked root with no warning until a much later, unrelated
+ * eviction sweep happened to fire, by which point the sweep's own wording ("the link was not
+ * followed") was already false (N-b1), and `touchCache` (reachable on every 304 revalidation)
+ * had no root/library-directory guard at all, only a symlink-safe `.meta.json` read.
+ *
+ * The size-ceiling PROOF that `readFileSync` is never even called for an oversized file, and the
+ * `MAX_CACHED_CONTENT_BYTES >= PRIMARY_DOC_MAX_BYTES` drift tripwire, live in
+ * `test/cache-content-size.test.ts`, in its own file: it needs to mock `node:fs`'s
+ * `readFileSync` to count calls, and `vi.mock` applies file-wide, so keeping it separate avoids
+ * wrapping every `readFileSync` call this (much larger) file's ~800 other lines of tests make.
+ */
+describe("PAR-786 — cache root/content-file symlink and size hardening", () => {
+  const URL_ = "https://react.dev/llms.txt";
+
+  describe("Attack 1 (F-2a): readCache never follows a symlinked content file", () => {
+    it("a .md replaced with a symlink to a sibling secret file is refused, not served", () => {
+      writeCache("react", URL_, "# React, the real cached document");
+      const libraryDir = join(dir, libDirName("react"));
+      const contentPath = join(libraryDir, `${urlSlug(URL_)}.md`);
+      const secret = join(libraryDir, "secret-sibling.txt");
+      writeFileSync(secret, "LOCAL_SECRET_NOT_DOCUMENTATION", "utf8");
+      rmSync(contentPath, { force: true });
+      symlinkSync(secret, contentPath);
+
+      const hit = readCache("react", URL_, 168);
+
+      // The real assertion: a symlinked content file must never be followed and served as this
+      // entry's content — `readBoundedRegularFile`'s `isFile()` check (not `stat`, which would
+      // follow the link) is what makes this `undefined` rather than the secret's own bytes.
+      expect(hit).toBeUndefined();
+    });
+  });
+
+  describe("readCache refuses a symlinked cache ROOT (mutation target: readCache's root-lstat check)", () => {
+    it("returns undefined rather than reading through a symlinked root, even when the target holds a genuinely matching entry", () => {
+      const home = mkdtempSync(join(tmpdir(), "vibectx-userfiles-"));
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+      try {
+        process.env.VIBECTX_CACHE_DIR = home;
+        writeCache("react", URL_, "# Genuinely cached, but behind a link");
+
+        const linked = join(parent, "root");
+        symlinkSync(home, linked);
+        process.env.VIBECTX_CACHE_DIR = linked;
+
+        expect(readCache("react", URL_, 168)).toBeUndefined();
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("library-directory symlink on the READ path (mutation target: readCache's library-directory-lstat check)", () => {
+    it("readCache refuses when the library's own directory is a symlink, even to a directory holding a same-named, valid pair", () => {
+      const outside = mkdtempSync(join(tmpdir(), "vibectx-outside-"));
+      try {
+        const slug = urlSlug(URL_);
+        writeFileSync(join(outside, `${slug}.md`), "# Foreign content behind the link", "utf8");
+        writeFileSync(
+          join(outside, `${slug}.meta.json`),
+          JSON.stringify({ url: URL_, fetchedAt: new Date().toISOString() }),
+          "utf8",
+        );
+        symlinkSync(outside, join(dir, libDirName("react")));
+
+        expect(readCache("react", URL_, 168)).toBeUndefined();
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("touchCache gets the same root/library-directory guard as readCache (security-architect finding, PAR-786 follow-up)", () => {
+    it("touchCache is a no-op, not a throw, through a symlinked cache root, even when the target holds a genuinely matching entry", () => {
+      const home = mkdtempSync(join(tmpdir(), "vibectx-userfiles-"));
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+      try {
+        process.env.VIBECTX_CACHE_DIR = home;
+        writeCache("react", URL_, "# Genuinely cached, but behind a link");
+        const metaPath = join(home, libDirName("react"), `${urlSlug(URL_)}.meta.json`);
+        const before = readFileSync(metaPath, "utf8");
+
+        const linked = join(parent, "root");
+        symlinkSync(home, linked);
+        process.env.VIBECTX_CACHE_DIR = linked;
+
+        expect(() => touchCache("react", URL_)).not.toThrow();
+        expect(touchCache("react", URL_)).toBeUndefined();
+        // Not refreshed: the file on the real, unlinked path is untouched, byte for byte.
+        expect(readFileSync(metaPath, "utf8")).toBe(before);
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("touchCache refuses when the library's own directory is a symlink, even to a directory holding a same-named, valid pair", () => {
+      const outside = mkdtempSync(join(tmpdir(), "vibectx-outside-"));
+      try {
+        const slug = urlSlug(URL_);
+        const foreignMeta = join(outside, `${slug}.meta.json`);
+        writeFileSync(join(outside, `${slug}.md`), "# Foreign content behind the link", "utf8");
+        writeFileSync(foreignMeta, JSON.stringify({ url: URL_, fetchedAt: "2020-01-01T00:00:00.000Z" }), "utf8");
+        symlinkSync(outside, join(dir, libDirName("react")));
+        const before = readFileSync(foreignMeta, "utf8");
+
+        expect(touchCache("react", URL_)).toBeUndefined();
+        // Not refreshed: the foreign file behind the link is untouched, byte for byte.
+        expect(readFileSync(foreignMeta, "utf8")).toBe(before);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("library-directory symlink on the WRITE path (mutation target: writeCache's leaf-symlink pre-check, isSymlinkAt)", () => {
+    it("does not throw, writes nothing inside the symlink's target, and warns", () => {
+      const outside = mkdtempSync(join(tmpdir(), "vibectx-outside-"));
+      try {
+        symlinkSync(outside, join(dir, libDirName("react")));
+        const said: string[] = [];
+
+        let fetchedAt: string | undefined;
+        expect(() => {
+          fetchedAt = writeCache("react", URL_, "# Should never land here", undefined, undefined, (m) => said.push(m));
+        }).not.toThrow();
+
+        expect(fetchedAt).toBeDefined();
+        expect(readdirSync(outside)).toEqual([]); // nothing was written inside the symlink's target
+        expect(said).toHaveLength(1);
+        expect(said[0]).toContain("symlink");
+        expect(said[0]).not.toContain("was not followed"); // must not claim something false
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("Attack 2 (F-2b/N-b1): writeCache refuses a symlinked cache root, before writing anything (mutation target: writeCache's root-lstat check, existsAsNonDirectory)", () => {
+    it("creates nothing inside the symlink's target, and warns with text that is true at the moment it is printed", () => {
+      const target = mkdtempSync(join(tmpdir(), "vibectx-target-"));
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+      try {
+        const linked = join(parent, "root");
+        symlinkSync(target, linked);
+        process.env.VIBECTX_CACHE_DIR = linked;
+        const said: string[] = [];
+
+        let fetchedAt: string | undefined;
+        expect(() => {
+          fetchedAt = writeCache("react", URL_, "# Should never land in target", undefined, undefined, (m) => said.push(m));
+        }).not.toThrow();
+
+        expect(fetchedAt).toBeDefined();
+        expect(readdirSync(target)).toEqual([]); // (a) nothing created inside the symlink's target
+        // (b) nothing at the symlink path's own listing either — it IS a symlink to elsewhere,
+        // so "listing the symlink path" is exactly "listing the target", already asserted above.
+        expect(readCache("react", URL_, 168)).toBeUndefined(); // nothing was cached at all
+        expect(said).toHaveLength(1);
+        // The warning must say something TRUE and SPECIFIC — not the sweep-time wording this
+        // finding (N-b1) was filed against ("the link was not followed"), which was false by the
+        // time it was printed there because the write had already gone through. Here the check
+        // runs BEFORE any write is attempted, so "nothing was written" is actually true.
+        expect(said[0]).toContain("symlink");
+        expect(said[0]).toContain("Nothing was written");
+        expect(said[0]).not.toContain("was not followed");
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+
+    it("dedupes PER DISTINCT ROOT, not with a single process-global flag: repeats to the same bad root print nothing new, but a second, genuinely different bad root still gets its own warning", () => {
+      // code-reviewer, S3: a test that only ever exercises ONE bad root cannot tell a per-root
+      // `Set` apart from a single global boolean — both suppress every repeat equally. Only a
+      // SECOND, distinct root proves the dedupe is keyed by root: a global-boolean
+      // implementation would (wrongly) suppress the warning for root B too, once root A had
+      // already fired one, failing the `toHaveLength(2)` assertion below.
+      const targetA = mkdtempSync(join(tmpdir(), "vibectx-target-a-"));
+      const targetB = mkdtempSync(join(tmpdir(), "vibectx-target-b-"));
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+      try {
+        const linkedA = join(parent, "root-a");
+        const linkedB = join(parent, "root-b");
+        symlinkSync(targetA, linkedA);
+        symlinkSync(targetB, linkedB);
+        const said: string[] = [];
+        const warn = (m: string) => said.push(m);
+
+        process.env.VIBECTX_CACHE_DIR = linkedA;
+        writeCache("react", URL_, "# a1", undefined, undefined, warn);
+        writeCache("hono", "https://hono.dev/llms.txt", "# a2", undefined, undefined, warn); // same root again: no new line
+        writeCache("react", URL_, "# a3", undefined, undefined, warn); // same root, again: still no new line
+
+        process.env.VIBECTX_CACHE_DIR = linkedB;
+        writeCache("react", URL_, "# b1", undefined, undefined, warn); // a genuinely DIFFERENT root: its own line
+
+        expect(said).toHaveLength(2);
+        expect(said[0]).toContain(linkedA);
+        expect(said[1]).toContain(linkedB);
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(targetA, { recursive: true, force: true });
+        rmSync(targetB, { recursive: true, force: true });
+      }
+    });
+
+    it("resetCacheRootState() clears the per-root dedupe, for test isolation", () => {
+      const target = mkdtempSync(join(tmpdir(), "vibectx-target-"));
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-linkroot-"));
+      try {
+        const linked = join(parent, "root");
+        symlinkSync(target, linked);
+        process.env.VIBECTX_CACHE_DIR = linked;
+        const said: string[] = [];
+        const warn = (m: string) => said.push(m);
+
+        writeCache("react", URL_, "# a", undefined, undefined, warn);
+        resetCacheRootState();
+        writeCache("react", URL_, "# b", undefined, undefined, warn);
+
+        expect(said).toHaveLength(2);
+      } finally {
+        resetCacheRootState();
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+        rmSync(target, { recursive: true, force: true });
+      }
+    });
+
+    /**
+     * code-reviewer, S2 — swapping `existsAsNonDirectory(root)` for `isSymlinkAt(root)` at the
+     * ROOT check left every other test in this suite green, because nothing else ever set
+     * `VIBECTX_CACHE_DIR` to a plain (non-symlink) file. Pins the CURRENT, deliberately broader
+     * behaviour directly: ANY non-directory at the root is refused the same way a symlink is —
+     * see the comment on `writeCache`'s own root check for why this is allowed to differ from
+     * the library-directory check, which still throws for a plain file at that narrower
+     * position (unchanged, pre-existing behaviour pinned by the "library dir is a file" case).
+     */
+    it("a plain file (not a symlink) at the root position is refused the same way, not thrown", () => {
+      const parent = mkdtempSync(join(tmpdir(), "vibectx-fileroot-"));
+      try {
+        const asFile = join(parent, "root");
+        writeFileSync(asFile, "not a cache", "utf8");
+        process.env.VIBECTX_CACHE_DIR = asFile;
+        const said: string[] = [];
+
+        let fetchedAt: string | undefined;
+        expect(() => {
+          fetchedAt = writeCache("react", URL_, "# should never be written", undefined, undefined, (m) => said.push(m));
+        }).not.toThrow();
+
+        expect(fetchedAt).toBeDefined();
+        expect(readFileSync(asFile, "utf8")).toBe("not a cache"); // untouched
+        expect(said).toHaveLength(1);
+        expect(said[0]).toContain("not a real directory");
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(parent, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("dangling symlink as the content file", () => {
+    it("readCache refuses cleanly, no throw", () => {
+      writeCache("react", URL_, "# React");
+      const contentPath = join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
+      rmSync(contentPath, { force: true });
+      symlinkSync(join(dir, "does-not-exist-anywhere"), contentPath);
+
+      let hit: ReturnType<typeof readCache>;
+      expect(() => {
+        hit = readCache("react", URL_, 168);
+      }).not.toThrow();
+      expect(hit).toBeUndefined();
+    });
+  });
+
+  describe("symlink-to-directory where the content file is expected", () => {
+    it("readCache refuses when the .md path is a symlink pointing at a directory, not a file", () => {
+      writeCache("react", URL_, "# React");
+      const contentPath = join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
+      const outsideDir = mkdtempSync(join(tmpdir(), "vibectx-outside-dir-"));
+      try {
+        rmSync(contentPath, { force: true });
+        symlinkSync(outsideDir, contentPath);
+
+        expect(readCache("react", URL_, 168)).toBeUndefined();
+      } finally {
+        rmSync(outsideDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("size ceiling on read (F-10) (mutation target: readBoundedRegularFile's isFile()/size check)", () => {
+    it("a content file at exactly MAX_CACHED_CONTENT_BYTES still reads normally", () => {
+      writeCache("react", URL_, "# React");
+      const contentPath = join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
+      writeFileSync(contentPath, "x".repeat(MAX_CACHED_CONTENT_BYTES), "utf8");
+
+      const hit = readCache("react", URL_, 168);
+      expect(hit?.content.length).toBe(MAX_CACHED_CONTENT_BYTES);
+    });
+
+    it("a content file one byte over MAX_CACHED_CONTENT_BYTES is refused, not truncated — see test/cache-content-size.test.ts for the proof it is never even read", () => {
+      writeCache("react", URL_, "# React");
+      const contentPath = join(dir, libDirName("react"), `${urlSlug(URL_)}.md`);
+      writeFileSync(contentPath, "x".repeat(MAX_CACHED_CONTENT_BYTES + 1), "utf8");
+
+      expect(readCache("react", URL_, 168)).toBeUndefined();
+    });
+  });
+
+  describe("a cache root that does not exist yet behaves exactly as before (no regression)", () => {
+    it("readCache is a miss and writeCache creates a fresh, real directory", () => {
+      const freshParent = mkdtempSync(join(tmpdir(), "vibectx-fresh-"));
+      const freshRoot = join(freshParent, "not-created-yet");
+      process.env.VIBECTX_CACHE_DIR = freshRoot;
+      try {
+        expect(readCache("react", URL_, 168)).toBeUndefined();
+        writeCache("react", URL_, "# React");
+        expect(readCache("react", URL_, 168)?.content).toBe("# React");
+        expect(lstatSync(freshRoot).isDirectory()).toBe(true);
+      } finally {
+        process.env.VIBECTX_CACHE_DIR = dir;
+        rmSync(freshParent, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -20,7 +20,7 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ## D-01 – D-46
 
-- **D-46** 2026-09-07 — Nothing is renamed or deleted through a path not proven to be a real directory: the cache root and the legacy cache path are lstat'd first, a symlink in either position is refused once on stderr and the operation skipped, never followed. Closes a security finding in which eviction through a symlinked root deleted a real user file outside the cache. Ref: `src/cache-evict.ts`, `src/cache.ts` (5646651, 47bc3cb).
+- **D-46** 2026-09-07 — Nothing is renamed or deleted through a path not proven to be a real directory: the cache root and the legacy cache path are lstat'd first, a symlink in either position is refused once on stderr and the operation skipped, never followed. Closes a security finding in which eviction through a symlinked root deleted a real user file outside the cache. Ref: `src/cache-evict.ts`, `src/cache.ts` (5646651, 47bc3cb). **Superseded/extended by D-83**, which applies the same rule to ordinary `readCache`/`writeCache`/`touchCache` reads and writes of the per-library documentation cache specifically (not the whole cache directory — see D-83's own scope note).
 - **D-45** 2026-09-07 — Cache rebrand: `VIBECTX_CACHE_DIR` wins, `DOCS_CACHE_DIR` works through 0.2.x with a once-per-process deprecation note; `~/.docs-cache-mcp` migrates to `~/.vibectx` by rename on first run — never a copy, never onto an existing target, never following a symlink, and a failed rename falls back to the old path for that run and says so. A test trips at the removal version if a deprecation branch survives. Ref: `src/cache.ts` (45831e3, 47bc3cb, 1b84f70).
 - **D-44** ~~2026-09-07~~ **SUPERSEDED 2026-09-08** — the CI change-record gate, the `GATED` array, the enforcement map and the verdict checker were all removed from the repository; no path is gated and no CI check requires a Change Record. Records are still written, locally, in `.vibectx-plan/change-records/`. *Original text:* The CI change-record gate covers `.github/`, `.claude/`, `package.json`, `src/fetcher.ts`, `src/link-policy.ts`, and its matcher reads `previous_filename` so a rename cannot escape it. Cache, atomic-store and search-index paths stay convention-routed via the security gate's routing rule — hard-gating them would put a CR on every retrieval change, which is the over-governance PAR-652 exists to remove. Ref: `.github/workflows/change-record-required.yml`, `.vibectx-plan/change-record-policy.md` (18fac45, 65c74ba). *(An earlier 2026-09-06 entry under the same id states the same rule; this is the later, fuller one.)*
 - **D-43** 2026-09-06 — In `search`, the answer wins over the accounting: at ANY budget the response carries the best-scoring library's name, its `Source:` line and at least one section of its text; other libraries drop first, then the body is clipped, then the footer shortens, then the footer goes — never the section, and an irreducible minimum over budget is announced. `n shown` counts sections actually emitted. Closes the completion-auditor's finding that below the footer reserve the response was blank lines plus a footer claiming "1 shown", exit 0. Ref: `src/search.ts` (8c127f3, bc4f856).
@@ -1279,3 +1279,77 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   shadcn (this item's scope cut) and gaining clerk (D-81, an unrelated fix merged from `main`)
   happen to offset by one each. tailwindcss remains its own pre-existing, unrelated gap.
   Ref: `src/fetcher.ts`, `test/fetcher.test.ts`, `test/debug.test.ts` (PAR-832a, PAR-832).
+
+---
+
+## D-83 — decided 2026-09-18, executing PAR-786 (cache root/content-file symlink and size hardening)
+
+- **D-83** 2026-09-18 — **D-46's rule ("nothing is renamed or deleted through a path not proven
+  to be a real directory") is EXTENDED, for the per-library DOCUMENTATION cache specifically,
+  beyond deletion and eviction: `readCache`, `writeCache` and `touchCache` (`src/cache.ts`) now
+  apply the identical leaf-`lstat` policy to ordinary reads and writes of `<slug>.md` /
+  `<slug>.meta.json`, not just `dropFollowedPageCache` and `enforceCacheSizeCap`'s deletes.**
+  Closes two attacks, independently verified (PAR-786's own investigation, findings F-2a/F-2b/
+  F-10): (1) `readCache`'s `.md` content half had no `lstat` guard at all — a cache entry's
+  content file replaced with a symlink to an unrelated file was followed and its target's bytes
+  served verbatim as if they were the library's documentation; (2) `writeCache` could be made to
+  create a library directory and write both its files INSIDE a symlinked `VIBECTX_CACHE_DIR`'s
+  target with no warning at all until a much later, unrelated eviction sweep happened to
+  trigger — and by the time that sweep's warning printed, its wording ("the link was not
+  followed") was already false, since the write had gone through.
+  **Scope, stated precisely (code-reviewer/security-architect review round, PAR-786):** this
+  covers exactly the per-library documentation cache reached through `readCache`/`writeCache`/
+  `touchCache` — nothing else in the cache root gets this policy from this item. `writeIndex`/
+  `readIndex` (`search-index.ts`), `activity-log.ts`, `writeProjectRecord` (`project-store.ts`),
+  `saveResolvedEntry` (`resolved-store.ts`) and `saveDoctorVerdicts` (`doctor-store.ts`) all still
+  call a bare `mkdirSync(cacheRoot(), { recursive: true })` (or an equivalent) with no
+  `isRealDirectory` guard, and `readIndex` reads `index.json` back with `statSync`, which follows
+  a symlink with no guard at all — so a symlinked `VIBECTX_CACHE_DIR` still lets those five
+  stores write through the link (silently, no warning) and lets `readIndex` serve a planted
+  `index.json` from the far side of it. Tracked as **PAR-859**, filed against this same
+  symlinked-root policy, not fixed in this branch (five other modules is real scope growth
+  beyond one issue).
+  **What changed, concretely:** `isRealDirectory` (previously private to this file, guarding
+  only `dropFollowedPageCache`) is now exported and also guards `readCache`'s and `touchCache`'s
+  root and per-library directory, mirroring `cache-evict.ts`'s `rootIsSweepable`. A new
+  `readBoundedRegularFile(path, maxBytes)` (exported) refuses a symlink, a dangling link, a
+  directory, or anything over a new `MAX_CACHED_CONTENT_BYTES` (25 MiB, mirroring — as a
+  separate constant, not an import, to avoid a circular dependency with `fetcher.ts` —
+  `PRIMARY_DOC_MAX_BYTES`, the bound `fetchUrl` applies to what it hands `writeCache`; `writeCache`
+  itself has no size bound of its own) for the `.md` half, the same trust level `.meta.json` has
+  had since A4/D-71. `writeCache` gained a root check (`existsAsNonDirectory`) and a
+  library-directory-leaf check (`isSymlinkAt`), both run BEFORE `mkdirSync`, plus a
+  post-`mkdirSync` `isRealDirectory` recheck as a TOCTOU belt-and-suspenders (disclosed as
+  untested by a single-threaded test suite, same as the residual `dropFollowedPageCache` already
+  documents and does not close). On every refusal, `writeCache` writes nothing, calls
+  `noteCacheWrite` never, warns once per distinct refused ROOT per process (deduped via a new
+  `refusedWriteRoots` set, cleared by the existing `resetCacheRootState()` test seam) and returns
+  a freshly computed timestamp rather than throwing — verified safe because no caller re-reads
+  the cache to get content it just wrote (`fetcher.ts` serves the in-memory fetched body it
+  already has). `writeCache` gained an optional trailing `warn` parameter (default `toStderr`),
+  matching `dropFollowedPageCache`'s existing pattern; `readCache`'s signature is unchanged — its
+  refusals stay silent by design. `touchCache` (reachable on every 304 revalidation) gets the
+  same root/library-directory check `readCache` does; its own `.meta.json` read was already
+  symlink-safe via `readMetaFile`'s `lstat`, so this closes the one gap it had.
+  **A technical correction to this item's own originating brief, MEASURED before shipping (not
+  assumed):** the brief expected a library-directory leaf pre-planted as a symlink to an
+  EXISTING directory to make `mkdirSync(dir, { recursive: true })` throw `ENOENT`. It does not —
+  Node's recursive `mkdir` sees the raw syscall's `EEXIST`, then `stat`s (follows the link) to
+  check whether what's there is a directory, and a real directory at the far end of the link
+  reads as "already exists" and SUCCEEDS SILENTLY, with every subsequent write resolving through
+  the link — the same dangerous shape as the root-symlink attack, not a safely-thrown error. Only
+  a DANGLING symlink leaf throws (`ENOENT`); a symlink to an existing FILE throws too, but as
+  `EEXIST`, indistinguishable by error code from the pre-existing "library directory position is
+  a plain file" case this function has always thrown for (kept unchanged: a plain file there
+  still throws, per `test/cache.test.ts`'s "library dir is a file" case). `isSymlinkAt`'s
+  pre-`mkdirSync` check sidesteps all three shapes uniformly with one rule (a symlink at the
+  exact leaf, whatever it points to, is refused; a plain file is not, and still throws) rather
+  than trying to distinguish them by the error `mkdirSync` happens to raise. The ROOT check
+  (`existsAsNonDirectory`) is deliberately broader than "symlinks only" — ANY non-directory at
+  the root is refused the same way, because a wrong root is a whole-cache misconfiguration that
+  should degrade to "nothing persists this run," not crash every request; the narrower
+  plain-file case at the ROOT is untested by symlink-only fixtures alone, so a dedicated test
+  pins it directly.
+  Ref: `src/cache.ts` — `isRealDirectory` (exported), `existsAsNonDirectory`, `isSymlinkAt`,
+  `readBoundedRegularFile`, `MAX_CACHED_CONTENT_BYTES`, `readCache`, `writeCache`, `touchCache`;
+  `test/cache.test.ts`, `test/cache-content-size.test.ts` (PAR-786, findings F-2a/F-2b/F-10/N-b1/G2).
