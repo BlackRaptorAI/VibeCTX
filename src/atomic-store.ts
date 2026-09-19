@@ -34,19 +34,40 @@ export const SWEEP_MIN_AGE_MS = 60_000;
 /** Write `path` via a temp file in the same directory and an atomic rename. The temp file is
  *  removed if the write fails.
  *
- *  `opts.mode` (PAR-791): the permission bits the TEMP file is created with — omitted, the
- *  default `writeFileSync` behaviour is unchanged (0o666 minus umask), exactly as every
- *  caller before this option existed. A caller that passes one (`activity-log.ts` passes
- *  `0o600`) gets it self-healing across every future write: `renameSync` replaces whatever
- *  permissions `path` already had with the temp file's, so an existing world-readable file
- *  from before the caller started passing `mode` is corrected on its very next write, not
- *  merely held steady. Only affects file CREATION (POSIX `open()`'s mode is ignored when the
+ *  `opts.mode` (PAR-791, defaulted to `0o600` by PAR-862): the permission bits the TEMP file is
+ *  created with. PAR-862 — every actual caller in this codebase already passes `{ mode: 0o600 }`
+ *  explicitly (CONFIRMED: `grep -rln "writeAtomic(" src/*.ts` finds exactly six call sites —
+ *  `activity-log.ts`, `cache.ts`, `doctor-store.ts`, `project-store.ts`, `resolved-store.ts`, and
+ *  this file's own `writeIndex` caller in `search-index.ts` — every one already `0o600`, none
+ *  outside the cache directory), so this default changes no CURRENT caller's behaviour; it exists
+ *  so a FUTURE store added to this cache directory that forgets to pass `mode` still gets
+ *  owner-only rather than the platform default (`0o666` minus umask) — the same "one shared
+ *  function, not six places to remember it" reasoning `ensureCacheRoot` already applies to
+ *  directory creation, now applied to file creation too. `renameSync` replaces whatever
+ *  permissions `path` already had with the temp file's, so an existing world-readable file from
+ *  before a caller started passing (or defaulting to) `mode` is corrected on its very next write,
+ *  not merely held steady. Only affects file CREATION (POSIX `open()`'s mode is ignored when the
  *  path already exists) — moot here, since `tempPathFor` names each temp file uniquely
- *  (`<pid>.<ms>`), so it is always newly created. */
+ *  (`<pid>.<ms>`), so it is always newly created.
+ *
+ *  `flag: "wx"` (PAR-860, `O_CREAT|O_EXCL`): the default `writeFileSync` flag (`"w"`,
+ *  `O_WRONLY|O_CREAT|O_TRUNC`) FOLLOWS a symlink already sitting at the destination — and
+ *  `tempPathFor`'s name is predictable to within a process id and a millisecond
+ *  (`${path}.${pid}.${Date.now()}.tmp`), so an attacker who can predict or race that name could
+ *  plant a symlink there ahead of a write. `wx` refuses to open ANY existing entry at that exact
+ *  path, symlink or not, even a dangling one — POSIX: `open()` with `O_CREAT|O_EXCL` on a path
+ *  naming a symbolic link fails `EEXIST` regardless of what the link points to, never following
+ *  it. Safe against a false failure: a genuine collision needs two writes to the IDENTICAL path
+ *  in the IDENTICAL millisecond from the IDENTICAL process, and every caller here is
+ *  single-threaded and synchronous, so no two calls to this function can ever race each other
+ *  within one process, and `tempPathFor`'s own `<pid>` component rules out a collision ACROSS
+ *  processes too. The existing `catch` below is already correct for the refusal case: `rmSync` on
+ *  a symlink removes the link itself, never the target it points to, so cleanup after a refused
+ *  write never touches whatever a planted link aimed at. */
 export function writeAtomic(path: string, data: string, opts: { mode?: number } = {}): void {
   const tmp = tempPathFor(path);
   try {
-    writeFileSync(tmp, data, { encoding: "utf8", mode: opts.mode });
+    writeFileSync(tmp, data, { encoding: "utf8", mode: opts.mode ?? 0o600, flag: "wx" });
     renameSync(tmp, path);
   } catch (e) {
     rmSync(tmp, { force: true });
@@ -158,22 +179,28 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * for being big — symlink-safety and size-bounding are separate concerns, and this function
  * only owns the former.
  *
- * NOT CLOSED BY THIS ITEM (code-reviewer, PAR-805 review round) — and this is the more
- * important scope note, not a footnote: this function only guards the SCHEMA-VERSION PROBE,
- * never each store's own DATA read. `readResolvedEntries` (`resolved-store.ts`),
- * `readDoctorVerdicts` (`doctor-store.ts`), `readProjectRecord` (`project-store.ts`), and
- * `search-index.ts`'s `readIndex` (already known from PAR-786/D-83) all still call a bare
- * `readFileSync` with no `isRegularFile`/`lstat` guard of their own, and still follow a symlink
- * planted at their own target path. `readActivityEntries` (`activity-log.ts`) is the ONLY store
- * DATA read this item actually closed (it calls `isRegularFile` directly, not through this
- * function). For `resolved-store.ts` specifically the exposure is worse than "served and
- * discarded": `saveResolvedEntry` calls `readResolvedEntries()` (follows the symlink, returns a
- * planted, attacker-authored entry), merges it into the in-memory array, then `writeAtomic`s
- * that array back — so a planted symlink at `resolved.json` gets its content READ, MERGED, AND
- * PERSISTED into the real file (the rename replaces the symlink with a real file holding the
- * poisoned data), not merely read once and thrown away. All of this is PAR-859's scope, not
- * this item's — do not add guards for these four reads here; that is real scope growth into a
- * different, not-yet-started issue.
+ * SCOPE, AS OF PAR-859 (previously "NOT CLOSED BY THIS ITEM", PAR-805 review round — this
+ * function only ever guarded the SCHEMA-VERSION PROBE, never each store's own DATA read, and that
+ * gap is now closed at each store's own read function, not here): `readResolvedEntries`
+ * (`resolved-store.ts`), `readDoctorVerdicts` (`doctor-store.ts`), `readProjectRecord`
+ * (`project-store.ts`) and `search-index.ts`'s `readIndex` each now carry their OWN symlink guard
+ * at the top of their own function — `isRegularFile` directly for the first three, the same
+ * leaf-`lstat`-does-double-duty idiom `cache-meta.ts`'s `readMetaFile` established for `readIndex`
+ * (which already did its own size check and so gets its own `lstat`, not a call through
+ * `isRegularFile`, to avoid a second syscall). `readActivityEntries` (`activity-log.ts`) closed
+ * first, in PAR-805, the same way the first three do here. For `resolved-store.ts` specifically
+ * the exposure this closes was worse than "served and discarded": `saveResolvedEntry` calls
+ * `readResolvedEntries()` internally to merge a new entry into the existing list before writing
+ * back — before PAR-859, a planted symlink at `resolved.json` had its content READ, MERGED, AND
+ * PERSISTED into the real file on the very next save (the rename replaces the symlink with a real
+ * file holding the poisoned data), not merely read once and thrown away.
+ * `doctor-store.ts`'s `saveDoctorVerdicts` has the identical read-merge-persist shape (it also
+ * calls `readDoctorVerdicts()` to merge before writing back) and is closed by the same guard, for
+ * the same reason — see `test/doctor-store.test.ts`'s equivalent poisoning test.
+ * `project-store.ts`'s `writeProjectRecord` does NOT read-merge-persist (CONFIRMED by reading it:
+ * it serialises the `record` argument it was handed directly, with no internal read of the
+ * existing file) — its own `readProjectRecord` guard closes only the plain "served and discarded"
+ * exposure, which is what its own test proves.
  */
 export function newerSchemaVersion(path: string, ours: number): string | undefined {
   if (!isRegularFile(path)) return undefined;

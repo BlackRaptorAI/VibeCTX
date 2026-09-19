@@ -1,4 +1,4 @@
-import { lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, existsSync, renameSync, rmSync, writeFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
@@ -68,18 +68,60 @@ const refusedWriteRoots = new Set<string>();
  *  roots a single process happens to ever see. */
 const warnedLooseRoots = new Set<string>();
 
+/** PAR-859 — `dir` values `ensureCacheRoot` has already refused because a symlink sits at
+ *  exactly that leaf, said once per distinct `dir` per process. Deliberately a THIRD, separate
+ *  set rather than reuse of either existing one — but not, corrected here (code-reviewer, Phase
+ *  1b review round), for the reason an earlier version of this comment gave. That version claimed
+ *  reuse "could suppress one caller's warning behind an unrelated caller's dedup entry... through
+ *  a different `warn` callback" — but `refusedEnsureRootDirs` ITSELF has exactly that property: it
+ *  is keyed on `dir` alone, so the FIRST store to hit a symlinked root suppresses this warning for
+ *  every OTHER store that later calls `ensureCacheRoot` on the SAME `dir` with a DIFFERENT `warn`.
+ *  That cross-caller behaviour is real, and is the deliberate, accepted trade-off this set makes —
+ *  one line per process per distinct root, not one per store per distinct root — the same
+ *  trade-off `warnedLooseRoots` below already makes for the identical reason. It is not costless:
+ *  `resolve_library` renders `ensureCacheRoot`'s message directly to the model (`resolve.ts`), so
+ *  if an earlier `search` call already consumed the one warning for a symlinked root this process
+ *  will ever print, a LATER `resolve_library` call against the same root degrades to a generic
+ *  "could not be written" rather than naming the symlink — accepted here as it is everywhere else
+ *  this file dedupes by root alone, not fixed by this item.
+ *  The REAL reason these three sets stay separate: they track three DIFFERENT FACTS about the
+ *  SAME `dir` — `refusedWriteRoots` is "not a real directory at all" (`writeCache`'s own, broader,
+ *  earlier PAR-786 check, which also catches a plain file, not only a symlink); `warnedLooseRoots`
+ *  is "a real directory, but its permission is looser than 0700"; `refusedEnsureRootDirs` is "a
+ *  symlink sits here". Merging any two would let one FACT's dedup entry silently suppress a
+ *  DIFFERENT fact's warning for the identical path — e.g. a root already marked in
+ *  `refusedWriteRoots` for being a plain file would, if that set were reused here, never warn
+ *  about a LATER, genuinely different discovery that it is now a symlink instead. That is the
+ *  actual bug reuse would cause; keeping three facts in three sets is what avoids it. */
+const refusedEnsureRootDirs = new Set<string>();
+
 /** Test seam: forget what this process has already noted and migrated. */
 export function resetCacheRootState(): void {
   deprecationNoted = false;
   resolvedDefaultRoot = undefined;
   refusedWriteRoots.clear();
   warnedLooseRoots.clear();
+  refusedEnsureRootDirs.clear();
 }
 
 /** Empty is not a directory: an exported-but-empty variable reads as unset rather than as
  *  "cache into the current working directory". */
 const configured = (value: string | undefined): string | undefined =>
   value !== undefined && value.length > 0 ? value : undefined;
+
+/** Gate decision (Tom, PAR-805/PAR-859, 2026-09-18, recorded as an amendment to D-84 in
+ *  DECISIONS.md): true only when the cache root about to be resolved is the DEFAULT one
+ *  (`~/.vibectx`, with `defaultCacheRoot`'s own rebrand-migration rules) — reached only when
+ *  NEITHER env override is set. Mirrors `configured()`'s own emptiness rule EXACTLY (a
+ *  non-`undefined`, non-empty-string value counts as configured) rather than restating it, so
+ *  this predicate can never disagree with what `cacheRoot()` itself is about to resolve to — the
+ *  two must agree for the "default root" framing below to mean what it says. An env var
+ *  configured to a value that happens to equal the default path's string is still "configured"
+ *  here, and stays warn-only: this predicate answers "did the user set an override", not "does
+ *  the resolved path happen to look like the default one". */
+function usingDefaultCacheRoot(): boolean {
+  return configured(process.env.VIBECTX_CACHE_DIR) === undefined && configured(process.env.DOCS_CACHE_DIR) === undefined;
+}
 
 /** A real directory this tool would be willing to treat as a cache (D-46: lstat, not stat).
  *
@@ -142,14 +184,27 @@ function isSymlinkAt(path: string): boolean {
 }
 
 /**
- * PAR-805 (permission consistency) — the ONE place `mkdirSync` is called for anything under the
- * cache root, across all six sites that used to call it separately with no `mode` at all (five
- * of them; `activity-log.ts` was already passing `0o700` on its own): `resolved-store.ts`,
+ * PAR-805/PAR-859 — the ONE place `mkdirSync` is called for anything under the cache root,
+ * across all six sites that used to call it separately with no `mode` at all (five of them;
+ * `activity-log.ts` was already passing `0o700` on its own): `resolved-store.ts`,
  * `search-index.ts`, `project-store.ts` (its `projects/` subdirectory), `doctor-store.ts`,
- * `activity-log.ts`, and `cache.ts`'s own `writeCache` (its per-library directory, AFTER
- * `writeCache`'s own PAR-786 symlink checks have already passed — this function hardens
- * PERMISSIONS only, on a path already proven not to be a symlink by the caller where that
- * matters).
+ * `activity-log.ts`, and `cache.ts`'s own `writeCache` (its per-library directory) — and (as of
+ * PAR-859) the ONE place that decides whether a SYMLINKED root or subdirectory is refused at all,
+ * for every one of those same six sites.
+ *
+ * RETURNS `boolean` (PAR-859 — was `void` through PAR-805): `true` when `dir` now exists safely,
+ * either freshly created by this call or already a real, non-symlinked directory; `false` when
+ * refused — a symlink sits at exactly this leaf BEFORE `mkdirSync` runs, or (security-architect,
+ * Phase 1b review round, optional hardening) `dir` is no longer a real directory AFTER
+ * `mkdirSync` runs, a belt-and-suspenders TOCTOU recheck — in either case `mkdirSync` either was
+ * never attempted or its result is not trusted, and the CALLER must not write anything under
+ * `dir`. Every call site now checks this return value and bails on `false` —
+ * `resolved-store.ts`'s `saveResolvedEntry`, `search-index.ts`'s `writeIndex`, `doctor-store.ts`'s
+ * `saveDoctorVerdicts`, `activity-log.ts`'s `recordActivity`, and BOTH of `project-store.ts`'s
+ * `writeProjectRecord` calls (the root, then `projects/` — a symlink could be planted
+ * specifically at the subdirectory with a perfectly real root) — EXCEPT `writeCache`'s own two
+ * calls, which keep ignoring it; see the note on that below for why that is provably safe rather
+ * than an oversight carried over from PAR-805.
  *
  * WHY A SHARED FUNCTION AT ALL: `mkdirSync` never retroactively `chmod`s a directory that
  * already exists, so whichever of these six calls happens to run FIRST in a given process
@@ -177,40 +232,77 @@ function isSymlinkAt(path: string): boolean {
  * chose (`0o700` for directories, `0o600` for files) happen to have no bits outside the position
  * ordinary umasks never restrict, not because an explicit mode escapes umask as a rule.
  *
- * PRE-EXISTING UNSAFE ROOT — disclosed, not fixed, and that is the decision, not an oversight:
- * this function never `chmod`s an existing directory and never refuses to use one. Two reasons,
- * both stated because a future reader will otherwise reasonably ask "why not just fix it":
- * retroactively tightening a directory the user (or another process) already set up could break
- * an intentionally SHARED cache — this project already treats a shared `VIBECTX_CACHE_DIR` as
- * "moving the trust boundary by choice" (see the README's own PAR-859 paragraph), and silently
- * narrowing who can read a directory someone deliberately shared is exactly the kind of surprise
- * that trust-boundary framing exists to rule out; and refusing to use an existing, looser-mode
- * root would break every cache created by a vibectx version older than this fix, on the very
- * next upgrade, for a mode difference that has never actually leaked anything document-shaped
- * (this cache's contents were never secret before this item — see D-84 in DECISIONS.md). So:
- * disclosure without mutation, the same house style `noteStrandedLegacy` (above, in this file)
- * already uses for "something about your cache setup is not what a fresh install would produce,
- * and here is what that is" — say it once, touch nothing.
+ * PRE-EXISTING UNSAFE ROOT, PERMISSION HALF — an env-CONFIGURED root (`VIBECTX_CACHE_DIR` or the
+ * deprecated `DOCS_CACHE_DIR`) that already exists looser than `0700` is disclosed, never
+ * `chmod`'d and never refused (unchanged from D-84's original decision). Two reasons, both stated
+ * because a future reader will otherwise reasonably ask "why not just fix it": retroactively
+ * tightening a directory the user (or another process) already set up could break an
+ * intentionally SHARED cache — this project already treats a shared `VIBECTX_CACHE_DIR` as
+ * "moving the trust boundary by choice" (see the README's own paragraph on this) — and refusing
+ * to use it would break every cache created by a vibectx version older than this fix, on the very
+ * next upgrade, for a mode difference that has never actually leaked anything document-shaped.
+ * So: disclosure without mutation, the same house style `noteStrandedLegacy` (above, in this
+ * file) already uses.
  *
- * The check that decides whether to say it runs ONLY when `dir` is the literal cache root
- * (`dir === cacheRoot()`, a second call but a free one — `cacheRoot()` is a memoized env-var
- * read for the default path, or a direct env-var read for an overridden one, never a network or
- * disk call on this path since the caller already resolved it once to produce `dir`), not for
- * every per-library or `projects/` subdirectory this function is also called for — warning about
- * every subdirectory of an old, already-populated cache would be pure noise repeating the same
- * one fact endlessly.
+ * PRE-EXISTING UNSAFE ROOT, THE DEFAULT ROOT SPECIFICALLY — GATE DECISION, AMENDING D-84 (Tom,
+ * 2026-09-18, PAR-805/PAR-859): the DEFAULT root (`~/.vibectx` — reached only when NEITHER env
+ * override is set, `usingDefaultCacheRoot()` above) is auto-TIGHTENED to `0700` on the next call
+ * that finds it looser, with one stderr line saying what was done — never refused, and never
+ * silently, but no longer merely disclosed either. The distinction that makes this consistent
+ * with the env-configured case rather than a reversal of it: `~/.vibectx` is vibectx's OWN
+ * directory, created by an earlier vibectx (or a user acting on vibectx's own instructions) under
+ * `$HOME` — it is never one a user deliberately pointed a shared process at, the way an
+ * env-configured root can be, so the "moving the trust boundary by choice" framing above simply
+ * does not apply to it: there is no other process this tightening could be taking access away
+ * from on purpose. `chmodSync` is wrapped in its own `try/catch` — a failure (`EPERM`, most
+ * plausibly a root now owned by a different user than the one running this process) is warned
+ * about and left exactly as it was, never thrown, so a hardening attempt can never be the reason
+ * an ordinary retrieval fails; see `test/cache-permissions.test.ts`'s EPERM case. Also guarded by
+ * an OWNERSHIP check (security-architect, Phase 1b review round, optional hardening) — `chmodSync`
+ * is attempted only when the `lstat`'d `stat.uid` matches this process's own (`process.getuid?.()`,
+ * `undefined`/false on Windows, where this branch never fires): `chmod(2)` dereferences symlinks
+ * (no portable `lchmod`), so a local attacker with write access to `dir`'s PARENT directory could
+ * otherwise race a symlink swap between this `lstat` and the `chmodSync` call and turn a
+ * tightening attempt into a `chmod` that follows the link elsewhere. The ownership check does not
+ * close that race (the swap can still land after the check reads its own stale `stat`), but it
+ * does mean a directory that was NOT ours at the moment we looked never gets a tightening attempt
+ * at all — a distinct, narrower message is warned for that case (see the code below), not the
+ * env-configured one, since that one's "did you deliberately share this" framing does not fit a
+ * default root someone else's process happens to own.
  *
- * Deliberately NOT this function's job: REFUSING or otherwise acting on `dir` being a symlink.
- * That is PAR-859 (filed separately from this item's own review, not yet started) — mixing it
- * in here would blur two issues' scope, and `writeCache`'s own call site already has ITS OWN
- * symlink refusal from PAR-786, run BEFORE this function, so the one call site that already
- * needed it keeps it; the other five gain a refusal only once PAR-859 lands.
+ * Both checks above run ONLY when `dir` is the literal cache root (`dir === cacheRoot()`, a
+ * second call but a free one — `cacheRoot()` is a memoized env-var read for the default path, or
+ * a direct env-var read for an overridden one, never a network or disk call on this path since
+ * the caller already resolved it once to produce `dir`), not for every per-library or `projects/`
+ * subdirectory this function is also called for — warning (or tightening) every subdirectory of
+ * an old, already-populated cache would be pure noise repeating the same one fact endlessly.
  *
- * This function DOES still look at `stat.isSymbolicLink()` below, but only to know when its OWN
- * mode check does not apply — see that check's own comment for why a symlink's mode is never a
- * meaningful answer to "is the cache root's own permission loose", the corrected finding from
- * code-reviewer/security-architect's PAR-805 review round (an earlier version of this function
- * warned about a symlinked root's mode and suggested a `chmod` that cannot work).
+ * THE SYMLINK CHECK (PAR-859) — the FIRST thing this function does, before either permission
+ * check above, mirroring `isSymlinkAt`'s own leaf-`lstat` policy (this file, already used by
+ * `writeCache`'s own pre-check, below): a symlink planted at exactly `dir`, whatever it points
+ * at — including an EXISTING real directory, which `mkdirSync(dir, { recursive: true })` would
+ * otherwise accept SILENTLY and write straight through (see `isSymlinkAt`'s own comment for the
+ * MEASURED mechanism) — is refused outright, with no `mkdirSync` attempted at all. A PLAIN FILE
+ * at `dir` is untouched by this check, matching `isSymlinkAt`'s existing, narrower behaviour, and
+ * still throws `EEXIST` out of `mkdirSync` below exactly as it always has (`test/cache.test.ts`'s
+ * "library dir is a file" case, which this must not change). Deduplicated by
+ * `refusedEnsureRootDirs` (above) — see that set's own comment for why it is a third set, not a
+ * reuse of either existing one. Because this check now runs unconditionally, BEFORE the
+ * `dir === cacheRoot()` gate, `dir` is proven non-symlink by the time either permission check
+ * below runs — the earlier version of this function's own `!stat.isSymbolicLink()` guard inside
+ * that block (needed when a symlinked root's mode was compared against `0700` and warned about
+ * for no reason — see D-84's own corrected-finding note) is now dead code and has been removed;
+ * this comment records why, rather than leaving a future reader to wonder if the removal was an
+ * accident.
+ *
+ * `writeCache`'s OWN two calls (root, then the per-library directory) are UNAFFECTED IN
+ * PRACTICE by the new symlink check: `writeCache`'s own `existsAsNonDirectory`/`isSymlinkAt`
+ * pre-checks already run BEFORE either of its `ensureCacheRoot` calls (TRACED, not assumed —
+ * `writeCache`'s own body, below, shows both pre-checks strictly before both `ensureCacheRoot`
+ * calls), so by the time they run, `root`/`dir` are already proven non-symlink and this
+ * function's own check simply returns `true` — redundant, but harmless. `writeCache` therefore
+ * keeps ignoring both calls' return values, unchanged from before this item: a `false` there
+ * cannot actually happen given `writeCache`'s own pre-checks.
  *
  * NEWLINE CONVENTION — not this function's to solve centrally (code-reviewer, PAR-805 review
  * round): `warn` here is an opaque callback, and this file's own default (`toStderr`) already
@@ -224,7 +316,21 @@ function isSymlinkAt(path: string): boolean {
  * without touching those modules' other, pre-existing `warn(...)` calls (which already manage
  * their own newlines correctly). See any of those four call sites for the wrap itself.
  */
-export function ensureCacheRoot(dir: string, warn: (message: string) => void = toStderr): void {
+export function ensureCacheRoot(dir: string, warn: (message: string) => void = toStderr): boolean {
+  // PAR-859 — checked first, unconditionally: see this function's own doc comment for why this
+  // must run before `mkdirSync` rather than be discovered by catching what it throws (it often
+  // does not throw at all), and before the permission checks below (which now assume `dir` is
+  // proven non-symlink by the time they run).
+  if (isSymlinkAt(dir)) {
+    if (!refusedEnsureRootDirs.has(dir)) {
+      refusedEnsureRootDirs.add(dir);
+      warn(
+        `vibectx: refusing to use ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} — it is a symlink, not a directory ` +
+          `vibectx created. Nothing was written.`,
+      );
+    }
+    return false;
+  }
   if (dir === cacheRoot()) {
     let stat;
     try {
@@ -232,36 +338,99 @@ export function ensureCacheRoot(dir: string, warn: (message: string) => void = t
     } catch {
       stat = undefined; // does not exist yet: mkdirSync below creates it at 0700, nothing to warn about
     }
-    // code-reviewer/security-architect, PAR-805 review round — MEASURED, corrected from an
-    // earlier version of this function: `lstat` on a SYMLINK reports the LINK's own mode (e.g.
-    // `0755`, an ordinary default), never the target's — so this check, run against a symlinked
-    // root, was comparing the wrong number to 0700 and warning about a "loose permission" that
-    // was never the real problem, then suggesting a `chmod` that cannot fix it (`chmod` follows
-    // symlinks, so it would silently retarget the LINK'S OWN TARGET, not the link) — a warning
-    // that can never be satisfied and would repeat every single process forever, burying what
-    // is actually an integrity question (a symlinked cache root), not a permissions one. That
-    // question is PAR-859's, not this function's (see this function's own doc comment) — so a
-    // symlinked root gets NO diagnosis here at all, silently, leaving the field clear for
-    // whatever PAR-859 eventually reports in its place.
-    if (stat !== undefined && !stat.isSymbolicLink()) {
+    if (stat !== undefined) {
       const mode = stat.mode & 0o777;
       if (mode !== 0o700 && !warnedLooseRoots.has(dir)) {
         warnedLooseRoots.add(dir);
-        warn(
-          `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} already exists with mode ` +
-            `0${mode.toString(8).padStart(3, "0")} (vibectx creates new cache roots owner-only, at 0700) — ` +
-            `it was NOT changed. Existing files and directories in it are not tightened either. If you did ` +
-            // code-reviewer, PAR-805 review round: NOT a copy-pasteable `chmod <path>` literal —
-            // `dir` here is clipped for display (`MAX_DISPLAY_PATH_CHARS`), and a `…`-truncated
-            // path inside an actual shell command would silently target the wrong path if
-            // anyone ran it verbatim. Prose only; the reader supplies their own real path.
-            `not deliberately share this cache directory with another user or process, consider ` +
-            `tightening it to owner-only yourself.`,
-        );
+        // security-architect (Phase 1b review round, optional hardening) — a real, if narrow,
+        // TOCTOU: `chmod(2)` dereferences symlinks (there is no portable `lchmod`), so a local
+        // attacker with write access to `dir`'s PARENT directory could, between this `lstatSync`
+        // and the `chmodSync` call below, swap `dir` for a symlink and turn a tightening attempt
+        // into a `chmod` that follows the link to an arbitrary target. This does not close that
+        // race (the swap can still happen after this check reads), but it closes a related, cheap
+        // case for free: `stat` here is already the pre-swap observation, so requiring its owner
+        // to be the CURRENT process before ever attempting `chmodSync` means a directory that
+        // was NOT ours at the moment we looked never gets a tightening attempt at all — the
+        // ordinary case (vibectx's own freshly-created or long-owned `~/.vibectx`) is unaffected,
+        // since a process only ever owns directories it (or its own user) created.
+        // `process.getuid` is POSIX-only (`undefined` on Windows) — where it is absent, this
+        // comparison is always false and the auto-tighten branch simply never fires, consistent
+        // with this whole feature already being POSIX-only (see the README's own Windows note).
+        const ownedByThisProcess = stat.uid === process.getuid?.();
+        if (usingDefaultCacheRoot() && ownedByThisProcess) {
+          // Gate decision, amending D-84 (Tom, PAR-805/PAR-859, 2026-09-18) — see this function's
+          // own doc comment for why the default root is tightened rather than merely disclosed.
+          try {
+            chmodSync(dir, 0o700);
+            warn(
+              `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} was mode ` +
+                `0${mode.toString(8).padStart(3, "0")} — tightened to 0700 (vibectx's own default cache ` +
+                `directory is owner-only).`,
+            );
+          } catch (e) {
+            // Never throw out of a hardening attempt (see doc comment): every caller of this
+            // function must be able to proceed exactly as it would have before this gate
+            // decision existed, whether or not the chmod itself succeeded.
+            warn(
+              `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} is mode ` +
+                `0${mode.toString(8).padStart(3, "0")} and vibectx could not tighten it to 0700 ` +
+                `(${e instanceof Error ? e.message : String(e)}); using it as-is.`,
+            );
+          }
+        } else if (usingDefaultCacheRoot()) {
+          // The default root exists but is NOT owned by this process (the `ownedByThisProcess`
+          // guard above) — an unusual shape (a different user, or a process running under `sudo`,
+          // created `~/.vibectx` first) that the env-configured message below is not written for:
+          // that one's "did you deliberately share this" framing assumes a directory the READER
+          // chose to point at, which is not what "the tool's own default path" means here. Said
+          // plainly instead, and left untouched, for the identical reason the TOCTOU comment above
+          // gives: this process should not be attempting to `chmod` a directory it does not own.
+          warn(
+            `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} already exists with mode ` +
+              `0${mode.toString(8).padStart(3, "0")} but is not owned by this process — it was NOT changed. ` +
+              `If this is unexpected, check who created it.`,
+          );
+        } else {
+          warn(
+            `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} already exists with mode ` +
+              `0${mode.toString(8).padStart(3, "0")} (vibectx creates new cache roots owner-only, at 0700) — ` +
+              `it was NOT changed. Existing files and directories in it are not tightened either. If you did ` +
+              // code-reviewer, PAR-805 review round: NOT a copy-pasteable `chmod <path>` literal —
+              // `dir` here is clipped for display (`MAX_DISPLAY_PATH_CHARS`), and a `…`-truncated
+              // path inside an actual shell command would silently target the wrong path if
+              // anyone ran it verbatim. Prose only; the reader supplies their own real path.
+              `not deliberately share this cache directory with another user or process, consider ` +
+              `tightening it to owner-only yourself.`,
+          );
+        }
       }
     }
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // security-architect (Phase 1b review round, optional hardening) — belt-and-suspenders against
+  // a TOCTOU between the `isSymlinkAt` check at the very top of this function and the `mkdirSync`
+  // call just above (an external process replacing `dir` with a symlink in that window): the SAME
+  // shape `writeCache`'s own post-`mkdirSync` recheck already has for its own two calls (see that
+  // function's own comment, below) — centralised here so every one of `ensureCacheRoot`'s other
+  // five call sites gets it too, not only `writeCache`'s. `writeCache`'s own copy is deliberately
+  // LEFT IN PLACE, not removed in favour of this one: redundant but harmless (this check already
+  // runs, inside `ensureCacheRoot`, before `writeCache`'s own copy would even be reached), and
+  // removing it would be unnecessary extra diff for no behaviour change. No dedup set, matching
+  // `writeCache`'s own choice not to dedup this specific warning: the race this guards is rare
+  // enough, and this specific check narrow enough, that `writeCache`'s own precedent already
+  // treats a plain, undeduped `warn` as sufficient.
+  // DISCLOSED, NOT TESTED (mirroring `writeCache`'s own identical disclosure): removing this check
+  // alone makes no test in the suite fail — every reachable, single-threaded test scenario that
+  // would trip it is already caught by the `isSymlinkAt` check at the top of this function, since
+  // nothing changes `dir`'s own leaf between that check and `mkdirSync` in a synchronous test.
+  // This exists only for the genuine multi-process race (CWE-367) `dropFollowedPageCache`'s own
+  // comment names and does not close either — real, but not exercisable from a single synchronous
+  // test process.
+  if (!isRealDirectory(dir)) {
+    warn(`vibectx: refusing to use ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} — it is no longer a real directory. Nothing was written.`);
+    return false;
+  }
+  return true;
 }
 
 /** Longest cache CONTENT file this process will read back (PAR-786, finding F-10). Mirrors
@@ -742,8 +911,22 @@ export function writeCache(
     // newly created) — `renameSync` then carries that mode onto `contentPath`/`metaPath`,
     // self-healing an older, looser file on its very next write, the same mechanism
     // `writeAtomic`'s own `opts.mode` already documents.
-    writeFileSync(contentTmp, content, { encoding: "utf8", mode: 0o600 });
-    writeFileSync(metaTmp, JSON.stringify(meta, null, 2), { encoding: "utf8", mode: 0o600 });
+    //
+    // PAR-860: `flag: "wx"` (`O_CREAT|O_EXCL`) on both — the default `writeFileSync` flag ("w",
+    // `O_WRONLY|O_CREAT|O_TRUNC`) FOLLOWS a symlink already sitting at the destination, and
+    // `tempPathFor`'s name is predictable to within a process id and a millisecond. `wx` refuses
+    // to open ANY existing entry at that exact path, symlink or not, even a dangling one — POSIX:
+    // `open()` with `O_CREAT|O_EXCL` on a path naming a symbolic link fails `EEXIST` regardless of
+    // what the link points to, never following it. Safe against a false failure: a genuine
+    // collision needs two writes to the IDENTICAL path in the IDENTICAL millisecond from the
+    // IDENTICAL process, which this single-threaded synchronous function cannot produce for its
+    // own two calls (`contentTmp`/`metaTmp` are already distinct paths) and cannot produce across
+    // two separate `writeCache` invocations either, for the same reason. The existing `catch`
+    // below (`rmSync(..., { force: true })`) is already correct for the refusal case: `rmSync` on
+    // a symlink removes the link itself, never the target, so cleanup after a refused write never
+    // touches whatever the planted link pointed at.
+    writeFileSync(contentTmp, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    writeFileSync(metaTmp, JSON.stringify(meta, null, 2), { encoding: "utf8", mode: 0o600, flag: "wx" });
     renameSync(contentTmp, contentPath);
     renameSync(metaTmp, metaPath);
   } catch (e) {

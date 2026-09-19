@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot, ensureCacheRoot } from "./cache.js";
+import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
+import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
 import { ISO_INSTANT } from "./cache-meta.js";
 import { MAX_DOCTOR_VERDICTS } from "./limits.js";
 import { clipText } from "./text.js";
@@ -109,8 +109,24 @@ function toDoctorVerdict(raw: unknown): DoctorVerdict | undefined {
 
 /** Every persisted verdict, keyed by library name. A corrupt file, a schema mismatch, or any
  *  read error all read as empty (K1) — a missing verdict means "doctor has not reported on this
- *  library," never a crash for a caller on the get_docs / list_libraries hot path. */
+ *  library," never a crash for a caller on the get_docs / list_libraries hot path. Also empty for
+ *  a symlink planted at `doctor.json`'s own path (PAR-859, `isRegularFile`, `atomic-store.ts`) —
+ *  never followed. This closes more than a served-and-discarded read: `saveDoctorVerdicts` below
+ *  calls this function to merge new verdicts into the existing set before writing back, so before
+ *  this guard a planted symlink's attacker-authored verdict would have been READ, MERGED, AND
+ *  PERSISTED into the real file on the next save — the same shape `resolved-store.ts`'s
+ *  `saveResolvedEntry`/`readResolvedEntries` has (see that module's own comment), closed here for
+ *  the identical reason (`test/doctor-store.test.ts`'s equivalent poisoning test).
+ *
+ *  code-reviewer (Phase 1b review round) PROVED the leaf-only guard above is not enough alone: a
+ *  symlinked cache ROOT (an intermediate path component, not the leaf `isRegularFile` inspects)
+ *  whose target genuinely holds a real `doctor.json` is resolved for traversal regardless, so the
+ *  leaf check never even sees a symlink. `isRealDirectory(cacheRoot())` (`cache.ts`, already
+ *  exported for exactly this reuse by `readCache`/`touchCache`) closes it: a symlinked root reads
+ *  as absent before the leaf is inspected at all. */
 export function readDoctorVerdicts(): Map<string, DoctorVerdict> {
+  if (!isRealDirectory(cacheRoot())) return new Map();
+  if (!isRegularFile(doctorStorePath())) return new Map();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(doctorStorePath(), "utf8"));
@@ -170,7 +186,10 @@ export function saveDoctorVerdicts(verdicts: DoctorVerdict[], warn: (message: st
   // PAR-805: owner-only (0700), and warns once if the root pre-existed looser. Wrapped: this
   // module's own `warn` default has no trailing newline, unlike `ensureCacheRoot`'s own
   // (`toStderr`) — see `resolved-store.ts`'s identical wrap for the full reasoning.
-  ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`));
+  //
+  // PAR-859: a symlinked root is now refused by `ensureCacheRoot` itself — bail here, writing
+  // nothing, exactly as the K2 "newer schema" refusal above already does.
+  if (!ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`))) return false;
   const existing = readDoctorVerdicts();
   for (const v of valid) existing.set(v.name, v);
   let merged = [...existing.values()];

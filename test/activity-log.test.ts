@@ -123,21 +123,13 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
     expect(statSync(join(dir, "activity.json")).mode & 0o777).toBe(0o600);
   });
 
-  it("writeAtomic (atomic-store.ts): an explicit mode is applied to the file; omitting it keeps the pre-existing default behaviour unchanged", () => {
+  it("writeAtomic (atomic-store.ts): an explicit mode is applied to the file; omitting it now defaults to 0600 (PAR-862 — supersedes this test's own PAR-791-era version, which pinned that omitting `mode` kept whatever the platform default was; every actual caller in this codebase already passes 0o600 explicitly, so this default only protects a FUTURE caller that forgets to)", () => {
     const withMode = join(dir, "with-mode.json");
     writeAtomic(withMode, "{}", { mode: 0o600 });
     expect(statSync(withMode).mode & 0o777).toBe(0o600);
-    // Compared against a CONTROL file written the pre-PR way (plain writeFileSync, no mode
-    // option at all) rather than a hardcoded "not 0600" literal: that literal would falsely
-    // pass under, say, umask 077, where the OS default already yields 0600 with no help from
-    // this option. The control proves "same as before", which is the actual property this
-    // test is for — every other writeAtomic caller (resolved-store.ts, project-store.ts,
-    // etc.) is untouched by this option and must keep getting exactly this file's mode.
-    const control = join(dir, "control.json");
-    writeFileSync(control, "{}", "utf8");
     const withoutMode = join(dir, "without-mode.json");
     writeAtomic(withoutMode, "{}");
-    expect(statSync(withoutMode).mode & 0o777).toBe(statSync(control).mode & 0o777);
+    expect(statSync(withoutMode).mode & 0o777).toBe(0o600);
   });
 
   it("appends in call order (oldest first)", () => {

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,21 +8,24 @@ import { join } from "node:path";
  * `DOCS_CACHE_DIR` → `VIBECTX_CACHE_DIR` (D-45: the new name wins; the old one keeps working
  * for 0.2.x with one deprecation note per process).
  *
- * `renameSync` is the only thing mocked, and only so the "the rename fails" case can be
- * exercised without a second filesystem: every other fs call in this file is the real one.
- * `renameImpl` is what `node:fs.renameSync` does for the duration of one test.
+ * `renameSync` and (PAR-859/PAR-805 gate decision) `chmodSync` are the only things mocked, and
+ * only so "the rename fails" / "the chmod fails" cases can be exercised without a second
+ * filesystem: every other fs call in this file is the real one. `renameImpl`/`chmodImpl` are
+ * what `node:fs.renameSync`/`chmodSync` do for the duration of one test.
  */
 let renameImpl: ((from: string, to: string) => void) | undefined;
+let chmodImpl: ((path: string, mode: number) => void) | undefined;
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return {
     ...actual,
     default: actual,
     renameSync: (from: string, to: string) => (renameImpl ?? actual.renameSync)(from, to),
+    chmodSync: (path: string, mode: number) => (chmodImpl ?? actual.chmodSync)(path, mode),
   };
 });
 
-const { cacheRoot, resetCacheRootState, LEGACY_CACHE_DIR_NAME, CACHE_DIR_NAME } = await import("../src/cache.js");
+const { cacheRoot, ensureCacheRoot, resetCacheRootState, LEGACY_CACHE_DIR_NAME, CACHE_DIR_NAME } = await import("../src/cache.js");
 
 let home: string;
 let saved: Record<string, string | undefined>;
@@ -38,6 +41,7 @@ beforeEach(() => {
   delete process.env.VIBECTX_CACHE_DIR;
   delete process.env.DOCS_CACHE_DIR;
   renameImpl = undefined;
+  chmodImpl = undefined;
   resetCacheRootState();
 });
 
@@ -47,6 +51,7 @@ afterEach(() => {
     else process.env[k] = v;
   }
   renameImpl = undefined;
+  chmodImpl = undefined;
   resetCacheRootState();
   rmSync(home, { recursive: true, force: true });
 });
@@ -292,5 +297,116 @@ describe("an empty ~/.vibectx no longer strands a legacy cache silently", () => 
     const notes: string[] = [];
     expect(cacheRoot({ warn: (m) => notes.push(m) })).toBe(current());
     expect(notes).toEqual([]);
+  });
+});
+
+/**
+ * Gate decision (Tom, PAR-805/PAR-859, 2026-09-18, amending D-84) — recorded verbatim in
+ * `.vibectx-plan/DECISIONS.md`: a pre-existing DEFAULT root (`~/.vibectx`, reached only when
+ * NEITHER `VIBECTX_CACHE_DIR` nor the deprecated `DOCS_CACHE_DIR` is set) found looser than
+ * `0700` is `chmod`'d to `0700` on the next call, with one stderr line saying what was done. An
+ * env-CONFIGURED root keeps the original, warn-only behaviour unchanged — that case is already
+ * covered by `test/cache-permissions.test.ts`'s "a pre-existing, looser-than-0700 cache root is
+ * disclosed, never tightened or refused" describe block (which sets `VIBECTX_CACHE_DIR`), and
+ * this file's own `beforeEach` deletes both env vars, so every test below is exercising the
+ * DEFAULT-root branch specifically.
+ */
+describe("Gate decision (Tom, PAR-805/PAR-859, 2026-09-18) — the DEFAULT cache root is auto-tightened when found looser than 0700", () => {
+  it("a pre-existing default root at 0755 is tightened to 0700 on the next call, with one stderr line naming the mode change", () => {
+    mkdirSync(current(), { recursive: true });
+    chmodSync(current(), 0o755);
+    expect(lstatSync(current()).mode & 0o777).toBe(0o755);
+    const root = cacheRoot({ warn: () => {} });
+    const notes: string[] = [];
+
+    expect(ensureCacheRoot(root, (m) => notes.push(m))).toBe(true);
+
+    expect(lstatSync(current()).mode & 0o777).toBe(0o700);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(current());
+    expect(notes[0]).toContain("0755");
+    expect(notes[0]).toContain("tightened");
+  });
+
+  it("says it once per process, however many times ensureCacheRoot is called for the same root", () => {
+    mkdirSync(current(), { recursive: true });
+    chmodSync(current(), 0o755);
+    const root = cacheRoot({ warn: () => {} });
+    const notes: string[] = [];
+
+    ensureCacheRoot(root, (m) => notes.push(m));
+    ensureCacheRoot(root, (m) => notes.push(m));
+    ensureCacheRoot(root, (m) => notes.push(m));
+
+    expect(notes).toHaveLength(1);
+  });
+
+  it("does not touch a default root that is already 0700 — no warning, nothing to tighten", () => {
+    mkdirSync(current(), { recursive: true, mode: 0o700 });
+    const root = cacheRoot({ warn: () => {} });
+    const notes: string[] = [];
+
+    expect(ensureCacheRoot(root, (m) => notes.push(m))).toBe(true);
+
+    expect(lstatSync(current()).mode & 0o777).toBe(0o700);
+    expect(notes).toEqual([]);
+  });
+
+  /**
+   * A hardening attempt must never be the reason an ordinary retrieval fails (this function's
+   * own doc comment). `EPERM` here stands for the realistic case: a default root now owned by a
+   * different user than the one running this process, or a read-only filesystem it sits on.
+   */
+  it("EPERM on chmod is warned about, never thrown — ensureCacheRoot still returns true and leaves the root exactly as it was", () => {
+    mkdirSync(current(), { recursive: true });
+    chmodSync(current(), 0o755);
+    chmodImpl = () => {
+      const e = new Error("EPERM: operation not permitted, chmod") as NodeJS.ErrnoException;
+      e.code = "EPERM";
+      throw e;
+    };
+    const root = cacheRoot({ warn: () => {} });
+    const notes: string[] = [];
+
+    let result: boolean | undefined;
+    expect(() => {
+      result = ensureCacheRoot(root, (m) => notes.push(m));
+    }).not.toThrow();
+
+    expect(result).toBe(true); // the directory is still usable — only the chmod attempt failed
+    expect(lstatSync(current()).mode & 0o777).toBe(0o755); // left exactly as it was
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toContain(current());
+    expect(notes[0]).toContain("could not tighten");
+    expect(notes[0]).toContain("EPERM");
+  });
+
+  /**
+   * security-architect (Phase 1b review round, optional hardening) — the TOCTOU-narrowing
+   * ownership guard: `chmodSync` is only attempted when the directory `ensureCacheRoot` just
+   * `lstat`'d is owned by THIS process. `process.getuid` is mocked here, not `lstatSync` — the
+   * real directory this test creates is genuinely owned by whatever user runs the suite, so
+   * making `process.getuid()` report a DIFFERENT uid is what fakes the mismatch, without needing
+   * a second filesystem identity this test cannot create.
+   */
+  it("a default root not owned by this process is left untouched, with a distinct message, not silently tightened (mutation target: the ownedByThisProcess/stat.uid guard)", () => {
+    mkdirSync(current(), { recursive: true });
+    chmodSync(current(), 0o755);
+    const realUid = process.getuid!();
+    const getuidSpy = vi.spyOn(process, "getuid").mockReturnValue(realUid + 1);
+    try {
+      const root = cacheRoot({ warn: () => {} });
+      const notes: string[] = [];
+
+      expect(ensureCacheRoot(root, (m) => notes.push(m))).toBe(true);
+
+      expect(lstatSync(current()).mode & 0o777).toBe(0o755); // NOT tightened
+      expect(notes).toHaveLength(1);
+      expect(notes[0]).toContain(current());
+      expect(notes[0]).toContain("not owned by this process");
+      expect(notes[0]).not.toContain("tightened"); // distinct from the successful-tighten message
+    } finally {
+      getuidSpy.mockRestore();
+    }
   });
 });

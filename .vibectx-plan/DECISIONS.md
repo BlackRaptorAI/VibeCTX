@@ -1297,27 +1297,48 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   target with no warning at all until a much later, unrelated eviction sweep happened to
   trigger — and by the time that sweep's warning printed, its wording ("the link was not
   followed") was already false, since the write had gone through.
-  **Scope, stated precisely (code-reviewer/security-architect review round, PAR-786):** this
-  covers exactly the per-library documentation cache reached through `readCache`/`writeCache`/
-  `touchCache` — nothing else in the cache root gets this policy from this item. `writeIndex`/
-  `readIndex` (`search-index.ts`), `activity-log.ts`, `writeProjectRecord` (`project-store.ts`),
-  `saveResolvedEntry` (`resolved-store.ts`) and `saveDoctorVerdicts` (`doctor-store.ts`) all still
-  call a bare `mkdirSync(cacheRoot(), { recursive: true })` (or an equivalent) with no
-  `isRealDirectory` guard, and `readIndex` reads `index.json` back with `statSync`, which follows
-  a symlink with no guard at all — so a symlinked `VIBECTX_CACHE_DIR` still lets those five
-  stores write through the link (silently, no warning) and lets `readIndex` serve a planted
-  `index.json` from the far side of it. Tracked as **PAR-859**, filed against this same
-  symlinked-root policy, not fixed in this branch (five other modules is real scope growth
-  beyond one issue).
-  **Widened here (code-reviewer, PAR-805 review round, since this is the other half of the same
-  tracking record as D-84 below):** PAR-859's read-side remainder is not `readIndex` alone.
-  `readResolvedEntries` (`resolved-store.ts`), `readDoctorVerdicts` (`doctor-store.ts`), and
-  `readProjectRecord` (`project-store.ts`) all call a bare `readFileSync` on their own target
-  path with no `isRegularFile`/`lstat` guard either, and still follow a symlink planted there —
-  found during PAR-805's own review, after PAR-805's `newerSchemaVersion` fix closed only the
-  SCHEMA-VERSION PROBE those three stores also call, never their own actual data read. PAR-859's
-  scope is therefore: `readIndex`, `readResolvedEntries`, `readDoctorVerdicts`, and
-  `readProjectRecord` — four unguarded data reads, not one.
+  **Scope, as of Phase 1b (D-85) — CLOSED for the whole cache directory, not only the per-library
+  documentation cache.** This entry's ORIGINAL scope note (code-reviewer/security-architect
+  review round, PAR-786) said the leaf-`lstat` symlink policy covered exactly `readCache`/
+  `writeCache`/`touchCache`, with the other five stores' writes and `readIndex`'s read explicitly
+  named as PAR-859's still-open scope. PAR-859 (plus PAR-860/PAR-862, landed together as D-85) has
+  since closed that gap: every write path under the cache root now goes through `ensureCacheRoot`
+  (`cache.ts`), which refuses a symlinked `dir` outright before ever calling `mkdirSync` — the six
+  sites are `writeCache` (`cache.ts`, root then per-library directory), `saveResolvedEntry`
+  (`resolved-store.ts`), `writeIndex` (`search-index.ts`), `writeProjectRecord`
+  (`project-store.ts`, root then its `projects/` subdirectory, checked independently),
+  `saveDoctorVerdicts` (`doctor-store.ts`), and `recordActivity` (`activity-log.ts`). Every read
+  of a store's own file now refuses a symlink planted at its own path: `readResolvedEntries`,
+  `readDoctorVerdicts`, and `readProjectRecord` via `isRegularFile` (`atomic-store.ts`), and
+  `readIndex` via its own `lstat`-based `isFile()` check (mirroring `cache-meta.ts`'s
+  `readMetaFile` idiom, replacing the `statSync` call that used to follow a symlink) —
+  `readActivityEntries` closed first, in PAR-805/D-84. `saveResolvedEntry` and
+  `saveDoctorVerdicts` both read-merge-persist internally (they call their own read function to
+  merge a new record into the existing set before writing back), so closing their read guard also
+  closes the more severe exposure D-84 first named for `resolved-store.ts`: a planted entry no
+  longer gets adopted into the real file on the next save (`test/resolved-store.test.ts`,
+  `test/doctor-store.test.ts`). `writeProjectRecord` does not read-merge-persist, so its guard
+  closes a served-and-discarded read only. See D-85 below for the full account, including the
+  gate decision (auto-tighten the default root) landed alongside it. **A symlinked cache ROOT
+  (not just the store's own leaf file) is ALSO refused on all four reads, closed rather than
+  merely disclosed** — code-reviewer's Phase 1b review round PROVED with an executed probe that
+  the leaf-only guards above are not sufficient alone: `lstat`/`isRegularFile` inspects only the
+  FINAL path component, so a symlinked ROOT (an intermediate component of, e.g.,
+  `resolvedStorePath()`) whose target genuinely holds a real store file was still resolved for
+  ordinary directory traversal and served in full — the leaf check never even saw a symlink. Each
+  of `readResolvedEntries`, `readDoctorVerdicts`, `readProjectRecord`, and `readIndex` now also
+  checks `isRealDirectory(cacheRoot())` (`cache.ts`, already exported and reused by `readCache`/
+  `touchCache` for the identical reason) before ever inspecting its own leaf — root, then leaf,
+  matching `readCache`'s own ordering — so a symlinked root reads as absent (or, for `readIndex`
+  specifically, empty with no `problem` note, the same "nothing to search yet" treatment a missing
+  root already gets) regardless of what sits at the far end of the link. Proved by a dedicated test
+  per store — a genuinely valid file sitting at the symlink's TARGET, read through a symlinked
+  ROOT — DISTINCT from each store's own leaf-symlink test above, since neither exercises the other
+  (`test/resolved-store.test.ts`, `test/doctor-store.test.ts`, `test/project-store.test.ts`,
+  `test/search-index.test.ts`). An earlier version of this entry recorded this as a disclosed,
+  unclosed residual, matching `activity-log.ts`'s own narrower precedent; that precedent is now
+  itself out of date for these four functions (though `readActivityEntries` was not reopened by
+  this correction — it was not named in code-reviewer's probe and is unchanged).
   **What changed, concretely:** `isRealDirectory` (previously private to this file, guarding
   only `dropFollowedPageCache`) is now exported and also guards `readCache`'s and `touchCache`'s
   root and per-library directory, mirroring `cache-evict.ts`'s `rootIsSweepable`. A new
@@ -1367,7 +1388,10 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
 
 ## D-84 — decided 2026-09-18, executing PAR-805 (cache-root permission consistency and symlink-following on read)
 
-- **D-84** 2026-09-18 — **Every site that may create the cache root now routes through one
+- **D-84** 2026-09-18 (amended by D-85, 2026-09-18 — see below: the "pre-existing unsafe root,
+  disclosed, never tightened or refused" clause a few paragraphs down is now true only for an
+  env-configured root; the DEFAULT root is auto-tightened, per a gate decision Tom recorded after
+  this entry was written) — **Every site that may create the cache root now routes through one
   shared `ensureCacheRoot(dir, warn?)` (exported, `src/cache.ts`), which creates the directory
   owner-only (`mkdirSync(dir, { recursive: true, mode: 0o700 })`) instead of at the platform
   default. Every write of a store's own JSON file now passes `{ mode: 0o600 }` to `writeAtomic`
@@ -1472,3 +1496,183 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   (`isRegularFile` exported, `newerSchemaVersion`), `src/activity-log.ts`, `src/resolved-store.ts`,
   `src/search-index.ts`, `src/project-store.ts`, `src/doctor-store.ts`; `test/cache-permissions.test.ts`,
   `test/atomic-store.test.ts`, `test/activity-log.test.ts`, `test/cache.test.ts` (PAR-805).
+
+---
+
+## D-85 — decided 2026-09-18, executing PAR-859/PAR-860/PAR-862 (Phase 1b — cache directory, every store) and a gate decision amending D-84
+
+- **D-85** 2026-09-18 — **The whole cache directory now refuses a symlinked root or subdirectory
+  on write, refuses a symlink planted at a store's own file on read, every temp-file write refuses
+  to open an existing entry (symlink or not) at its own predictable path, and `writeAtomic`
+  defaults new files to owner-only.** One PR, three Linear issues (PAR-859 High, PAR-860 Medium,
+  PAR-862 Low) plus the auto-tighten gate decision below, landed together per Tom's own framing at
+  the Phase 1 gate: "close it now rather than carry two symlink policies through Phases 2–3."
+  **PAR-859 — the mechanism.** `ensureCacheRoot` (`cache.ts`) changed its contract from `void` to
+  `boolean`: `true` when `dir` now exists safely (freshly created, or already a real,
+  non-symlinked directory), `false` when refused — a symlink sits at exactly that leaf — in which
+  case `mkdirSync` is never attempted. The check is the same leaf-`lstat` policy D-83 established
+  (`isSymlinkAt`, already used by `writeCache`'s own pre-check) run FIRST, before this function's
+  existing PAR-805 permission logic, and deduplicated by a THIRD set (`refusedEnsureRootDirs`) —
+  deliberately not a reuse of `refusedWriteRoots` (writeCache's own, earlier, differently-scoped
+  dedup) or `warnedLooseRoots` (a different fact: a loose permission, not a symlink); reusing
+  either could suppress one caller's warning behind an unrelated caller's dedup entry for the
+  identical `dir`. Every call site now checks the return value and bails, writing nothing:
+  `saveResolvedEntry` (`resolved-store.ts`), `writeIndex` (`search-index.ts`, checked explicitly
+  rather than left to its own surrounding try/catch, since a refusal does not throw),
+  `saveDoctorVerdicts` (`doctor-store.ts`), `recordActivity` (`activity-log.ts`, a plain `return;`
+  so a refusal cannot fall through into `writeAtomic` and print a second, confusing warning on top
+  of `ensureCacheRoot`'s own), and BOTH of `writeProjectRecord`'s calls (`project-store.ts`) —
+  independently: a symlink could be planted specifically at `projects/` with a perfectly real
+  root, or at the root with a perfectly real (not yet created) `projects/`, and MEASURED during
+  this item's own mutation-check pass (`test/project-store.test.ts`) that checking only the FIRST
+  call's return value leaves the second shape completely uncaught. `writeCache`'s own two calls
+  (`cache.ts`) keep ignoring the return value, unchanged — TRACED, not assumed: `writeCache`'s own
+  `existsAsNonDirectory`/`isSymlinkAt` pre-checks (D-83) already run before either call, so `dir`
+  is already proven non-symlink by the time they run and a `false` there cannot occur.
+  **PAR-859 — the four reads, leaf AND root.** `readResolvedEntries` (`resolved-store.ts`),
+  `readDoctorVerdicts` (`doctor-store.ts`), and `readProjectRecord` (`project-store.ts`) each
+  gained `if (!isRegularFile(<path>)) return <the existing miss result>;` as a leaf check
+  (`isRegularFile`, `atomic-store.ts`, already shipped in D-84). `search-index.ts`'s `readIndex`
+  was restructured rather than patched: its own pre-existing `statSync` size check (which FOLLOWS
+  a symlink) became one `lstatSync` call whose `Stats` answers BOTH the type check and the size
+  check — the same idiom `cache-meta.ts`'s `readMetaFile` already established in this codebase.
+  **CORRECTED mid-review (code-reviewer, Phase 1b review round, BLOCKING) — the leaf check alone
+  is not enough.** An earlier version of this item stopped at the leaf and left the cache ROOT
+  unchecked, on the theory that this matched `readActivityEntries`'s own precedent; code-reviewer
+  PROVED with an executed probe that a symlinked ROOT whose target genuinely holds a real store
+  file is followed for ordinary path traversal regardless (only the FINAL path component is ever
+  un-resolved by `lstat`), so the leaf-only guard never even saw a symlink and the planted file's
+  real content was served in full. Each of the four functions now ALSO checks
+  `isRealDirectory(cacheRoot())` (`cache.ts`, already exported and reused by `readCache`/
+  `touchCache`) before its own leaf check, root then leaf, matching `readCache`'s own ordering —
+  closing the gap rather than leaving it disclosed. `readIndex`'s own leaf-symlink case is,
+  separately, no longer silent: a symlink (or any other non-regular entry) at `index.json`'s own
+  path now reports a content-free `problem` note ("not a regular file"), corrected from an earlier
+  claim that silence here mirrored the JSON-parse-error branch's leak-prevention reasoning — that
+  branch's actual concern is V8 quoting file BYTES in its error text, which a bare type check
+  never reads at all, so there was nothing to protect by staying silent; the ROOT check above,
+  by contrast, DOES stay silent, matching the "no file yet" treatment a missing root already gets
+  rather than treating an absent root as an anomaly about the index file specifically.
+  **The two read-merge-persist poisonings, closed, not merely disclosed.** D-84 first named the
+  worse-than-served-and-discarded shape for `resolved-store.ts`: `saveResolvedEntry` calls
+  `readResolvedEntries()` internally to merge a new entry before writing back, so a planted
+  symlink's attacker-authored entry used to be READ, MERGED, and PERSISTED into the real file on
+  the next save. `readResolvedEntries`'s new guard closes it — proved by a test that plants the
+  poisoned entry, saves a DIFFERENT legitimate library, and asserts the planted entry is absent
+  from the real bytes on disk, not merely that the save "worked" (`test/resolved-store.test.ts`).
+  `doctor-store.ts`'s `saveDoctorVerdicts` has the IDENTICAL shape (it also calls
+  `readDoctorVerdicts()` to merge before writing back) — found by re-reading it during this item,
+  not named in the runbook's own gate text, closed by the same guard and proved by the equivalent
+  test (`test/doctor-store.test.ts`). **CONFIRMED, not assumed:** `project-store.ts`'s
+  `writeProjectRecord` does NOT read-merge-persist — it serialises the `record` argument it was
+  handed directly — so its own read guard closes a served-and-discarded exposure only; a plain
+  refusal test is what its suite carries.
+  **PAR-860 — temp-file writes gain `flag: "wx"` (`O_CREAT|O_EXCL`).** `writeAtomic`
+  (`atomic-store.ts`) and `cache.ts`'s own two direct `writeFileSync` calls for `writeCache`'s
+  `contentTmp`/`metaTmp` all used to default to `"w"` (`O_WRONLY|O_CREAT|O_TRUNC`), which FOLLOWS
+  a symlink already sitting at the destination — and `tempPathFor`'s name
+  (`${path}.${pid}.${Date.now()}.tmp`) is predictable to within a process id and a millisecond.
+  `wx` refuses to open ANY existing entry at that exact path, symlink or not, even a dangling one
+  (POSIX: `O_CREAT|O_EXCL` against a path naming a symlink fails `EEXIST` regardless of the link's
+  target, never following it) — safe against a false failure, since a genuine collision needs two
+  writes to the identical path in the identical millisecond from the identical process, which this
+  codebase's single-threaded synchronous execution model cannot produce. The existing
+  `catch { rmSync(tmp, { force: true }); throw e; }` cleanup needed no change: `rmSync` on a
+  symlink removes the link itself, never its target. Proved by planting a symlink at the exact
+  predicted temp path (`Date.now` pinned for the duration of one test, mirroring
+  `test/cache-root.test.ts`'s own pattern of controlling one primitive to make a timing-dependent
+  attack deterministic) and asserting the write throws, the real target is never created, and the
+  symlink's own target is untouched (`test/atomic-store.test.ts`, `test/cache-permissions.test.ts`
+  — the latter proving `contentTmp` and `metaTmp` INDEPENDENTLY, after this item's own
+  mutation-check pass found that a symlink at `metaTmp` alone, with `contentTmp`'s flag intact,
+  made no existing test fail).
+  **PAR-862 — `writeAtomic` defaults `opts.mode` to `0o600`.** CONFIRMED before changing the
+  default (`grep -rln "writeAtomic(" src/*.ts`): every one of the six actual callers already
+  passes `{ mode: 0o600 }` explicitly, so this changes no current caller's behaviour; it exists so
+  a future seventh store that forgets to pass `mode` still gets owner-only rather than the
+  platform default. A recursive whole-cache-tree test (`test/cache-permissions.test.ts`) exercises
+  all six writers against one fresh root and walks EVERY directory and file `readdirSync` finds,
+  recursively — not by name, the way the existing per-artifact tests do — asserting `0700`/`0600`
+  throughout; this is the test that would catch the hypothetical seventh store the per-artifact
+  tests cannot.
+  **Gate decision (Tom, 2026-09-18) — amends D-84.** D-84 recorded, for EVERY pre-existing loose
+  cache root without exception, "disclosed, never tightened or refused, and that is the decision,
+  not an oversight." That blanket claim is now narrower, by Tom's own ruling recorded in Linear on
+  PAR-805: it holds only for an env-CONFIGURED root (`VIBECTX_CACHE_DIR` or the deprecated
+  `DOCS_CACHE_DIR` — either counts as configured, mirroring `configured()`'s own emptiness rule
+  exactly; corrected the same day from an earlier draft of the ruling that named
+  `VIBECTX_CACHE_DIR` alone). The DEFAULT root (`~/.vibectx`, reached only when NEITHER env var is set) found looser
+  than `0700` is now `chmod`'d to `0700` on the next call to `ensureCacheRoot`, with one stderr
+  line naming the mode found and what was done. Rationale for the asymmetry, not a reversal of
+  D-84's own reasoning: `~/.vibectx` is vibectx's OWN directory, created under `$HOME` by an
+  earlier vibectx or by hand — never one a user deliberately pointed a shared process at the way
+  an env-configured root can be — so D-84's "moving the trust boundary by choice" framing, which
+  is what justified never touching a loose root at all, simply does not apply to it; there is no
+  other process this tightening could be taking access away from on purpose. `chmodSync` runs
+  inside its own `try/catch` — a failure (`EPERM`, most plausibly a root now owned by a different
+  user, or a read-only filesystem) is warned about and the root is left exactly as it was; never
+  thrown, so a hardening attempt can never be the reason an ordinary retrieval fails. Four tests
+  (`test/cache-root.test.ts`): a loose default root is tightened with one stderr line; a second
+  call in the same process says nothing more; an already-`0700` default root is untouched and
+  silent; `EPERM` on `chmod` is warned about, not thrown, and `ensureCacheRoot` still returns
+  `true`. The pre-existing env-configured-root test (`test/cache-permissions.test.ts`) was run
+  unmodified and still passes, confirming that branch's behaviour is genuinely unchanged.
+  **D-83's scope note is rewritten in place** (not merely amended) to state the whole cache
+  directory is now covered — see D-83 above, including the CLOSED (not merely disclosed)
+  root-vs-leaf gap code-reviewer's Phase 1b review round found: `readResolvedEntries`,
+  `readDoctorVerdicts`, `readProjectRecord`, and `readIndex` each also check
+  `isRealDirectory(cacheRoot())` before their own leaf check now, so a symlinked cache ROOT is
+  refused on these four reads too, not only on write.
+  **Review-round hardening, both required by the review's BLOCKING finding and optional but taken
+  (security-architect's suggestions, both one-liners the review round judged cheap enough to take
+  in this same PR rather than deferring):**
+  (1) The auto-tighten `chmodSync` call now runs only when the `lstat`'d directory's owner
+  (`stat.uid`) matches this process's own (`process.getuid?.()`) — narrows, without fully closing,
+  a real TOCTOU between the mode-check `lstat` and the `chmodSync` call (`chmod(2)` dereferences
+  symlinks; there is no portable `lchmod`), and a distinct stderr message ("not owned by this
+  process") now covers the case a default root exists but belongs to someone else, rather than
+  reusing the env-configured message's "did you deliberately share this" framing, which does not
+  fit that shape. (2) `ensureCacheRoot` gained a central post-`mkdirSync` recheck
+  (`isRealDirectory(dir)`, mirroring `writeCache`'s own pre-existing copy of the identical
+  belt-and-suspenders TOCTOU guard) so all FIVE of its other call sites get the same protection
+  `writeCache`'s own two calls already had; `writeCache`'s own copy is left in place (redundant,
+  harmless, no behaviour change) rather than removed. MUTATION-TESTED and DISCLOSED, NOT PROVEN BY
+  A TEST, matching `writeCache`'s own identical, pre-existing disclosure for the same class of
+  check: removing this recheck makes no test in the suite fail, because nothing in a synchronous,
+  single-process test can change `dir`'s own leaf between `isSymlinkAt`'s check and `mkdirSync` —
+  the race it guards is real but requires a genuine second process.
+  **Comment corrections, code-reviewer's Phase 1b review round (no behaviour change):** the
+  `refusedEnsureRootDirs` set's own comment previously gave the WRONG reason for keeping it
+  separate from the two existing dedup sets (it claimed reuse "could suppress one caller's warning
+  behind an unrelated caller's... callback", but `refusedEnsureRootDirs` ITSELF has exactly that
+  per-`dir`-not-per-caller property, which is now stated as the deliberate, accepted trade-off it
+  is, including the traced consequence that `resolve_library`'s own response can degrade to a
+  generic "resolved.json could not be written" instead of naming a symlink, when an earlier call
+  already consumed the one warning for the same root — `src/resolve.ts:469`, `src/resolve.ts:753`).
+  The real reason the three sets stay separate — they track three DIFFERENT FACTS about the same
+  `dir` — is now what the comment actually says. `search-index.ts`'s `readIndex` doc comment's
+  false claim of "identical reasoning" to the JSON-parse-error branch's leak-prevention logic is
+  corrected (that branch's concern is V8 quoting file BYTES; a bare type check reads no content at
+  all), and the leaf-symlink case now reports a content-free `problem` note instead of staying
+  silent, for consistency with its sibling anomaly branches and this project's own "fallbacks are
+  stated, never silent" rule (`CLAUDE.md`) — the ROOT-level check added by the BLOCKING fix above
+  stays silent, deliberately, matching the "no file yet" treatment a missing root already gets.
+  A `test/cache-permissions.test.ts` test's own comments (the `metaTmp` PAR-860 case) wrongly
+  claimed `contentTmp`'s write AND rename both succeeded before `metaTmp`'s refusal — TRACED: only
+  the write succeeds; `writeCache` writes both temp files before renaming either, so `metaTmp`'s
+  failure is reached before any rename runs — corrected, with `expect(existsSync(contentPath)).toBe(false)`
+  added as the assertion that would have caught the wrong comment. The six-writer describe block
+  crediting all six symlinked-root refusals to the new `isSymlinkAt(dir)` mutation target is
+  corrected to note `writeCache`'s own case is a regression guard on its OLDER, already-shipped
+  D-83/PAR-786 check (confirmed by both the reasoning and this suite's own distinct stderr text
+  for that one case), not evidence for the new one.
+  **Informational, not fixed here (security-architect):** a legitimately shared `~/.vibectx`
+  relying on group access between two users could have the auto-tighten branch lock out the
+  second user's access on the next process that happens to find it loose — real, narrow, and
+  already fails safely (this only warns, never crashes); not a scenario this PR changes further.
+  Ref: `src/cache.ts` (`ensureCacheRoot`, `usingDefaultCacheRoot`, `refusedEnsureRootDirs`),
+  `src/atomic-store.ts` (`writeAtomic`), `src/resolved-store.ts`, `src/doctor-store.ts`,
+  `src/project-store.ts`, `src/search-index.ts`, `src/activity-log.ts`; `test/cache-root.test.ts`,
+  `test/cache-permissions.test.ts`, `test/atomic-store.test.ts`, `test/resolved-store.test.ts`,
+  `test/doctor-store.test.ts`, `test/project-store.test.ts`, `test/search-index.test.ts`
+  (PAR-859, PAR-860, PAR-862).

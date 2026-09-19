@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot, ensureCacheRoot } from "./cache.js";
+import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
 import { splitSections, HEADING_WEIGHT, type SplitSection } from "./retrieval.js";
 import { MAX_TOKEN_CHARS, RETRIEVAL_VERSION, tokenize } from "./tokenize.js";
@@ -279,18 +279,53 @@ function jsonProblem(e: unknown): string {
  *
  * Envelope failures reject the whole file (K1): not an object, `schemaVersion` ≠ ours,
  * `libraries` not an object. Entry failures drop that library only.
+ *
+ * PAR-859 — the type check and the size check are now ONE `lstatSync` call, not `statSync`
+ * (which FOLLOWS a symlink) followed by a separate read: mirrors `cache-meta.ts`'s
+ * `readMetaFile`, the established idiom in this codebase for "one `lstat` does double duty for
+ * both the type check and the size check, not two syscalls". A symlink (or, the same check,
+ * anything else non-regular — a directory, most plausibly) at `index.json`'s own path is treated
+ * as an ANOMALY, the same as an oversized file or a wrong schema version below, WITH a `problem`
+ * note — corrected from an earlier version of this comment (code-reviewer, Phase 1b review round)
+ * that claimed the SAME leak-prevention reasoning as the JSON-parse-error branch below justified
+ * staying silent instead. That claim did not hold up: the parse-error branch's actual concern is
+ * that V8's syntax-error message quotes BYTES FROM THE FILE verbatim (a real content leak); a
+ * symlink/non-regular-file refusal leaks no content at all — there is nothing to scrub. The
+ * oversized-file branch immediately below already prints the full `path` into its own `problem`
+ * message, which directly contradicts the earlier claim that naming an anomalous condition here
+ * is something this function must avoid. This project's own convention (`CLAUDE.md`: "fallbacks
+ * are stated, never silent") argues for a message, not silence, once the actual (non-)reason for
+ * silence is examined — a symlinked or non-regular `index.json` is not the ordinary first-run
+ * "no file yet" state (which stays silent, below — that is a normal state, not a fallback), it is
+ * exactly the kind of anomaly this function's other branches already name.
  */
 export function readIndex(): LoadedIndex {
   const path = searchIndexPath();
   const empty = new Map<string, IndexedDocument>();
-  let size: number;
+  // PAR-859 (code-reviewer, Phase 1b review round, BLOCKING) — `lstat` on the joined path below
+  // only inspects the LEAF (`index.json` itself); a symlinked cache ROOT (an intermediate path
+  // component) whose target genuinely holds a real `index.json` is resolved for traversal
+  // regardless, so the leaf check alone never sees it. `isRealDirectory(cacheRoot())` (`cache.ts`,
+  // already exported for exactly this reuse by `readCache`/`touchCache`) closes it: a symlinked
+  // root reads as absent before the leaf is inspected at all — matching `readCache`'s own
+  // root-then-leaf ordering. Silent, like the "no file yet" case just below it, not a `problem`:
+  // an absent or unreachable ROOT is the same "nothing to search yet" state a missing file is,
+  // not an anomaly about the index file itself.
+  if (!isRealDirectory(cacheRoot())) return { libraries: empty };
+  let stat: Stats;
   try {
-    size = statSync(path).size;
+    stat = lstatSync(path);
   } catch {
     return { libraries: empty }; // no file yet is the ordinary first-run state, not a problem
   }
-  if (size > MAX_INDEX_FILE_BYTES) {
-    return { libraries: empty, problem: `search index ignored: ${path} is ${size} bytes, over the ${MAX_INDEX_FILE_BYTES}-byte limit` };
+  if (!stat.isFile()) {
+    // A symlink, a directory, or anything else non-regular at index.json's own path: an anomaly,
+    // named above, but the message carries no content from whatever is actually there — only the
+    // fact that something non-regular sits at a path this function already knows.
+    return { libraries: empty, problem: "search index ignored: not a regular file (a symlink or a directory); rebuilt as needed" };
+  }
+  if (stat.size > MAX_INDEX_FILE_BYTES) {
+    return { libraries: empty, problem: `search index ignored: ${path} is ${stat.size} bytes, over the ${MAX_INDEX_FILE_BYTES}-byte limit` };
   }
   let parsed: unknown;
   try {
@@ -413,7 +448,12 @@ export function writeIndex(
     // PAR-805: owner-only (0700), and warns once if the root pre-existed looser. Wrapped: this
     // module's own `warn` default has no trailing newline, unlike `ensureCacheRoot`'s own
     // (`toStderr`) — see `resolved-store.ts`'s identical wrap for the full reasoning.
-    ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`));
+    //
+    // PAR-859: checked explicitly and returned early on refusal, rather than left to the
+    // surrounding try/catch (which already returns `false` on any exception) — `ensureCacheRoot`
+    // refusing a symlink does not throw, so relying on the catch here would silently mask the
+    // refusal as an ordinary write failure rather than the specific one it is.
+    if (!ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`))) return false;
     const newer = newerSchemaVersion(path, SEARCH_INDEX_SCHEMA_VERSION);
     if (newer !== undefined) {
       warn(

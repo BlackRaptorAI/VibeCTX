@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync, mkdirSync, symlinkSync, lstatSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -176,6 +176,72 @@ describe("search-index · file discipline (PAR-659, D-33)", () => {
     expect(readIndex().problem).toMatch(/retrieval version/);
     plant({ ...onDisk, retrievalVersion: undefined });
     expect(readIndex().libraries.size).toBe(0);
+  });
+
+  /**
+   * PAR-859 (mutation target: readIndex's lstat-based isFile() check, restructured from a bare
+   * `statSync` size check that FOLLOWED a symlink) — a symlink planted at `index.json`'s own path
+   * is treated as an anomaly, the same as an oversized file or a bad schema version: `libraries`
+   * reads empty and a `problem` note is reported, but one that names the CONDITION ("not a regular
+   * file"), never any content from whatever the link actually points at — corrected from an
+   * earlier version of this test/comment pair (code-reviewer, Phase 1b review round) that claimed
+   * silence here mirrored the JSON-parse-error branch's leak-prevention reasoning; that branch's
+   * actual concern is V8 quoting file BYTES in its error text, which does not apply to a bare
+   * type check that reads no content at all — see `readIndex`'s own doc comment for the full
+   * correction.
+   */
+  it("a symlink planted at index.json's own path reads as empty with a content-free problem note, not through the link (PAR-859)", () => {
+    writeIndex(one());
+    expect(readIndex().libraries.size).toBe(1); // the real file round-trips first
+    const sibling = join(dir, "sibling.json");
+    const onDisk = readFileSync(searchIndexPath(), "utf8");
+    writeFileSync(sibling, onDisk, "utf8"); // genuinely valid content at the symlink's target
+    rmSync(searchIndexPath(), { force: true });
+    symlinkSync(sibling, searchIndexPath());
+
+    let result: ReturnType<typeof readIndex>;
+    expect(() => {
+      result = readIndex();
+    }).not.toThrow();
+    expect(result!.libraries.size).toBe(0);
+    expect(result!.problem).toMatch(/not a regular file/);
+    expect(result!.problem).not.toContain(onDisk); // the message names the CONDITION, never the target's content
+    expect(lstatSync(searchIndexPath()).isSymbolicLink()).toBe(true); // the link itself is untouched by the read
+  });
+
+  /**
+   * code-reviewer (Phase 1b review round, BLOCKING) PROVED with an executed probe that the test
+   * above is not the whole story: `lstat` on the joined path only inspects the LEAF (`index.json`
+   * itself). With `VIBECTX_CACHE_DIR` pointed at a symlink whose TARGET holds a genuinely real,
+   * valid `index.json`, the leaf check never sees a symlink — `lstat` resolves the ROOT (an
+   * intermediate path component) for ordinary traversal and finds a real regular file at the far
+   * end. A different scenario from the test above; needs its own proof. Silent, not a `problem`
+   * note (unlike the leaf-symlink case above) — a symlinked/unreachable ROOT is the same "nothing
+   * to search yet" state a missing root is, per `readIndex`'s own root-check comment, not an
+   * anomaly about the index file specifically.
+   */
+  it("readIndex refuses even when only the cache ROOT is a symlink, whose target genuinely holds a valid index.json — silently, no problem note", () => {
+    const target = mkdtempSync(join(tmpdir(), "vibectx-index-root-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-index-root-symlink-parent-"));
+    const linked = join(parent, "root");
+    process.env.VIBECTX_CACHE_DIR = target;
+    writeIndex(one());
+    const onDisk = readFileSync(searchIndexPath(), "utf8"); // <target>/index.json, genuinely valid
+    symlinkSync(target, linked);
+    process.env.VIBECTX_CACHE_DIR = linked;
+    try {
+      let result: ReturnType<typeof readIndex>;
+      expect(() => {
+        result = readIndex();
+      }).not.toThrow();
+      expect(result!.libraries.size).toBe(0); // must NOT return the entry sitting at the far end of the root symlink
+      expect(result!.problem).toBeUndefined();
+      expect(readFileSync(join(target, "index.json"), "utf8")).toBe(onDisk); // the target's own file is untouched
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
   });
 
   it("D-40: a payload over MAX_INDEX_FILE_BYTES sheds its largest entries instead of writing a file no read will accept", () => {

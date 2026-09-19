@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot, ensureCacheRoot } from "./cache.js";
+import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
+import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, pypiNameError } from "./package-names.js";
 import { MAX_URLS_PER_ENTRY } from "./limits.js";
@@ -74,8 +74,26 @@ export function toResolvedEntry(record: unknown): LibraryEntry | undefined {
   return entry;
 }
 
-/** Every valid persisted resolution, in file order; [] when the file is missing, corrupt or of another schema. */
+/** Every valid persisted resolution, in file order; [] when the file is missing, corrupt, of
+ *  another schema, OR (PAR-859) a symlink rather than the regular file `saveResolvedEntry` writes
+ *  — `isRegularFile` (`atomic-store.ts`, `lstat`, never `stat`) refuses to follow a link planted
+ *  at `resolved.json`'s own path. Closes more than a served-and-discarded read: `saveResolvedEntry`
+ *  below calls this function to merge a new entry into the existing list before writing back, so
+ *  before this guard a planted symlink's attacker-authored entry would have been READ, MERGED,
+ *  AND PERSISTED into the real file on the next save (see `test/resolved-store.test.ts`'s
+ *  poisoning test, which proves the planted entry specifically, not just that the save "worked").
+ *
+ *  code-reviewer (Phase 1b review round) PROVED with an executed probe that the leaf check above
+ *  is not enough on its own: `isRegularFile`/`lstat` only inspects the FINAL path component, so a
+ *  symlinked cache ROOT (an intermediate component of `resolvedStorePath()`, not the leaf) whose
+ *  target genuinely holds a real `resolved.json` was still followed for traversal and its content
+ *  served in full — the leaf-only guard never even saw a symlink. `isRealDirectory(cacheRoot())`
+ *  (`cache.ts`, `lstat`, already exported and reused by `readCache`/`touchCache` for the identical
+ *  reason) closes it: a symlinked root reads as absent before the leaf is ever inspected, matching
+ *  `readCache`'s own root-then-leaf ordering. */
 export function readResolvedEntries(): LibraryEntry[] {
+  if (!isRealDirectory(cacheRoot())) return [];
+  if (!isRegularFile(resolvedStorePath())) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(resolvedStorePath(), "utf8"));
@@ -120,7 +138,11 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   // PAR-805 review round). `ensureCacheRoot` cannot fix this centrally: it has no way to inspect
   // whether the `warn` it was given already appends a newline (`toStderr` does; this module's
   // own default does not), so appending one itself would double it for callers that already do.
-  ensureCacheRoot(dir, (m) => warn(`${m}\n`));
+  //
+  // PAR-859: a symlinked `dir` is now refused by `ensureCacheRoot` itself (returns `false`,
+  // warns once) rather than silently written through — bail here, writing nothing, exactly as
+  // the K2 "newer schema" refusal below already does.
+  if (!ensureCacheRoot(dir, (m) => warn(`${m}\n`))) return false;
   const path = resolvedStorePath();
   const newer = newerSchemaVersion(path, RESOLVED_SCHEMA_VERSION);
   if (newer !== undefined) {

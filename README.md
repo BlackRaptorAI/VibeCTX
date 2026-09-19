@@ -891,11 +891,26 @@ matching the limit `fetchUrl` already applies to what it hands `writeCache` on a
 oversized or unreadable one reads as simply uncached rather than being loaded into memory. Before
 this, only cache **eviction** refused a symlinked root — ordinary reads and writes of the
 documentation cache did not.
-**This does not yet cover the rest of the cache directory**: the search index (`index.json`),
-the activity log (`activity.json`), per-project records (`projects/*.json`), saved package
-resolutions (`resolved.json`) and doctor verdicts (`doctor.json`) are still written — and, for
-the search index, read back — through whatever a symlinked `VIBECTX_CACHE_DIR` points at, with
-no warning. Tracked as **PAR-859**.
+**This now covers the whole cache directory, not only the documentation cache.** The search
+index (`index.json`), the activity log (`activity.json`), per-project records
+(`projects/*.json`), saved package resolutions (`resolved.json`) and doctor verdicts
+(`doctor.json`) all refuse to write through a symlinked cache root (or, for per-project records,
+a symlinked `projects/` subdirectory specifically) the identical way the documentation cache
+does — nothing is created on the far side of the link, and vibectx says so once on stderr. Each
+of those stores also refuses to read through a symlink, on EITHER of the two paths that matter:
+a symlink planted at the store's own file (a `resolved.json`, `doctor.json` or per-project record
+that is itself a symlink, or a hand-placed `index.json`) reads as simply absent (empty, for the
+search index, with a one-line note that something non-regular sits there — never any content from
+whatever it actually is); and, independently, a symlinked cache ROOT whose target directory
+happens to already hold a genuinely valid file at the right name is refused too, so pointing
+`VIBECTX_CACHE_DIR` at a symlink cannot smuggle a planted `resolved.json` (or any of the other
+four files) in merely by making sure something real-looking sits at the far end of the link. For
+`resolved.json` and `doctor.json` specifically this closes more than "served once and discarded":
+both stores merge a new record into the existing file before writing it back, so before this fix
+a symlink planted at either path could get its content adopted into the real file on the very
+next save; that path is closed too, not merely the read. Every temp file involved in any of these
+writes (see below) also refuses to open an existing entry — symlink or not — at its own
+predictable path, rather than writing through it.
 
 Separately from the symlink question above: every file and directory vibectx creates anywhere
 under the cache root is **owner-only** — directories at `0700`, files at `0600` — regardless of
@@ -903,21 +918,34 @@ which of the several operations that may write there happens to run first, and r
 the process's own umask. This covers the documentation cache, the search index, the activity
 log, project records, saved package resolutions and doctor verdicts alike; one shared helper
 enforces it everywhere a directory is created, so it is not something each store has to
-remember to do correctly on its own. This is **not retroactive**: a cache root that already
-existed with a looser mode before this behaviour shipped is left exactly as it was — never
-tightened, never refused — and vibectx says so once, on stderr, naming the mode it found.
-Pointing `VIBECTX_CACHE_DIR` at a directory shared with another user or process is a deliberate
-choice to move the trust boundary, the same framing the symlink paragraph above uses; an
-already-loose pre-existing directory is treated the same way — vibectx will not second-guess a
-setup you already made on purpose. (On POSIX platforms — Linux, macOS. Windows does not
-implement owner/group/other file permissions the same way, so `0700`/`0600` are not meaningful
-there in the way they are here; this project's own CI runs only on `ubuntu-latest`, so the
-exact-mode guarantee above is verified there, not on Windows.)
+remember to do correctly on its own. A newly-created file also defaults to owner-only even if a
+future store's own code forgets to say so explicitly.
+
+**Retroactive only for the DEFAULT cache root, and only that one.** If you set
+`VIBECTX_CACHE_DIR` (or the deprecated `DOCS_CACHE_DIR`) yourself, an existing directory found
+looser than `0700` is left exactly as it was — never tightened, never refused — and vibectx says
+so once, on stderr, naming the mode it found; pointing an explicit cache directory at a location
+shared with another user or process is a deliberate choice to move the trust boundary, the same
+framing the symlink paragraph above uses, and vibectx will not second-guess a setup you already
+made on purpose. Without either variable set — the ordinary default install, `~/.vibectx` — a
+pre-existing root found looser than `0700` **is** tightened, on the next run that touches it, with
+one stderr line naming the mode found and that it was corrected. The distinction: `~/.vibectx` is
+a directory vibectx itself creates under your home directory, never one you deliberately shared
+with another process, so there is no trust boundary being moved by tightening it — only an
+env-configured location carries that possibility. If the tightening itself fails (for example, a
+permissions error), vibectx says so on stderr and leaves the root as it found it, rather than
+failing the retrieval that triggered the check. (On POSIX platforms — Linux, macOS. Windows does
+not implement owner/group/other file permissions the same way, so `0700`/`0600` are not
+meaningful there in the way they are here; this project's own CI runs only on `ubuntu-latest`, so
+the exact-mode guarantee above is verified there, not on Windows.)
 
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
 killed process left behind before they write anything — but only once it is at least a
-minute old, so a second vibectx sharing the cache never has its in-flight write deleted.
+minute old, so a second vibectx sharing the cache never has its in-flight write deleted. Each
+temp file's own write also refuses to open whatever already sits at its exact, predictable
+path — symlink or not, even a dangling one — rather than writing through it, closing a window a
+predictable temp-file name would otherwise leave open to a planted symlink.
 
 **Upgrading from `~/.docs-cache-mcp`.** The cache used to live at `~/.docs-cache-mcp` and
 the override used to be called `DOCS_CACHE_DIR`. Both still work, and you do not have to do

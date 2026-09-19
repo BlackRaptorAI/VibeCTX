@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot, ensureCacheRoot } from "./cache.js";
+import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
+import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
 import type { DependencyEcosystem } from "./project-deps.js";
 import { cleanText } from "./text.js";
@@ -297,8 +297,24 @@ export function toProjectRecord(parsed: unknown, dir: string): ProjectRecord | u
   return { schemaVersion: PROJECT_RECORD_SCHEMA_VERSION, dir: parsed.dir, manifests, dependencies, warmedAt: parsed.warmedAt };
 }
 
-/** The record for `dir`, or undefined when absent, corrupt, of another schema, or for another dir. */
+/** The record for `dir`, or undefined when absent, corrupt, of another schema, for another dir,
+ *  or (PAR-859) a symlink rather than the regular file `writeProjectRecord` writes —
+ *  `isRegularFile` (`atomic-store.ts`, `lstat`, never `stat`) refuses to follow a link planted at
+ *  this project's record path. `writeProjectRecord` does NOT read this function's result to merge
+ *  before writing (CONFIRMED by reading it: it serialises the `record` argument it was handed
+ *  directly), so this closes a served-and-discarded read only, not a read-merge-persist one —
+ *  contrast `resolved-store.ts`'s `readResolvedEntries` and `doctor-store.ts`'s
+ *  `readDoctorVerdicts`, which are both.
+ *
+ *  code-reviewer (Phase 1b review round) PROVED the leaf-only guard above is not enough alone: a
+ *  symlinked cache ROOT (an intermediate component of `projectRecordPath(dir)`, not the leaf
+ *  `isRegularFile` inspects) whose target genuinely holds a real record is resolved for traversal
+ *  regardless, so the leaf check never even sees a symlink. `isRealDirectory(cacheRoot())`
+ *  (`cache.ts`, already exported for exactly this reuse by `readCache`/`touchCache`) closes it: a
+ *  symlinked root reads as absent before the leaf is inspected at all. */
 export function readProjectRecord(dir: string): ProjectRecord | undefined {
+  if (!isRealDirectory(cacheRoot())) return undefined;
+  if (!isRegularFile(projectRecordPath(dir))) return undefined;
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(projectRecordPath(dir), "utf8"));
@@ -330,8 +346,12 @@ export function writeProjectRecord(record: ProjectRecord, warn: (message: string
   // full reasoning. Only the ROOT call ever actually emits a message (the subdirectory can
   // never equal `cacheRoot()`), but both are wrapped identically for consistency.
   const emit = (m: string): void => warn(`${m}\n`);
-  ensureCacheRoot(root, emit);
-  ensureCacheRoot(join(root, "projects"), emit);
+  // PAR-859: each call now checked and bailed on independently, not just chained — a symlink
+  // could be planted specifically at `projects/` with a perfectly real root (or vice versa), so
+  // the root being refused must stop this function BEFORE it even attempts the subdirectory call,
+  // and the subdirectory being refused (with a real root) must stop it just the same.
+  if (!ensureCacheRoot(root, emit)) return false;
+  if (!ensureCacheRoot(join(root, "projects"), emit)) return false;
   const newer = newerSchemaVersion(path, PROJECT_RECORD_SCHEMA_VERSION);
   if (newer !== undefined) {
     warn(

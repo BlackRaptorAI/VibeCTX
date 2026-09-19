@@ -22,9 +22,18 @@ vi.mock("node:fs", async (importOriginal) => {
       if (faults.mkdir) throw new Error("EACCES: permission denied, mkdir");
       return fs.mkdirSync(path, opts as never);
     },
-    statSync: (path: string, opts: unknown) => {
-      const real = fs.statSync(path, opts as never);
-      return faults.size === undefined ? real : ({ ...real, size: faults.size } as never);
+    // PAR-859: `readIndex` now uses `lstatSync`, never `statSync` (which follows a symlink) —
+    // the fault injection below moved to match, so this fixture still exercises the same
+    // "index file over the byte limit" path through the function's real code path, not a stale
+    // mock of a call `readIndex` no longer makes.
+    lstatSync: (path: string, opts: unknown) => {
+      // Mutated in place, not spread into a plain object (`{ ...real, size }`) — `Stats.isFile`
+      // etc. live on the prototype, not as own enumerable properties, so a spread silently drops
+      // them and `readIndex`'s own `stat.isFile()` call would throw. `fs.lstatSync` returns a
+      // fresh object per call, so mutating it here is safe.
+      const real = fs.lstatSync(path, opts as never);
+      if (faults.size !== undefined) real.size = faults.size;
+      return real as never;
     },
     writeFileSync: (path: string, data: string, enc: string) => {
       calls.push({ op: "write", path: String(path) });

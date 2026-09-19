@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctorStorePath, readDoctorVerdicts, saveDoctorVerdicts, DOCTOR_STORE_SCHEMA_VERSION, type DoctorVerdict } from "../src/doctor-store.js";
@@ -172,5 +172,78 @@ describe("saveDoctorVerdicts", () => {
     expect(out.size).toBe(MAX_DOCTOR_VERDICTS); // still at the cap, not +1
     expect(out.get("newest")).toBeDefined(); // the newest write always survives
     expect(out.get("lib0")).toBeUndefined(); // the oldest was evicted to make room
+  });
+});
+
+describe("PAR-859 — doctor.json is symlink-safe on both read and the write-side merge", () => {
+  it("readDoctorVerdicts refuses a symlink planted at doctor.json's own path — reads back empty, not through the link (mutation target: readDoctorVerdicts's isRegularFile guard)", () => {
+    saveDoctorVerdicts([verdict()]);
+    expect(readDoctorVerdicts().size).toBe(1); // the real file round-trips first
+    const sibling = join(dir, "sibling.json");
+    writeFileSync(sibling, JSON.stringify({ schemaVersion: DOCTOR_STORE_SCHEMA_VERSION, verdicts: [verdict({ name: "evil" })] }), "utf8");
+    rmSync(doctorStorePath(), { force: true });
+    symlinkSync(sibling, doctorStorePath());
+
+    let out: ReturnType<typeof readDoctorVerdicts>;
+    expect(() => {
+      out = readDoctorVerdicts();
+    }).not.toThrow();
+    expect(out!.size).toBe(0);
+    expect(lstatSync(doctorStorePath()).isSymbolicLink()).toBe(true); // the link itself is untouched by the read
+  });
+
+  /**
+   * PAR-859 — `saveDoctorVerdicts` has the IDENTICAL read-merge-persist shape
+   * `resolved-store.ts`'s `saveResolvedEntry` has (it also calls `readDoctorVerdicts()` to merge
+   * before writing back), so it gets the equivalent poisoning test: a planted verdict behind a
+   * `doctor.json` symlink must never be adopted into the real file on the next save.
+   */
+  it("a planted verdict behind a doctor.json symlink is never adopted into the real file on the next save", () => {
+    const plantedTarget = join(dir, "planted.json");
+    const poisoned = verdict({ name: "evil-planted", healthy: true, reasons: ["forged"] });
+    writeFileSync(plantedTarget, JSON.stringify({ schemaVersion: DOCTOR_STORE_SCHEMA_VERSION, verdicts: [poisoned] }), "utf8");
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(plantedTarget, doctorStorePath());
+
+    expect(saveDoctorVerdicts([verdict({ name: "legit" })])).toBe(true);
+
+    // The symlink is gone — `writeAtomic`'s rename replaced it with a real file — so read the
+    // REAL bytes that landed on disk directly.
+    expect(lstatSync(doctorStorePath()).isSymbolicLink()).toBe(false);
+    const onDisk = JSON.parse(readFileSync(doctorStorePath(), "utf8"));
+    const names: string[] = onDisk.verdicts.map((v: { name: string }) => v.name);
+    expect(names).toEqual(["legit"]); // only the legitimate save landed
+    expect(names).not.toContain(poisoned.name); // the planted verdict was never adopted
+    // The symlink's own target is untouched — the poisoned data still sits exactly where it was.
+    expect(JSON.parse(readFileSync(plantedTarget, "utf8")).verdicts[0].name).toBe(poisoned.name);
+  });
+
+  /**
+   * code-reviewer (Phase 1b review round, BLOCKING) PROVED with an executed probe that the two
+   * tests above are not the whole story: `isRegularFile`/`lstat` only inspects the LEAF
+   * (`doctor.json` itself). With `VIBECTX_CACHE_DIR` pointed at a symlink whose TARGET holds a
+   * genuinely real, valid `doctor.json`, the leaf check never sees a symlink — `lstat` on the full
+   * joined path resolves the ROOT (an intermediate component) for ordinary traversal and finds a
+   * real regular file at the far end. A different scenario from either test above; needs its own
+   * proof.
+   */
+  it("readDoctorVerdicts refuses even when only the cache ROOT is a symlink, whose target genuinely holds a valid doctor.json", () => {
+    const target = mkdtempSync(join(tmpdir(), "vibectx-doctor-root-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-doctor-root-symlink-parent-"));
+    const linked = join(parent, "root");
+    writeFileSync(join(target, "doctor.json"), JSON.stringify({ schemaVersion: DOCTOR_STORE_SCHEMA_VERSION, verdicts: [verdict()] }), "utf8");
+    symlinkSync(target, linked);
+    process.env.VIBECTX_CACHE_DIR = linked;
+    try {
+      let out: ReturnType<typeof readDoctorVerdicts>;
+      expect(() => {
+        out = readDoctorVerdicts();
+      }).not.toThrow();
+      expect(out!.size).toBe(0); // must NOT return the verdict sitting at the far end of the root symlink
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
   });
 });
