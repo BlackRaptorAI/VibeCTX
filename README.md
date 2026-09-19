@@ -896,6 +896,24 @@ the activity log (`activity.json`), per-project records (`projects/*.json`), sav
 resolutions (`resolved.json`) and doctor verdicts (`doctor.json`) are still written — and, for
 the search index, read back — through whatever a symlinked `VIBECTX_CACHE_DIR` points at, with
 no warning. Tracked as **PAR-859**.
+
+Separately from the symlink question above: every file and directory vibectx creates anywhere
+under the cache root is **owner-only** — directories at `0700`, files at `0600` — regardless of
+which of the several operations that may write there happens to run first, and regardless of
+the process's own umask. This covers the documentation cache, the search index, the activity
+log, project records, saved package resolutions and doctor verdicts alike; one shared helper
+enforces it everywhere a directory is created, so it is not something each store has to
+remember to do correctly on its own. This is **not retroactive**: a cache root that already
+existed with a looser mode before this behaviour shipped is left exactly as it was — never
+tightened, never refused — and vibectx says so once, on stderr, naming the mode it found.
+Pointing `VIBECTX_CACHE_DIR` at a directory shared with another user or process is a deliberate
+choice to move the trust boundary, the same framing the symlink paragraph above uses; an
+already-loose pre-existing directory is treated the same way — vibectx will not second-guess a
+setup you already made on purpose. (On POSIX platforms — Linux, macOS. Windows does not
+implement owner/group/other file permissions the same way, so `0700`/`0600` are not meaningful
+there in the way they are here; this project's own CI runs only on `ubuntu-latest`, so the
+exact-mode guarantee above is verified there, not on Windows.)
+
 Every file in there is written through a temp file and renamed into place, so a reader
 never sees a half-written one; the server and `vibectx warm` sweep any `.tmp` file a
 killed process left behind before they write anything — but only once it is at least a
@@ -1344,8 +1362,10 @@ and the entry is simply not recorded.
 **Owner-only permissions.** `activity.json` is written `0600` (readable and writable
 only by you), self-healing on every write — a copy left world-readable by an older
 vibectx version is corrected the moment the next entry is recorded, not merely held
-steady from then on. **The 0600 mode is scoped to the log file itself** — it applies
-to `activity.json` only, not to the rest of the cache directory.
+steady from then on. This is no longer scoped to the log file alone: every file and
+directory vibectx creates anywhere under the cache root gets the same owner-only
+treatment (see the cache-directory section above) — `activity.json` was simply the
+first place this project applied it.
 
 **It is not redacted everywhere.** If a config entry's `urls` carries a secret in
 its query string (an internal docs endpoint behind a `?token=…` — vibectx has no
@@ -1364,8 +1384,9 @@ URL to stdout, where a terminal or a CI log can hold it as easily as an agent's
 context can. Setting `VIBECTX_DEBUG` prints it whole too, to stderr, on every
 fetch failure — exactly the moment (a stale or rotated token) an operator is
 most likely to turn debugging on, and many MCP clients capture server stderr to
-a persistent log file. It is also unstripped, at default file permissions, in
-cache file names, `.meta.json`, the search index and project records. Treat a
+a persistent log file. It is also unstripped in cache file names, `.meta.json`,
+the search index and project records — owner-only file permissions (above) bound
+WHO can read those files, not whether the token is present in them at all. Treat a
 URL-borne token as visible to your
 agent and to anyone who can read the cache directory — a VPN, a fronting proxy or an IP
 allow-list at the network level is the safer way to reach such an endpoint where

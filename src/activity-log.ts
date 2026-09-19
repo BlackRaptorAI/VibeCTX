@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot } from "./cache.js";
+import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
+import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { ACTIVITY_LOG_MAX_ENTRIES } from "./limits.js";
 import { cleanText, clipText } from "./text.js";
 
@@ -247,9 +247,16 @@ export function toActivityEntry(raw: unknown): ActivityEntry | undefined {
   return entry;
 }
 
-/** Every valid persisted entry, oldest first; `[]` when the file is missing, corrupt, or of
- *  another schema — the read half of D-13. */
+/** Every valid persisted entry, oldest first; `[]` when the file is missing, corrupt, of
+ *  another schema, OR (PAR-805) a symlink rather than the regular file `recordActivity` writes
+ *  — `isRegularFile` (`atomic-store.ts`, `lstat`, never `stat`) refuses to follow a link planted
+ *  at `activity.json`'s own path, the read-side half of the same trust rule every other store in
+ *  this cache directory applies to its own file. Deliberately NOT bounded by size the way
+ *  `readBoundedRegularFile` (`cache.ts`) bounds a `.md` content read — `activity.json` is capped
+ *  by entry count (`ACTIVITY_LOG_MAX_ENTRIES`), not by this read path, and a second, unrelated
+ *  size ceiling here would be a second thing to keep in sync with that cap for no benefit. */
 export function readActivityEntries(): ActivityEntry[] {
+  if (!isRegularFile(activityLogPath())) return [];
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(activityLogPath(), "utf8"));
@@ -291,18 +298,17 @@ export function recordActivity(
     const entry = toActivityEntry({ ...input, timestamp: now().toISOString() });
     if (!entry) return; // the caller handed this module a value its own fields cannot hold
     const dir = cacheRoot();
-    // PAR-791 (security-architect): this file holds what the user asked about — the first
-    // thing in the cache directory that does. 0o700 here only takes effect the moment this
-    // call is what CREATES the cache root (mkdirSync on an already-existing directory does
-    // not retroactively chmod it, a real but disclosed limitation, not a silent one — most
-    // cache roots already exist by the time a retrieval logs its first entry, since get_docs/
-    // warm's own cache.ts almost always creates it first, with no mode); the file's own mode
-    // below is what actually matters and applies on every write, not only the first.
-    // With `recursive: true`, 0o700 also applies to any INTERMEDIATE parent directories this
-    // call is what creates (e.g. a `VIBECTX_CACHE_DIR` pointed at a not-yet-existing nested
-    // path) — a side effect of `recursive: true`, not requested per-level, but harmless: a
-    // parent more restrictive than its default would have been is never a regression here.
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // PAR-791 (security-architect) originally required 0o700 here specifically, because this
+    // file holds what the user asked about — the first thing in the cache directory that does
+    // — but noted a real limitation: `mkdirSync` never retroactively `chmod`s an existing
+    // directory, and most cache roots already existed by the time a retrieval logged its first
+    // entry, since `cache.ts`'s own read/write path almost always creates the root FIRST, with
+    // no mode. PAR-805 closes that gap at its source rather than papering over it here: EVERY
+    // site that may create the cache root now goes through the same `ensureCacheRoot`
+    // (`cache.ts`) this call now also uses, so whichever one actually runs first still produces
+    // 0o700 — see that function's own comment for the full rationale, including why a
+    // PRE-EXISTING looser root is warned about, not tightened.
+    ensureCacheRoot(dir, warn);
     const path = activityLogPath();
     const newer = newerSchemaVersion(path, ACTIVITY_LOG_SCHEMA_VERSION);
     if (newer !== undefined) {

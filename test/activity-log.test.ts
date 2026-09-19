@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, readdirSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -58,6 +58,28 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
   it("lives under the cache root and reads as empty when absent", () => {
     expect(activityLogPath()).toBe(join(dir, "activity.json"));
     expect(readActivityEntries()).toEqual([]);
+  });
+
+  /**
+   * PAR-805 (mutation target: readActivityEntries's isRegularFile guard) — before this,
+   * `readActivityEntries` called a bare `readFileSync(activityLogPath(), "utf8")` with no
+   * `lstat` guard at all, so a symlink planted at `activity.json`'s own path was followed and
+   * its target's bytes parsed as if they were the log. `isRegularFile` (`atomic-store.ts`)
+   * refuses it the same way a missing or corrupt file already reads: as `[]`, never a throw.
+   */
+  it("PAR-805: readActivityEntries refuses a symlink planted at activity.json's own path — reads back empty, not through the link", () => {
+    recordActivity(base, { now: () => new Date("2026-09-17T18:00:00.000Z") });
+    expect(readActivityEntries()).toHaveLength(1); // the real file round-trips first
+    const sibling = join(dir, "sibling.json");
+    writeFileSync(sibling, JSON.stringify({ schemaVersion: ACTIVITY_LOG_SCHEMA_VERSION, entries: [{ ...base, timestamp: "2020-01-01T00:00:00.000Z" }] }), "utf8");
+    rmSync(activityLogPath(), { force: true });
+    symlinkSync(sibling, activityLogPath());
+
+    let entries: ReturnType<typeof readActivityEntries>;
+    expect(() => {
+      entries = readActivityEntries();
+    }).not.toThrow();
+    expect(entries!).toEqual([]);
   });
 
   it("round-trips an entry, creating the cache root, in the documented key order, and leaves no temp file behind", () => {

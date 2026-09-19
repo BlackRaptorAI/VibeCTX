@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot } from "./cache.js";
+import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, pypiNameError } from "./package-names.js";
 import { MAX_URLS_PER_ENTRY } from "./limits.js";
@@ -113,7 +113,14 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   const valid = toResolvedEntry(toRecord(entry));
   if (!valid) throw new Error(`saveResolvedEntry: "${entry.name}" does not pass resolved-record validation`);
   const dir = cacheRoot();
-  mkdirSync(dir, { recursive: true });
+  // PAR-805: owner-only (0700), and warns once if the root pre-existed looser. Wrapped, not
+  // passed straight through: this module's own `warn` default (`process.stderr.write(m)`, no
+  // trailing newline — unlike `cache.ts`'s own `toStderr` default) would otherwise run
+  // `ensureCacheRoot`'s message into whatever this process writes to stderr next (code-reviewer,
+  // PAR-805 review round). `ensureCacheRoot` cannot fix this centrally: it has no way to inspect
+  // whether the `warn` it was given already appends a newline (`toStderr` does; this module's
+  // own default does not), so appending one itself would double it for callers that already do.
+  ensureCacheRoot(dir, (m) => warn(`${m}\n`));
   const path = resolvedStorePath();
   const newer = newerSchemaVersion(path, RESOLVED_SCHEMA_VERSION);
   if (newer !== undefined) {
@@ -126,6 +133,7 @@ export function saveResolvedEntry(entry: LibraryEntry, warn: (message: string) =
   const at = entries.findIndex((e) => e.name === valid.name);
   if (at === -1) entries.push(valid);
   else entries[at] = valid;
-  writeAtomic(path, JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: entries.map(toRecord) }, null, 2));
+  // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write (writeAtomic's own comment).
+  writeAtomic(path, JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: entries.map(toRecord) }, null, 2), { mode: 0o600 });
   return true;
 }
