@@ -827,6 +827,56 @@ describe("search's Source: stamp never leaks a URL query string (PAR-811)", () =
 });
 
 /**
+ * PAR-812/PAR-815 (Phase 4) — redirect-provenance parity with `get_docs`, and the structured
+ * `SearchOutcome.groups[].url`/`finalUrl` fields `search --json` serializes directly.
+ */
+describe("PAR-812/PAR-815 (Phase 4) — search's redirect provenance and structured-field redaction", () => {
+  const CANDIDATE = "https://docs.example.com/old-page.txt";
+  const FINAL = "https://docs.example.com/new-page.txt";
+
+  it("PAR-812: a redirected cached document's stamp matches get_docs's own wording ('(redirected from ...)') for the same document", () => {
+    // writeCache's own finalUrl param is exactly what a live fetch (get_docs) would have
+    // persisted for this same document — search reads it back from the cache meta, never
+    // fetching itself (D-35), which is what makes stating the SAME fact possible with no
+    // network access.
+    writeCache("acme", CANDIDATE, "# Acme\n\n## Setup\n\nRun the installer.", undefined, FINAL);
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [CANDIDATE] }]]) };
+    const out = formatSearchResults(runSearch(reg, { query: "installer" }));
+    expect(out).toContain(`Source: ${FINAL} (redirected from ${CANDIDATE}) ·`);
+  });
+
+  it("PAR-812: a non-redirected cached document carries no '(redirected from ...)' annotation", () => {
+    writeCache("acme", CANDIDATE, "# Acme\n\n## Setup\n\nRun the installer.");
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [CANDIDATE] }]]) };
+    const out = formatSearchResults(runSearch(reg, { query: "installer" }));
+    expect(out).toContain(`Source: ${CANDIDATE} ·`);
+    expect(out).not.toContain("redirected from");
+  });
+
+  it("PAR-815: the structured SearchGroup.url/finalUrl strip a token-bearing query string (the --json surface)", () => {
+    const tokenCandidate = "https://docs.internal.example.com/old.txt?token=super-secret-search";
+    const tokenFinal = "https://docs.internal.example.com/new.txt?token=also-secret-search";
+    writeCache("acme", tokenCandidate, "# Acme\n\n## Setup\n\nRun the installer.", undefined, tokenFinal);
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [tokenCandidate] }]]) };
+    const outcome = runSearch(reg, { query: "installer" });
+    expect(outcome.groups[0].url).toBe("https://docs.internal.example.com/old.txt");
+    expect(outcome.groups[0].finalUrl).toBe("https://docs.internal.example.com/new.txt");
+    expect(JSON.stringify(outcome)).not.toContain("super-secret-search");
+    expect(JSON.stringify(outcome)).not.toContain("also-secret-search");
+  });
+
+  it("the cache is still read correctly (internal RAW url use is unaffected by the final redaction step)", () => {
+    // Regression guard for the exact bug shape this design has to avoid: redacting `group.url`
+    // too early would break the body-fetch `readCache` call, which needs the RAW candidate.
+    const tokenCandidate = "https://docs.internal.example.com/old.txt?token=super-secret-search2";
+    writeCache("acme", tokenCandidate, "# Acme\n\n## Setup\n\nRun the installer to get started, in detail.");
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [tokenCandidate] }]]) };
+    const outcome = runSearch(reg, { query: "installer" });
+    expect(outcome.groups[0].sections[0]?.body).toContain("Run the installer");
+  });
+});
+
+/**
  * PAR-659 — the two failure modes the excellence pass went looking for, and neither of which
  * any earlier case would have caught.
  */

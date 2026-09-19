@@ -519,6 +519,14 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   **Gates:** `code-reviewer` + `security-architect` (D-70 lean process — this item touches
   cache-key derivation, the on-disk cache, and eviction/delete paths). | PAR-749
 
+  **Amended by D-88 (Phase 4, PAR-806, 2026-09-19):** the slug's human-legible PREFIX is now
+  computed from a REDACTED url (query/fragment/userinfo stripped), not the raw one — the hash
+  suffix, and everything this entry says about it, is unchanged. `.meta.json`'s own `url` field
+  is likewise now redacted, with a new `urlHash` field carrying the identity proof this entry's
+  own `readCache`/`touchCache` checks depend on. See D-88c for the full account, including a
+  SECOND cold-miss-and-orphan upgrade event (this repeats the "Migration: none needed" shape
+  above, for a different reason) and why D-71's own collision/mismatch guarantees still hold.
+
 ---
 
 ## D-72 — decided 2026-09-17, executing A7 / PAR-720
@@ -2018,3 +2026,339 @@ decided and implemented on that branch; it is not a claim that review or merge h
   - **nit, applied:** `README.md`'s "the refusal names a document that was in fact reached"
     overstated what the refusal TEXT does — only the structured `source`/`contentHash` fields
     name it; reworded.
+
+---
+
+## D-88 — decided 2026-09-19, executing PAR-815/PAR-806 (both High) + PAR-817/PAR-816/PAR-818/
+PAR-819/PAR-812/PAR-813/PAR-807/PAR-809 (Phase 4 — URL privacy, end to end)
+
+*Provisional number.* Picked at the start of this work, not — per this repo's own D-number
+rule (`CLAUDE.md`) — right before opening the PR after a fresh `git fetch origin`. Re-verify
+against `main` at that point and renumber if it collides; this phase's own branch has not yet
+been rebased or merged as this is written.
+
+- **D-88a — one shared redaction function, not three.** `link-policy.ts`'s new
+  `redactUrlForDisplay(url)` supersedes `retrieval.ts`'s `stripStampQuery` (PAR-811) and
+  `activity-log.ts`'s `sanitizeLoggedUrl` (PAR-792) — both are now thin wrappers around it,
+  kept as named exports only because every call site already reads naturally as "strip the
+  stamp's/log's query" and renaming them would be diff for no behaviour change. Lives in
+  `link-policy.ts` because that file already owns `MAX_REMOTE_URL_LENGTH` and URL-trust logic
+  and is a low-level module every other file can import without a cycle — verified:
+  `link-policy.ts` does not import `retrieval.ts` or `activity-log.ts`. This supersedes the
+  informal "deliberately mirrors" relationship PAR-811/792's own comments used to describe —
+  there is now exactly one place that owns "strip query, fragment, userinfo; fail toward
+  truncation on parse failure", not an implicit convention two independent copies happened to
+  agree on. `link-policy.ts`'s own pre-existing `sanitizeRemoteUrl` (a VALIDATOR, fragment-only)
+  is deliberately untouched — it is used elsewhere to accept URLs that must still be fetchable
+  (query intact), and folding it into the new function would conflate validation with
+  redaction, two different concerns this item keeps separate.
+
+  PAR-816's two hardenings are folded into the one function, not bolted on separately: userinfo
+  is cleared unconditionally (neither prior copy did this before PAR-811 round 2 added it to
+  the stamp alone), and a parse failure cuts the string at its first `?`/`#` rather than
+  returning it whole — every producer of a value reaching this function is already validated
+  upstream, so this branch should be unreachable in practice, but the function's own safety no
+  longer rests on that invariant holding forever. PAR-818's normalization side effect (host
+  lower-cased, punycode, default port dropped, `.`/`..` resolved, trailing slash added to a bare
+  origin — all consequences of the `new URL().href` round trip the redaction itself needs) is
+  documented on the function and pinned by test (`https://Docs.Example.COM:443/x` →
+  `https://docs.example.com/x`), not suppressed.
+
+  PAR-809: `activity-log.ts`'s independent, undocumented `MAX_RAW_URL_CHARS` (2048) now imports
+  `link-policy.ts`'s `MAX_REMOTE_URL_LENGTH` (now exported) rather than restating the same value
+  — the export+import fix, chosen over a cross-check pinning test, because the two constants
+  bound the identical shape (a string headed for `new URL()`) at the identical two call sites'
+  worst case, and a shared value that cannot drift is simpler than a test that merely notices
+  drift after the fact.
+
+  code-reviewer S4 (Phase 4 round 2) — two MORE independent duplicates of this same 2048 bound
+  found by review, closed the same way rather than left as a disclosed residual (cheap: both
+  files already imported from `link-policy.ts`, so neither addition creates a new import-graph
+  edge): `cache-meta.ts`'s `MAX_META_URL` and `resolve.ts`'s `parseGitHubRepo` length guard both
+  now import `MAX_REMOTE_URL_LENGTH` instead of restating `2048`.
+
+- **D-88b — PAR-815's six response surfaces, redacted with no carve-outs, one exception
+  named explicitly.** `get_docs`'s "Candidates tried:" list (already redacted, Phase 3) and its
+  note block (PAR-819 — each URL redacted individually as it is composed, since the whole note
+  block deliberately bypasses `clipText`, which would collapse its newlines); `refresh`'s
+  "refreshed from `<url>`" line (both the direct-fetch and the re-resolved branches);
+  `resolve_library`'s "urls (probed in order)" list on the already-curated fast path, AND (a
+  scope decision beyond the issue's own literal text, made for consistency) `formatResolved`'s
+  "candidates (probed in order)" rows and its "chosen:" line, on the reasoning that leaving
+  those two raw while redacting everything else in the same command's output would be exactly
+  the "divergence without a stated reason" this whole phase exists to close, even though those
+  candidates are usually registry-derived rather than hand-authored (package metadata is still
+  attacker-influenced, per PAR-725's own "anyone can publish a package" premise); `warm_project`'s
+  `url` column, in its rendered table AND `--json` form, closed by ONE fix
+  (`project-store.ts`'s `makeWarmRow`, the sole place `WarmRow` is ever constructed — verified
+  display-only: `readProjectRecord`'s result is consulted by name+ecosystem for the
+  recent-failure memo, never by `url`) that also closes PAR-806's on-disk project-record site;
+  `vibectx doctor --json`'s `LibraryReport.url`/(new) `finalUrl`, and `vibectx search --json`'s
+  `SearchGroup.url`/(new) `finalUrl` — decided the same way for both, deliberately not
+  diverging: these are structured, machine-consumed fields, and the field's actual purpose
+  (which host/path served the document) survives redaction fully; only a secret would be lost.
+  `VIBECTX_DEBUG`'s raw stderr output is the one NAMED exception — see D-88g.
+
+  `search`'s internal RAW candidate url is preserved throughout `runSearchCore`'s own body
+  (the cache read that fetches section bodies is keyed by it) and redacted only once, at the
+  very end, after every internal use is done — mutating `SearchGroup.url` earlier would have
+  broken that cache read for any query-bearing candidate, a bug class this item's own tests
+  guard against directly (`search.test.ts`, "the cache is still read correctly").
+
+- **D-88c — the cache-filename design: redact the PREFIX, keep the HASH raw, and (going
+  further than the runbook's own anticipated residual) fully close `.meta.json` too, via a
+  hashed identity field rather than accepting a plaintext-vs-correctness trade-off.**
+
+  `urlSlug(url)`'s human-legible prefix now comes from `redactUrlForDisplay(url)`; its
+  collision-resistant hash suffix is unchanged — still `shortHash` of the FULL, untruncated
+  RAW url — because two candidates differing only by query string (`?v=2` vs `?v=3`) are
+  legitimately different documents (D-71's own guarantee) and must keep producing different
+  cache files. This is display-only correction, same as D-71's own framing of the prefix
+  ("carries none of the uniqueness guarantee"): costs nothing on correctness, closes the leak.
+
+  **The upgrade behaviour (gate criterion): cold-miss-and-orphan, decided and tested, not a
+  rename pass.** Any URL whose redacted form differs from its raw one — every query-string,
+  fragment or userinfo-bearing URL, and (more precisely than the runbook's own draft framing,
+  which named only the query-string case) any URL affected by `redactUrlForDisplay`'s own
+  documented normalization side effect (a non-lower-case host, an explicit default port, a
+  non-ASCII host) — gets a DIFFERENT filename after this change, even though the hash-of-a-
+  given-raw-url is unchanged. An existing cache entry written under the OLD formula is simply
+  not found by the NEW `readCache`/`writeCache` path (different computed prefix); it becomes an
+  orphan. Chosen over a rename pass for the same reasons D-71 gave: simpler, lower-risk, and the
+  cache is already designed to tolerate a miss (a transparent re-fetch, not a failure) — a
+  rename pass is more code with its own chance of getting the migration logic wrong, for a
+  benefit (avoiding one re-fetch per affected entry, once) this project judges not worth that
+  risk.
+
+  **Corrected (security-architect S3, Phase 4 round 2 — the original text here overstated how
+  this orphan is reclaimed, and a reader relying on it would have been wrong): it is NOT simply
+  "reclaimed on the next eviction sweep."** `dropFollowedPageCache`'s own refresh-triggered
+  cleanup CANNOT reach it either, verified by test (`cache.test.ts`, "security-architect S3"):
+  its old-format fallback (`metaMatchesSlug`'s `urlSlug(meta.url) === slug`) recomputes the slug
+  under the NEW formula against a filename written under the OLD one, and for exactly the URLs
+  this residual concerns (redaction actually changes something) the two no longer match — the
+  file is treated as "unproven, leave it for eviction" rather than deleted, on every refresh,
+  not just once. The ONLY path that can ever remove it is `enforceCacheSizeCap`'s SIZE-based
+  eviction, which fires only once the cache exceeds `VIBECTX_CACHE_MAX_MB` (default 512 MB) —
+  on a cache that never crosses that cap, the orphan, and the secret in its filename, persists
+  ON DISK INDEFINITELY, not "until the next sweep." Accepted anyway, not separately swept: a
+  one-time best-effort rename/cleanup pass was considered and rejected as over-scoping this
+  phase (it would duplicate a chunk of `dropFollowedPageCache`'s own disk-walking logic for a
+  residual that, unlike the live filename, is not reachable by any of this tool's own rendered
+  surfaces — only by someone with read access to the cache directory doing their own `ls`, the
+  same threat model D-71's own "moving the trust boundary by choice" language already treats as
+  out of this tool's control) — but the ADVICE for anyone upgrading with a token-bearing
+  configured URL is now explicit, not merely implied: clear the cache directory once
+  (`rm -rf` the cache root, or delete just the affected library's directory) rather than relying
+  on eviction to do it, since eviction may never do it at all. See README's own cache-directory
+  section and RELEASING.md for the reader-facing version of this same advice.
+
+  Proven by test (`cache.test.ts`, "PAR-806"): a directory listing after the
+  fix contains no token; the OLD formula's filename is constructed directly and shown to be
+  genuinely different (proving the fix changed behaviour, not merely that the new code happens
+  to look safe); a file planted under the OLD formula is a clean, non-throwing miss, not an
+  error and not served.
+
+  **`.meta.json` — CLOSED, not accepted as a residual.** The runbook's own text flagged this as
+  possibly not fully closable without weakening the `readCache`/`metaMatchesSlug` correctness
+  checks (D-71's own guarantees). Traced in full rather than guessed: the actual tension is that
+  `dropFollowedPageCache`'s `metaMatchesSlug` has no request URL to compare against — only a
+  filename it is deciding whether to delete — so it needs to RECONSTRUCT the original slug from
+  the meta record alone, and the slug's hash component is a hash of the FULL RAW url, which a
+  redacted `url` field cannot supply. Resolved by adding a second field, `CacheMeta.urlHash` —
+  written by `writeCache` alongside the now-redacted `url`.
+
+  **CORRECTED, Phase 4 round 2 (security-architect B1) — this is the single most important
+  correction to this whole item, and it shipped as a real, briefly-live regression, not a
+  drafting note.** The FIRST version of this design made `urlHash` literally `shortHash(url)` —
+  the SAME 12-character, 48-bit value already embedded as `urlSlug`'s own filename suffix,
+  reasoning (wrongly) that reuse was harmless because both derive from the same raw url. It is
+  not harmless: before this phase, `readCache`'s identity check was a FULL, untruncated STRING
+  comparison (`meta.url !== url`), independent of the filename mechanism entirely. Collapsing
+  the identity proof onto the filename's own 48-bit hash deleted that independence — an attacker
+  who can get content written into the same per-library directory as a target document (a
+  same-origin followed index link is enough; `isAllowedLink` grants a document's own host
+  unconditionally) could grind a query-string suffix until their URL's 48-bit hash collided with
+  the target's (~2^48 SHA-256 evaluations, single-GPU hours, entirely offline), land their
+  content under the identical filename, and pass the identity check too — the next legitimate
+  read would then serve the attacker's content as the real, trusted document. Exactly the
+  "wrong document served under the wrong identity" outcome D-71 exists to make near-impossible,
+  reopened by the first version of this fix.
+
+  **The corrected design**: `CacheMeta.urlHash` is `urlHashFor(url)` — the FULL, untruncated
+  64-character SHA-256 digest of the raw url — DELIBERATELY a different value from `urlSlug`'s
+  own 12-character filename suffix, even though both derive from the identical SHA-256
+  computation (the 12-character suffix is simply this same digest's own first 12 characters,
+  which is what lets `metaMatchesSlug` still reconstruct the filename's slug from `url`
+  (redacted prefix) + the first 12 characters of `urlHash`, with no raw url ever needed).
+  `readCache`/`touchCache`'s own identity check (`metaMatchesUrl`) compares the FULL 64-character
+  digest — full fidelity preserved (a query-string-only difference still produces a different
+  digest, so D-71's own "genuinely different documents" guarantee holds exactly as before), AND
+  a targeted second-preimage against a 256-bit value is computationally infeasible, restoring
+  the same strength the pre-PAR-806 raw-string comparison had. A hash is not reversible to
+  recover the token; this reuses the SAME accepted-risk primitive (SHA-256) D-71 already relies
+  on elsewhere in this file, at FULL strength rather than the filename's own deliberately-cheap
+  truncation, so this is not a new class of exposure.
+
+  **The corrected security property, stated the way D-71's own original comment states its own:
+  the identity check (`metaMatchesUrl`) and the filename's collision-resistance (`urlSlug`) are
+  once again TWO INDEPENDENT DEFENSES, not one value doing both jobs.** Even in the
+  near-impossible event of a forced FILENAME collision (the cheap, 48-bit one an attacker could
+  actually afford), the full 256-bit identity check still correctly reports a mismatch and the
+  result is a cache miss and a re-fetch — never the wrong document served under the wrong
+  identity. Proven directly, not merely reasoned about: `cache-meta.test.ts`'s "a forced
+  12-character (48-bit) filename-hash collision does NOT satisfy the identity check" test
+  constructs a `urlHash` that deliberately SHARES a target's 12-character filename-hash prefix
+  (exactly what a successful ~2^48 grind would produce) while differing in the remaining 52
+  characters, and proves `metaMatchesUrl` still correctly rejects it.
+
+  Backward compatibility: a `.meta.json` written before this item has no `urlHash` at all;
+  `metaMatchesSlug`/`metaMatchesUrl` both branch on its presence and fall back to the ORIGINAL,
+  unmodified comparison (`meta.url` is still the raw url on such a record) — old files keep
+  working correctly without being rewritten, and the two code paths are both exercised directly
+  by test (`cache-meta.test.ts`: "OLD-FORMAT meta" / "NEW-FORMAT meta" describe blocks). A
+  malformed `urlHash` on read drops only that field (not the whole record), degrading to the
+  old-format comparison — fails toward a possible miss, never toward a false positive. A
+  12-character value (what this field held, wrongly, for one round of this phase) is now itself
+  a MALFORMED shape and is rejected the same way, rather than silently accepted as valid.
+
+  **`finalUrl` — closed the same way, in the same round (code-reviewer B1 / security-architect
+  S2).** `.meta.json`'s `finalUrl` field was a second plaintext-secret site this phase's first
+  pass missed entirely: `writeCache`/`touchCache` validated it (`sanitizeRemoteUrl`) but never
+  redacted it before writing, and `toCacheMeta` read it back the same unredacted way. Fixed by
+  redacting at both write sites and on read; the "was there a redirect" gate at each write site
+  now compares REDACTED-to-REDACTED (not raw-to-raw), so a raw `finalUrl` differing from the
+  candidate only by query/fragment/userinfo — which would redact to the identical string as the
+  candidate — is correctly treated as "nothing left to report" and `finalUrl` is left unset,
+  rather than stored as a value that would later render as a confusing "(redirected from X)" for
+  an identical X. Proven by test (`cache.test.ts`, "PAR-806 (Phase 4 round 2) — finalUrl is
+  redacted"): the `.meta.json` bytes on disk contain no token in either `url` or `finalUrl`,
+  the query-only-difference case stores nothing, and a pre-fix file with a raw `finalUrl`
+  already on disk is redacted the moment it is next read.
+
+  Proven overall: `cache.test.ts`'s PAR-806 suite (directory-listing, old-vs-new-format-differ,
+  cold-miss-for-a-planted-old-format-file, D-71-preserved-for-two-query-variants,
+  ordinary-round-trip, genuinely-different-url-still-a-miss, finalUrl redaction at both write
+  sites and on read) plus `cache-meta.test.ts`'s dedicated urlHash suite (toCacheMeta validation
+  including the 12-vs-64-character shape rejection, metaMatchesSlug/metaMatchesUrl under both
+  formats, positive AND negative matches for a query-only difference and for a genuinely
+  different host/path, and the forced-filename-collision regression test above) — all green,
+  and D-71's own pre-existing collision/mismatch tests pass UNMODIFIED (not silently weakened to
+  accommodate this change).
+
+- **D-88d — the search index's `url` field: redacted, with a disclosed, narrow, low-severity
+  narrowing of its own correctness gate — NOT the same design as `.meta.json`, and deliberately
+  so.** Traced, not assumed on the runbook's own "verify this claim" prompt: `IndexedDocument.url`
+  IS used for a correctness check (`stored.url === url` gates whether a posting list may be
+  reused for a library), contradicting the runbook's own draft claim that it is purely
+  display/informational — a real correction, not a rubber stamp. Redacted at write
+  (`indexDocument`) anyway, with the read-side comparison changed to compare
+  `redactUrlForDisplay(candidateUrl)` against the (already-redacted) stored value, rather than
+  given the full `urlHash` treatment `.meta.json` got. Reasoning for the different treatment:
+  this field is never the PRIMARY defense against serving wrong content (the CONTENT HASH is,
+  per this file's own pre-existing "two gates" design comment); a library has exactly one
+  active candidate URL at a time, not two live query-string variants competing for the same
+  posting list the way `.meta.json` genuinely can hold either of two live cache entries; and the
+  worst case of a stale match here is a slower, re-tokenized search — never wrong content shown,
+  since every rendered character is still re-read from the CACHED DOCUMENT by content hash
+  (D-33), never from this field. The narrowing is real and disclosed on the field's own doc
+  comment, not hidden: two candidate URLs for the SAME library differing only by query string
+  are no longer told apart by this field alone (an artificial, not naturally occurring, case for
+  a single library's single active document).
+
+  **Corrected, Phase 4 round 2 (security-architect S1) — a second, missed instance of the same
+  raw-vs-redacted comparison bug, this one a performance regression rather than a security one.**
+  `search-index.ts`'s `openIndexSession().add()` has its OWN "does the on-disk entry already
+  match what I'm offering" fast path (distinct from `search.ts`'s read-side gate, already fixed
+  in round 1), and it too compared the RAW offered `url` against the now-REDACTED stored
+  `existing.url`. For any query-bearing or normalization-affected URL, once the in-process
+  `memo` was empty (a fresh process), this comparison could never succeed — silently forcing a
+  full posting-list rebuild AND a full index-file rewrite on every `add()` for that library,
+  forever, even when nothing had changed. Fixed identically: `existing.url === redactUrlForDisplay(url)`.
+  Proven by test (`search-index.test.ts`, "PAR-806/S1"): after resetting the in-process memo, an
+  `add()` offering the identical (query-bearing) url/content already on disk results in
+  `flush()` returning `false` and no file rewrite — the fast path fires correctly.
+
+- **D-88e — PAR-812, resolved as "implement it", not "declare infeasible".** `search`'s
+  `groupHeader` now threads `finalUrl`/`redirectedFrom` through `sourceStampLine` exactly as
+  `get_docs` does, closing the wording-drift PAR-726/A17's shared function was built to prevent.
+  The runbook raised, as a live possibility, that `search` might genuinely have no `finalUrl` to
+  hand (it never fetches, D-35) — checked rather than assumed: `readCache`'s own `CacheHit.meta`
+  already persists `finalUrl` (PAR-776/D-74) on every cache hit, live fetch or not, so `search`
+  reads it from the SAME cache meta it already reads for `fetchedAt`/`stale`. No design
+  trade-off was needed here; the fact was already on disk. `doctor.ts`'s `kindFromStructure` now
+  classifies by `source.finalUrl ?? source.url` rather than the pre-redirect candidate — proven,
+  not merely argued, by a reproduction (`doctor.test.ts`, "PAR-812") that would genuinely
+  misclassify (`full-text` instead of `readme`) under the OLD choice for a cross-host,
+  path-shape-changing redirect. `readCache(entry.name, source.url, ttlHours)` immediately below
+  it is UNCHANGED, per the file's own explicit warning at that line — that call is a cache
+  lookup by the candidate the cache is keyed by, unrelated to what `kindFromStructure` infers.
+
+- **D-88f — PAR-807's marker: a boolean field (`ActivityEntry.urlHadQuery`), not a literal
+  marker appended to the stored `url` string.** Chosen over embedding a fixed suffix in `url`
+  itself (the issue's other suggested shape) because a separate structured field is unambiguous
+  to a `--json` consumer (no risk of a marker string being mistaken for part of a real URL) and
+  costs nothing extra to bound or validate. Set `true` only when the RAW value (before
+  redaction) carried a query string or a fragment; never `false` — an absent field reads as
+  "nothing was elided", which is the common case and not worth a byte on every row forever. The
+  ROUND-TRIP bug this design has to avoid, found and fixed during this same item's own TDD loop
+  (not merely anticipated): `toActivityEntry` is called BOTH to build a fresh entry (where `url`
+  is still raw) AND to re-validate one already read back off disk (where `url` in the parsed
+  JSON is already redacted) — recomputing `hadQuery` from the STORED, already-query-less `url`
+  on that second call would silently read `false` forever, defeating the field's entire purpose
+  on every restart. Fixed by trusting the already-persisted boolean when it is a valid one and
+  falling back to recomputing from `url`'s own shape only for a genuinely fresh write or an
+  old-format entry with no such field at all — proven by a dedicated round-trip test
+  (`activity-log.test.ts`, "survives a round trip") that would have failed red before the fix.
+  `finalUrl` (PAR-813) does not get its own `hadQuery`-equivalent flag — out of PAR-807's own
+  stated scope, and nothing yet consumes it.
+
+- **D-88g — `VIBECTX_DEBUG` is a disclosed, deliberate exception to the redaction rule, not a
+  gap.** Documented on `debug.ts` itself (not only in README): an opt-in, human-only diagnostic
+  channel, off unless explicitly set, where the raw URL — token included — is often exactly what
+  a developer needs to see while debugging their own local setup. Left unredacted on purpose;
+  the risk (an operator's captured stderr log) is disclosed in README's own rewritten paragraph
+  rather than silently accepted.
+
+- **D-88h — a second, previously-missed leak surface found by review, closed the same way
+  (code-reviewer B1 / security-architect S2, Phase 4 round 2): `config.ts`'s rejected-URL echo.**
+  A `urls` entry that FAILS `validateLibraryUrl` (wrong scheme, a forbidden host, or — the
+  sharpest case — carrying userinfo, exactly the `user:pass@host` shape this whole phase strips
+  everywhere else) had its raw, unredacted value embedded in the Zod issue message
+  (`config.ts`'s `superRefine`), which reaches `ConfigError`, `LayerFailure.reason`,
+  `list_libraries`' "NOT LOADED: ..." header (rendered into the agent's context) and
+  `doctor --json`'s `configIssues[].reason`. Fixed with `redactUrlForDisplay(raw)` at the one
+  place this value is embedded into user-facing text; `whyUrlRefused`'s own internal `shown`
+  (used only to strip a matching prefix off `validateLibraryUrl`'s own thrown message, never
+  itself rendered) is untouched, since it never reaches an output surface. This makes README's
+  own "it is redacted everywhere now" claim (D-88b) actually true rather than leaving a second,
+  undisclosed exception standing alongside the one named one (`VIBECTX_DEBUG`, D-88g). One
+  existing pinned test (`config.test.ts`, the userinfo-rejection case) updated to expect the
+  now-correct, redacted rejection message; a new test proves a token-bearing query string and a
+  userinfo password both survive validation failure with no trace in the resulting
+  `list_libraries` header, through the real discovery path (not `readConfigFile` in isolation).
+
+- **Amends D-71.** D-71's own "Migration: none needed, deliberately" section described the
+  ORIGINAL slug-format change (adding a collision-resistant hash suffix); this item changes the
+  slug format A SECOND TIME (redacting the prefix) for a different reason (privacy, not
+  collision-resistance) and re-establishes the identical "cold-miss-and-orphan, no background
+  migration" behaviour for the identical reasons D-71 already gave — see D-88c above for the
+  full, updated account, including the NEW `.meta.json` design (`CacheMeta.urlHash`) D-71's own
+  text does not anticipate.
+
+- **Amends the PAR-792 (D-51 activity log) and PAR-811 (retrieval.ts stamp) informal-mirroring
+  relationship.** Both functions' own doc comments described themselves as mirroring the other
+  "for the same reason"; both are now literal thin wrappers around `redactUrlForDisplay`
+  (D-88a) — the informal mirroring is now a structural guarantee, not a convention two
+  maintainers have to remember to keep in sync by hand.
+
+- **Not decided here, tracked forward:** a real authenticated-fetch mechanism (custom headers
+  or credentials, so a token never has to travel in a URL at all) and a general, policy-level
+  redaction framework beyond URL query/fragment/userinfo — both named as open in PAR-811's own
+  original text and still open after this item, which closes the SURFACES a URL-borne token can
+  currently reach, not the underlying reason one has to travel in a URL at all.
+
+  **Gates:** `code-reviewer` always; `security-architect` also, per this repo's own
+  `CLAUDE.md` — this item touches URL/host policy, the cache directory and its file-naming
+  scheme, and the search index, all named triggers. | PAR-815, PAR-806, PAR-817, PAR-816,
+  PAR-818, PAR-819, PAR-812, PAR-813, PAR-807, PAR-809

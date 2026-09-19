@@ -23,8 +23,14 @@ export interface LinkPolicy {
 const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
 const LABEL_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const MAX_HOST_LENGTH = 253;
-/** Metadata URL values longer than this are dropped unread. */
-const MAX_REMOTE_URL_LENGTH = 2048;
+/** Metadata URL values longer than this are dropped unread. Exported (PAR-809, Phase 4) so
+ *  `activity-log.ts`'s own historical `MAX_RAW_URL_CHARS` — an independent, undocumented
+ *  duplicate of this exact 2048 value — imports it instead of re-declaring it: two constants
+ *  that must always agree are one fact, not two (D-48's "one place states the fact" rule,
+ *  applied here rather than merely pinned by a cross-check test — the simpler of PAR-809's two
+ *  acceptable fixes, and the one chosen because the two call sites already share every other
+ *  part of the shape they bound: a URL string headed for `new URL()`). */
+export const MAX_REMOTE_URL_LENGTH = 2048;
 
 /**
  * Hosts that are never fetched from a content-derived URL, whatever any allow-list
@@ -195,6 +201,66 @@ export function registrableDomain(hostname: string): string | undefined {
   const lastTwo = labels.slice(-2).join(".");
   if (TWO_PART_SUFFIXES.has(lastTwo)) return labels.length >= 3 ? labels.slice(-3).join(".") : undefined;
   return lastTwo;
+}
+
+/**
+ * PAR-817/PAR-816/PAR-818 (Phase 4) — THE ONE shared "make a URL safe to show or store"
+ * function, consolidating what were three independent, near-duplicate implementations:
+ * `retrieval.ts`'s `stripStampQuery` (PAR-811), `activity-log.ts`'s `sanitizeLoggedUrl`
+ * (PAR-792, which `stripStampQuery`'s own comment already said it "deliberately mirrors"),
+ * and this file's own `sanitizeRemoteUrl` (fragment-only, and also a VALIDATOR — see its own
+ * comment for why it stays separate: this function does redaction, not trust decisions, and
+ * lives here only because `link-policy.ts` is a low-level module every other file can import
+ * without a cycle — verified: this file does not import `retrieval.ts` or `activity-log.ts`,
+ * and nothing it exports needs to).
+ *
+ * Clears the query string, the fragment AND userinfo (username/password) — PAR-816's
+ * consolidated hardening: neither `stripStampQuery` nor `sanitizeLoggedUrl` cleared userinfo
+ * before PAR-811 round 2 added it to the stamp path alone, and this is the one place that
+ * gap can no longer reopen in a fourth copy.
+ *
+ * PAR-816 — FAILS TOWARD SAFETY ON A PARSE FAILURE, NEVER TOWARD "return the raw string
+ * whole": every current producer of a value that reaches this function has already been
+ * validated by `sanitizeRemoteUrl`/`validateLibraryUrl` upstream, so a parse failure here
+ * should be unreachable in practice — but this function's own safety must not rest on an
+ * unstated cross-module invariant holding forever. On a parse failure this cuts the string at
+ * its first `?` or `#` (PAR-816's own suggested fix) rather than returning it unchanged: a
+ * string this function cannot even parse as a URL is exactly the shape most likely to be
+ * garbage that still happens to contain a `?token=…`-shaped tail, and cutting it is strictly
+ * safer than passing it through whole. This can still leave userinfo in an unparseable string
+ * (there is no reliable, generic way to find `user:pass@` without a URL parser succeeding) —
+ * a narrower residual than the pre-fix behaviour, not a new one.
+ *
+ * PAR-818 — DOCUMENTED NORMALIZATION SIDE EFFECT, not a bug to suppress: on a successful
+ * parse, `new URL(url).href` also lower-cases the host, punycodes a non-ASCII host, drops an
+ * explicit default port, resolves `.`/`..` path segments and adds a trailing slash to a bare
+ * origin — all as a consequence of the round-trip this function needs anyway to clear
+ * `.search`/`.hash`/`.username`/`.password`. Every one of those is either invisible or a
+ * strict improvement for a render/storage path (punycoding in particular defuses an
+ * IDN-homograph URL) — see `test/link-policy.test.ts` for the pinned case
+ * (`https://Docs.Example.COM:443/x` → `https://docs.example.com/x`).
+ */
+export function redactUrlForDisplay(url: string): string {
+  // code-reviewer S3 (Phase 4 round 2) — defensive against a non-string input reaching here at
+  // runtime despite the `string` type this function declares: several call sites rely on a
+  // non-null assertion (`out.chosen!`, `doc.chosen!`) that is safe today only because of an
+  // unstated cross-module invariant (a particular field is always set on a particular success
+  // path). PAR-816 already applied "don't let this function's own safety rest on an unstated
+  // invariant" to the parse-failure branch below; the same reasoning extends to the input
+  // itself — a stray `undefined`/`null` reaching a redaction call must never throw or print
+  // "undefined" into a rendered response, it should simply produce nothing to show.
+  if (typeof url !== "string") return "";
+  try {
+    const u = new URL(url);
+    u.username = "";
+    u.password = "";
+    u.search = "";
+    u.hash = "";
+    return u.href;
+  } catch {
+    const cut = url.search(/[?#]/);
+    return cut === -1 ? url : url.slice(0, cut);
+  }
 }
 
 /**

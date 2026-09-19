@@ -260,6 +260,72 @@ describe("runDoctor source kinds and probes", () => {
   });
 });
 
+/** A manual-redirect-capable fetch stub, since `fetcher.ts` follows redirects by hand
+ *  (`redirect: "manual"`) rather than relying on the runtime to do it. */
+function stubRedirectingFetch(routes: Record<string, { status: number; location?: string; body?: string }>) {
+  const spy = vi.fn(async (url: unknown) => {
+    const route = routes[String(url)];
+    if (!route) return new Response("not found", { status: 404 });
+    if (route.location) return new Response(null, { status: route.status, headers: { location: route.location } });
+    return new Response(route.body ?? "", { status: route.status, headers: { "content-type": "text/plain" } });
+  });
+  vi.stubGlobal("fetch", spy);
+  return spy;
+}
+
+describe("PAR-812/PAR-813/PAR-815 (Phase 4) — finalUrl-aware classification, activity, and redaction", () => {
+  const CANDIDATE = "https://a.example.com/llms.txt"; // llms.txt-shaped: would classify full-text
+  const FINAL = "https://b.example.com/docs/guide"; // README-shaped: cross-host AND path-shape change
+
+  /** PAR-812 — a reproduction that would MISCLASSIFY under the OLD choice (the candidate URL):
+   *  `kindFromStructure(CANDIDATE, ...)` alone would say "full-text" (an `llms.txt`-shaped
+   *  path), but the document's real, served shape (`FINAL`) is README-shaped. */
+  it("classifies a cross-host, path-shape-changing redirect by finalUrl, not the pre-redirect candidate", async () => {
+    stubRedirectingFetch({
+      [CANDIDATE]: { status: 302, location: FINAL },
+      [FINAL]: { status: 200, body: "# Guide\n\n## Setup\n\nRun the installer." },
+    });
+    const report = await runDoctor(reg({ name: "acme", urls: [CANDIDATE], probeQueries: ["setup"] }));
+    const [lib] = report.libraries;
+    // Sanity check the reproduction itself: classifying the CANDIDATE alone would say full-text.
+    expect(classifySourceKind(CANDIDATE, "# Guide\n\n## Setup\n\nRun the installer.")).toBe("full-text");
+    expect(lib.kind).toBe("readme"); // correct: classified by where it actually landed
+  });
+
+  /** PAR-813 — `finalUrl` reaches doctor's JSON, present only when a redirect occurred. */
+  it("LibraryReport.finalUrl is present when a redirect occurred, and absent (null) when it did not", async () => {
+    stubRedirectingFetch({
+      [CANDIDATE]: { status: 302, location: FINAL },
+      [FINAL]: { status: 200, body: "# Guide\n\n## Setup\n\nRun the installer." },
+    });
+    const redirected = await runDoctor(reg({ name: "acme", urls: [CANDIDATE], probeQueries: ["setup"] }));
+    expect(redirected.libraries[0].url).toBe(CANDIDATE);
+    expect(redirected.libraries[0].finalUrl).toBe(FINAL);
+
+    stubRedirectingFetch({ [CANDIDATE]: { status: 200, body: "# Guide\n\n## Setup\n\nRun the installer." } });
+    const notRedirected = await runDoctor(reg({ name: "acme2", urls: [CANDIDATE], probeQueries: ["setup"] }));
+    expect(notRedirected.libraries[0].url).toBe(CANDIDATE);
+    expect(notRedirected.libraries[0].finalUrl).toBeNull();
+  });
+
+  /** PAR-815 — `doctor --json`'s `LibraryReport.url`/`finalUrl` are redacted, the same design
+   *  call made for `search --json`'s `SearchGroup.url` and for the same stated reason. */
+  it("LibraryReport.url and finalUrl strip a token-bearing query string", async () => {
+    const tokenCandidate = "https://docs.internal.example.com/llms.txt?token=super-secret-doctor";
+    const tokenFinal = "https://docs.internal.example.com/moved.txt?token=also-secret-doctor";
+    stubRedirectingFetch({
+      [tokenCandidate]: { status: 302, location: tokenFinal },
+      [tokenFinal]: { status: 200, body: "# Guide\n\n## Setup\n\nRun the installer." },
+    });
+    const report = await runDoctor(reg({ name: "acme", urls: [tokenCandidate], probeQueries: ["setup"] }));
+    const [lib] = report.libraries;
+    expect(lib.url).toBe("https://docs.internal.example.com/llms.txt");
+    expect(lib.finalUrl).toBe("https://docs.internal.example.com/moved.txt");
+    expect(JSON.stringify(report)).not.toContain("super-secret-doctor");
+    expect(JSON.stringify(report)).not.toContain("also-secret-doctor");
+  });
+});
+
 describe("runDoctor cache age and staleness", () => {
   const entry: LibraryEntry = { name: "react", urls: [REACT_URL], ttlHours: 10, probeQueries: ["useEffect cleanup"] };
 
@@ -451,10 +517,13 @@ describe("report shape, table and exit code", () => {
     expect(report.schemaVersion).toBe(1);
     expect(Number.isNaN(Date.parse(report.generatedAt))).toBe(false);
     for (const lib of report.libraries) {
+      // PAR-813 (Phase 4) — `finalUrl` is a new, appended key (no schemaVersion bump: see
+      // DOCTOR_SCHEMA_VERSION's own comment).
       expect(Object.keys(lib)).toEqual([
         "library",
         "kind",
         "url",
+        "finalUrl",
         "cacheAgeHours",
         "stale",
         "ttlHours",

@@ -88,6 +88,10 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
     const raw = JSON.parse(readFileSync(join(dir, "activity.json"), "utf8"));
     expect(raw.schemaVersion).toBe(ACTIVITY_LOG_SCHEMA_VERSION);
     expect(raw.entries).toHaveLength(1);
+    // PAR-813/PAR-807 (Phase 4) — `finalUrl` and `urlHadQuery` are new keys APPENDED after
+    // `url` (K1, amended): `base` here has neither a redirect nor a query string, so both are
+    // correctly absent from this particular entry — see the dedicated PAR-813/PAR-807 tests
+    // below for the case where they are present.
     expect(Object.keys(raw.entries[0])).toEqual(["tool", "library", "query", "url", "contentHash", "fresh", "outcome", "timestamp"]);
     expect(readActivityEntries()).toEqual([{ ...base, timestamp: "2026-09-17T18:00:00.000Z" }]);
   });
@@ -268,6 +272,80 @@ describe("activity log (<cacheRoot>/activity.json)", () => {
       expect(e?.url).toBe("https://example.com/docs/llms.txt");
       expect(e?.url).not.toContain("token");
       expect(e?.url).not.toContain("super-secret");
+    });
+
+    /** PAR-813 (Phase 4) — `finalUrl` (PAR-776's redirect provenance) reaches the activity log,
+     *  redacted and bounded exactly like `url`. */
+    it("PAR-813: finalUrl is redacted the same way url is, and is absent when not given", () => {
+      const withRedirect = toActivityEntry({
+        tool: "get_docs",
+        outcome: "matched",
+        timestamp: "2026-09-17T18:00:00.000Z",
+        url: "https://example.com/old?token=super-secret",
+        finalUrl: "https://example.com/new?token=also-secret",
+      });
+      expect(withRedirect?.finalUrl).toBe("https://example.com/new");
+      expect(withRedirect?.finalUrl).not.toContain("also-secret");
+      const withoutRedirect = toActivityEntry({
+        tool: "get_docs",
+        outcome: "matched",
+        timestamp: "2026-09-17T18:00:00.000Z",
+        url: "https://example.com/x",
+      });
+      expect(withoutRedirect?.finalUrl).toBeUndefined();
+    });
+
+    /** PAR-807 (Phase 4) — two documents differing only by query string must not render as
+     *  identical activity-log entries with no marker that anything was elided. */
+    describe("PAR-807: urlHadQuery marks a query/fragment that was stripped from url", () => {
+      it("is true when the raw url carried a query string or a fragment", () => {
+        const withQuery = toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.000Z", url: "https://example.com/x?v=2" });
+        expect(withQuery?.urlHadQuery).toBe(true);
+        const withFragment = toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.000Z", url: "https://example.com/x#section" });
+        expect(withFragment?.urlHadQuery).toBe(true);
+      });
+
+      it("is absent (not false) when the raw url carried neither", () => {
+        const plain = toActivityEntry({ tool: "get_docs", outcome: "matched", timestamp: "2026-09-17T18:00:00.000Z", url: "https://example.com/x" });
+        expect(plain?.urlHadQuery).toBeUndefined();
+      });
+
+      it("is absent when url itself is absent", () => {
+        const noUrl = toActivityEntry({ tool: "resolve_library", outcome: "unresolved", timestamp: "2026-09-17T18:00:00.000Z" });
+        expect(noUrl?.urlHadQuery).toBeUndefined();
+      });
+
+      /** The bug this test guards against: `toActivityEntry` is called BOTH to build a fresh
+       *  entry (where `url` is still raw) AND to re-validate an entry already read back off
+       *  disk (where `url` in the parsed JSON is already redacted) — recomputing `hadQuery`
+       *  from the STORED (already query-less) `url` on that second call would always read
+       *  false, silently losing the very fact this field exists to preserve. */
+      it("survives a round trip: re-validating an already-persisted entry (via recordActivity + readActivityEntries) keeps urlHadQuery true", () => {
+        recordActivity(
+          { tool: "get_docs", library: "acme", url: "https://example.com/llms.txt?token=super-secret", outcome: "matched" },
+          { now: () => new Date("2026-09-17T18:00:00.000Z") },
+        );
+        const [entry] = readActivityEntries();
+        expect(entry.url).toBe("https://example.com/llms.txt");
+        expect(entry.urlHadQuery).toBe(true);
+      });
+
+      it("two documents differing only by query string are distinguishable in the log by urlHadQuery + contentHash, not identical", () => {
+        recordActivity(
+          { tool: "get_docs", library: "acme", url: "https://example.com/llms.txt?version=v2", contentHash: "0000000000000002", outcome: "matched" },
+          { now: () => new Date("2026-09-17T18:00:00.000Z") },
+        );
+        recordActivity(
+          { tool: "get_docs", library: "acme", url: "https://example.com/llms.txt?version=v3", contentHash: "0000000000000003", outcome: "matched" },
+          { now: () => new Date("2026-09-17T18:00:01.000Z") },
+        );
+        const entries = readActivityEntries();
+        expect(entries).toHaveLength(2);
+        expect(entries[0].url).toBe(entries[1].url); // the identical-looking string PAR-807 is about
+        expect(entries[0].urlHadQuery).toBe(true);
+        expect(entries[1].urlHadQuery).toBe(true);
+        expect(entries[0].contentHash).not.toBe(entries[1].contentHash); // still distinguishable
+      });
     });
 
     it("contentHash must match documentHash's exact 16-hex shape, or is dropped", () => {

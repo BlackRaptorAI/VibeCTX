@@ -1130,6 +1130,61 @@ describe("getDocs index following", () => {
     expect(out.text).toContain("\nCould not fetch 1 index links: https://fastify.dev/docs/Gone.md");
   });
 
+  /**
+   * PAR-819 (Phase 4) — the note block is a SECOND get_docs surface a token-bearing URL can
+   * reach: `followed`/`tooLarge`/`failed` are rendered as raw links, never run through the
+   * stamp's own query-stripping, because the whole note block is deliberately never passed
+   * through `clipText` (which would collapse its newlines — see the multi-line test above,
+   * unchanged by this fix). Each URL is redacted individually before it is joined into a
+   * note line, and the newline structure stays exactly as it was.
+   */
+  it("PAR-819: a token-bearing followed/too-large/unavailable link URL is redacted in the note block, newlines unaffected", async () => {
+    seedIndex(
+      [
+        "# Fastify",
+        "- [Request](/docs/Request.md?token=super-secret-followed)",
+        "- [Request big](/docs/Big.md?token=super-secret-big)",
+        "- [Request gone](/docs/Gone.md?token=super-secret-gone)",
+      ].join("\n"),
+    );
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.startsWith("https://fastify.dev/docs/Request.md")) {
+          return new Response("# Request\n\n## request.hostname\n\nThe hostname of the incoming request.", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          });
+        }
+        if (u.startsWith("https://fastify.dev/docs/Big.md")) {
+          return new Response("x", { status: 200, headers: { "content-type": "text/plain", "content-length": String(LINKED_PAGE_MAX_BYTES + 1) } });
+        }
+        return new Response("nope", { status: 404 });
+      }),
+    );
+    const out = await getDocsDetailed(entry, { topic: "request hostname", maxTokens: 1000 });
+    // Scoped to the NOTE block itself, not the whole response: D-30 deliberately leaves the
+    // retrieved document BODY unsanitized (this fixture's own index page, quoted verbatim,
+    // still contains the raw links with their tokens as part of the document text) — that is
+    // correct, out-of-scope behaviour, not a PAR-819 regression. The note lines vibectx itself
+    // composes are the surface under test here, and each is exactly the redacted form:
+    const followedLine = out.text.split("\n").find((l) => l.startsWith("Followed index links:"));
+    const tooLargeLine = out.text.split("\n").find((l) => l.startsWith("Skipped 1 index links larger than"));
+    const failedLine = out.text.split("\n").find((l) => l.startsWith("Could not fetch"));
+    expect(followedLine).toBe("Followed index links: https://fastify.dev/docs/Request.md");
+    expect(tooLargeLine).toBe("Skipped 1 index links larger than 2 MiB: https://fastify.dev/docs/Big.md");
+    expect(failedLine).toBe("Could not fetch 1 index links: https://fastify.dev/docs/Gone.md");
+    for (const line of [followedLine, tooLargeLine, failedLine]) {
+      expect(line).not.toContain("super-secret");
+      expect(line).not.toContain("token=");
+    }
+    // Newline structure preserved (PAR-819 must not regress the existing D-43 multi-line fix):
+    expect(out.text).toContain("\nFollowed index links: https://fastify.dev/docs/Request.md\n");
+    expect(out.text).toContain("\nSkipped 1 index links larger than 2 MiB: https://fastify.dev/docs/Big.md\n");
+    expect(out.text).toContain("\nCould not fetch 1 index links: https://fastify.dev/docs/Gone.md");
+  });
+
   it("does not count the synthetic link-title heading as an answer from a followed page", async () => {
     // get_docs prefixes each followed page with "# <link title>". That heading alone
     // matches "request" but carries no content; a followed page that says nothing

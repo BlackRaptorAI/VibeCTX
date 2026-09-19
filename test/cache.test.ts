@@ -684,6 +684,110 @@ describe("D-71 (PAR-749, Root 1) — readCache/touchCache verify the record's ow
   });
 });
 
+/**
+ * PAR-806 (Phase 4) — the cache-filename design gate: a token in a configured URL must appear
+ * at no disk surface, including the cache FILENAME itself as read from a directory listing, and
+ * D-71's own collision/mismatch guarantees must survive the change. See DECISIONS.md for the
+ * full design (redacted prefix, raw-url hash suffix, cold-miss-and-orphan upgrade behaviour).
+ */
+describe("PAR-806 — a token-bearing config URL leaves no trace in the cache filename or .meta.json", () => {
+  const TOKEN_URL = "https://docs.example.test/guide?token=SECRET#fragment";
+  const libDir = () => join(dir, libDirName("acme"));
+
+  it("no filename in a directory listing of the cache root contains the token", () => {
+    writeCache("acme", TOKEN_URL, "# Acme guide");
+    const names = readdirSync(libDir());
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of names) {
+      expect(name).not.toContain("SECRET");
+      expect(name).not.toContain("token");
+      expect(name).not.toContain("fragment");
+    }
+  });
+
+  it("the .meta.json file's own CONTENT contains no secret either (not just the filename)", () => {
+    writeCache("acme", TOKEN_URL, "# Acme guide");
+    const [metaName] = readdirSync(libDir()).filter((n) => n.endsWith(".meta.json"));
+    const raw = readFileSync(join(libDir(), metaName), "utf8");
+    expect(raw).not.toContain("SECRET");
+    expect(raw).not.toContain("token");
+    expect(raw).not.toContain("fragment");
+    const parsed = JSON.parse(raw);
+    expect(parsed.url).toBe("https://docs.example.test/guide"); // redacted, but still legible
+    // Security-architect, Phase 4 round 2, B1 — this MUST be the full 64-character digest, not
+    // urlSlug's own 12-character filename suffix; see cache-meta.ts's urlHashFor comment for why.
+    expect(parsed.urlHash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("proves the fix actually changed behaviour: the OLD (pre-fix) slug formula for the same URL is a genuinely different, token-bearing string", () => {
+    // The pre-fix formula this item replaced: prefix AND hash both from the raw url.
+    const oldFormulaSlug = `${TOKEN_URL.replace(/[^a-z0-9]/gi, "_").slice(0, 120)}_${urlSlug(TOKEN_URL).slice(-12)}`;
+    expect(oldFormulaSlug).toContain("SECRET");
+    writeCache("acme", TOKEN_URL, "# Acme guide");
+    const names = readdirSync(libDir());
+    expect(names.some((n) => n.startsWith(oldFormulaSlug))).toBe(false); // the new code never produces the old name
+  });
+
+  it("cold-miss-and-refetch: a cache entry written under the OLD slug formula is not found by the new readCache — a clean miss, not an error, not a wrong document", () => {
+    mkdirSync(libDir(), { recursive: true });
+    const oldSlug = `${TOKEN_URL.replace(/[^a-z0-9]/gi, "_").slice(0, 120)}_${urlSlug(TOKEN_URL).slice(-12)}`;
+    writeFileSync(join(libDir(), `${oldSlug}.md`), "# Stale old-format content", "utf8");
+    writeFileSync(join(libDir(), `${oldSlug}.meta.json`), JSON.stringify({ url: TOKEN_URL, fetchedAt: new Date().toISOString() }), "utf8");
+    expect(() => readCache("acme", TOKEN_URL, 168)).not.toThrow();
+    expect(readCache("acme", TOKEN_URL, 168)).toBeUndefined(); // orphaned, not served
+    // The orphan is harmless dead weight, not read again, but proves this test constructed a
+    // real old-format file rather than one the new code would have produced anyway.
+    expect(existsSync(join(libDir(), `${oldSlug}.md`))).toBe(true);
+  });
+
+  /**
+   * security-architect S3 (Phase 4 round 2) — verifies, rather than assumes, a real residual:
+   * an OLD-format followed-page file for a URL whose redacted form differs from its raw one is
+   * NOT reachable by `dropFollowedPageCache`'s own refresh-triggered cleanup, because
+   * `metaMatchesSlug`'s old-format fallback (`urlSlug(meta.url) === slug`) now recomputes the
+   * slug under the NEW formula against a filename written under the OLD one — they no longer
+   * match, so the file is left in place "for eviction" (its own stated policy for anything it
+   * cannot prove) rather than deleted. This is a real, disclosed gap in this specific cleanup
+   * path, not a security hole (D-71's own guarantee — never wrong content served — is
+   * unaffected either way; this is about disk hygiene, not correctness).
+   */
+  it("security-architect S3: dropFollowedPageCache cannot reclaim an OLD-format followed-page file for a query-bearing URL — it is left in place, not deleted", () => {
+    mkdirSync(libDir(), { recursive: true });
+    const oldSlug = `${TOKEN_URL.replace(/[^a-z0-9]/gi, "_").slice(0, 120)}_${urlSlug(TOKEN_URL).slice(-12)}`;
+    const contentPath = join(libDir(), `${oldSlug}.md`);
+    const metaPath = join(libDir(), `${oldSlug}.meta.json`);
+    writeFileSync(contentPath, "# Stale old-format followed page", "utf8");
+    writeFileSync(metaPath, JSON.stringify({ url: TOKEN_URL, fetchedAt: new Date().toISOString() }), "utf8");
+    // A refresh that keeps some OTHER url should, in the old (pre-Phase-4) world, have swept
+    // this stale followed page away. It does not:
+    dropFollowedPageCache("acme", ["https://docs.example.test/guide?token=a-completely-different-url"]);
+    expect(existsSync(contentPath)).toBe(true);
+    expect(existsSync(metaPath)).toBe(true);
+  });
+
+  it("D-71 preserved: two URLs differing ONLY by query string still produce distinct cache entries, and a read for one never hits the other's", () => {
+    const v2 = "https://docs.example.test/llms.txt?version=v2";
+    const v3 = "https://docs.example.test/llms.txt?version=v3";
+    writeCache("acme", v2, "# v2 content");
+    writeCache("acme", v3, "# v3 content");
+    expect(readCache("acme", v2, 168)?.content).toBe("# v2 content");
+    expect(readCache("acme", v3, 168)?.content).toBe("# v3 content");
+    // Genuinely two files, not one overwriting the other.
+    expect(readdirSync(libDir()).filter((n) => n.endsWith(".md"))).toHaveLength(2);
+  });
+
+  it("a token-bearing url still round-trips correctly for the ordinary case (write, then read, same url)", () => {
+    writeCache("acme", TOKEN_URL, "# Acme guide");
+    expect(readCache("acme", TOKEN_URL, 168)?.content).toBe("# Acme guide");
+  });
+
+  it("a genuinely different url (same host, different query) is correctly treated as a miss, never a false hit off a hash collision on the query-stripped prefix", () => {
+    writeCache("acme", TOKEN_URL, "# Acme guide");
+    const differentToken = "https://docs.example.test/guide?token=OTHER-SECRET";
+    expect(readCache("acme", differentToken, 168)).toBeUndefined();
+  });
+});
+
 describe("PAR-776 (D-74) — writeCache/touchCache's finalUrl", () => {
   const CANDIDATE = "https://react.dev/llms.txt";
   const FINAL = "https://docs.react.dev/llms.txt";
@@ -721,6 +825,66 @@ describe("PAR-776 (D-74) — writeCache/touchCache's finalUrl", () => {
     writeCache("react", CANDIDATE, "# React", undefined, FINAL);
     touchCache("react", CANDIDATE);
     expect(readCache("react", CANDIDATE, 168)?.meta.finalUrl).toBe(FINAL);
+  });
+
+  /**
+   * code-reviewer B1 / security-architect S2 (Phase 4 round 2) — `.meta.json`'s `finalUrl` is a
+   * SECOND plaintext-secret site right next to `url`, closed the same way: redacted at write
+   * (both `writeCache` and `touchCache`) and again at read (`toCacheMeta`, for a pre-fix file).
+   */
+  describe("PAR-806 (Phase 4 round 2) — finalUrl is redacted, not stored/read raw", () => {
+    const TOKEN_CANDIDATE = "https://docs.internal.example.com/old.txt?token=super-secret-candidate";
+    const TOKEN_FINAL = "https://docs.internal.example.com/new.txt?token=super-secret-final";
+    const tokenMetaPath = () => join(dir, libDirName("acme"), `${urlSlug(TOKEN_CANDIDATE)}.meta.json`);
+
+    it("writeCache: the .meta.json bytes on disk contain no token, in url OR finalUrl", () => {
+      writeCache("acme", TOKEN_CANDIDATE, "# Acme", undefined, TOKEN_FINAL);
+      const raw = readFileSync(tokenMetaPath(), "utf8");
+      expect(raw).not.toContain("super-secret-candidate");
+      expect(raw).not.toContain("super-secret-final");
+      expect(raw).not.toContain("token");
+      const parsed = JSON.parse(raw);
+      expect(parsed.finalUrl).toBe("https://docs.internal.example.com/new.txt");
+      expect(readCache("acme", TOKEN_CANDIDATE, 168)?.meta.finalUrl).toBe("https://docs.internal.example.com/new.txt");
+    });
+
+    it("touchCache: the .meta.json bytes on disk contain no token in a finalUrl set on revalidation", () => {
+      writeCache("acme", TOKEN_CANDIDATE, "# Acme");
+      touchCache("acme", TOKEN_CANDIDATE, TOKEN_FINAL);
+      const raw = readFileSync(tokenMetaPath(), "utf8");
+      expect(raw).not.toContain("super-secret-final");
+      expect(JSON.parse(raw).finalUrl).toBe("https://docs.internal.example.com/new.txt");
+    });
+
+    /** code-reviewer's own explicit warning: redacting the STORED value while leaving the
+     *  "did it redirect" gate comparing raw-to-raw would let a finalUrl differing from the
+     *  candidate only by query collapse to the SAME string as `url` once redacted — stored
+     *  anyway, it would render as a confusing "(redirected from X)" for identical X. The gate
+     *  itself must compare redacted-to-redacted, so nothing is stored in that case at all. */
+    it("a finalUrl differing from the candidate ONLY by query string redacts to the same value — nothing is stored, not a confusing self-referential finalUrl", () => {
+      const candidate = "https://docs.internal.example.com/x?v=1";
+      const finalOnlyQueryDiffers = "https://docs.internal.example.com/x?v=2";
+      writeCache("acme2", candidate, "# Acme", undefined, finalOnlyQueryDiffers);
+      expect(readCache("acme2", candidate, 168)?.meta.finalUrl).toBeUndefined();
+      const path = join(dir, libDirName("acme2"), `${urlSlug(candidate)}.meta.json`);
+      expect(JSON.parse(readFileSync(path, "utf8"))).not.toHaveProperty("finalUrl");
+
+      // Same property for touchCache's revalidation path.
+      touchCache("acme2", candidate, finalOnlyQueryDiffers);
+      expect(readCache("acme2", candidate, 168)?.meta.finalUrl).toBeUndefined();
+    });
+
+    it("toCacheMeta redacts a raw finalUrl on READ too, for a pre-fix .meta.json already on disk", () => {
+      writeCache("acme3", TOKEN_CANDIDATE, "# Acme");
+      // Simulate a pre-fix file: hand-write a meta whose finalUrl is still raw (unredacted).
+      const path = join(dir, libDirName("acme3"), `${urlSlug(TOKEN_CANDIDATE)}.meta.json`);
+      const raw = JSON.parse(readFileSync(path, "utf8"));
+      raw.finalUrl = TOKEN_FINAL; // raw, as an old version of this code would have stored it
+      writeFileSync(path, JSON.stringify(raw), "utf8");
+      const hit = readCache("acme3", TOKEN_CANDIDATE, 168);
+      expect(hit?.meta.finalUrl).toBe("https://docs.internal.example.com/new.txt");
+      expect(hit?.meta.finalUrl).not.toContain("super-secret-final");
+    });
   });
 
   /** security-architect, PAR-776 round 1, B-1: an oversized `finalUrl` (a long redirect

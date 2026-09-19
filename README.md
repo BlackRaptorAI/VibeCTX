@@ -272,8 +272,9 @@ Every `get_docs` response that serves a document — this one included — carri
 past its cache TTL, and whether the entry is curated (from the default registry or your
 config) or auto-resolved from a package name. Not just the FIRST time a name resolves — every
 call, so an agent two calls later still knows what it is reading. The url is rendered with its
-query string and fragment stripped — see [Activity log](#activity-log-vibectx-log) for why, and
-for the handful of other response surfaces (not the stamp) that still print a URL whole. (Two
+query string, fragment and userinfo stripped — see [Activity log](#activity-log-vibectx-log)
+for why, and for confirmation that every other response surface (not just this stamp) is
+redacted the same way. (Two
 things can precede it on the same response: a `> STALE:` banner when the cached copy is past
 its TTL, and the one-time `> Resolved …` note on the call that first resolves a package name.
 The one response that never had a document — nothing reachable, nothing cached — carries
@@ -1348,9 +1349,12 @@ permission error) is reported `unreachable` with `error: <message>` as its reaso
 never stops the rest of the table. At most three libraries are checked at a time.
 
 `--json` emits `{ schemaVersion: 1, generatedAt, libraries: [{ library, kind, url,
-cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed, dropped }],
-followed, dropped, healthy, reasons }], healthy, total, configIssues: [{ path, scope,
-reason }], eviction?, notes? }` — keys in that order, `null` for a missing URL or age.
+finalUrl, cacheAgeHours, stale, ttlHours, probes: [{ query, derived, status, followed,
+dropped }], followed, dropped, healthy, reasons }], healthy, total, configIssues: [{ path,
+scope, reason }], eviction?, notes? }` — keys in that order, `null` for a missing URL,
+final URL or age. `finalUrl` (Phase 4) is the URL the document was actually served from
+when a redirect moved it away from `url`; both are redacted (query string, fragment and
+userinfo stripped — see [Activity log](#activity-log-vibectx-log)).
 `configIssues` (added in 0.2.0) lists discovered config files that were skipped; while it
 is non-empty the exit code is `1` however healthy the libraries look, because the entries
 those files pin are simply missing. `eviction` (0.2.0) carries the same "documents evicted
@@ -1423,13 +1427,21 @@ One entry per call, never per section or per followed link. Fields, per tool:
   `refresh` — there is no single document either call can be said to be "about".
 - **query** — the topic (`get_docs`) or search query, cleaned and clipped to 200
   characters. Never the document text.
-- **url**, **contentHash** — the document actually consulted, and a hash of its
-  content (the same 16-hex-character hash `search`'s index uses to detect a changed
-  document) — proof of *which* document without a second copy of what it said.
-  `url` has its query string and fragment stripped (a config-authored URL carrying a
-  `?token=…` must not land in a log file in plaintext) and is validated by shape only
-  — `https`, well-formed — not by the fetch-time host allow-list, so a document served
-  from an `allowInternalHosts` entry still shows up here instead of silently vanishing.
+- **url**, **finalUrl**, **contentHash** — the document actually consulted, where it
+  actually landed if a redirect moved it, and a hash of its content (the same
+  16-hex-character hash `search`'s index uses to detect a changed document) — proof of
+  *which* document without a second copy of what it said. Both URLs have their query
+  string, fragment and userinfo stripped (a config-authored URL carrying a `?token=…`
+  must not land in a log file in plaintext) and are validated by shape only — `https`,
+  well-formed — not by the fetch-time host allow-list, so a document served from an
+  `allowInternalHosts` entry still shows up here instead of silently vanishing.
+  `finalUrl` is present only when a redirect actually moved the fetch away from `url`.
+- **urlHadQuery** — `true` when the raw `url` carried a query string or a fragment
+  before it was stripped. Two documents differing only by query string
+  (`…llms.txt?version=v2` vs `…llms.txt?version=v3`) are legitimately *different*
+  cached documents (see [Design notes](#design-notes)), but once `url` is stripped they
+  render as the same string — this field keeps the log honest that something was
+  elided rather than silently showing two sources as one identical `url`.
 - **fresh** — whether the copy consulted was within its TTL.
 - **outcome** — `matched` (content was found and served), `no-match` (the document was
   consulted but the topic/query found nothing in it), `not-cached` (nothing was
@@ -1460,41 +1472,50 @@ directory vibectx creates anywhere under the cache root gets the same owner-only
 treatment (see the cache-directory section above) — `activity.json` was simply the
 first place this project applied it.
 
-**It is not redacted everywhere.** If a config entry's `urls` carries a secret in
-its query string (an internal docs endpoint behind a `?token=…` — vibectx has no
-way to send credentials in a request header, only a user agent and a conditional
-`If-None-Match`, so the query string is the only form one can travel in at all),
-that token no longer reaches your agent's context through this log or through the
-`Source:` line every `get_docs`/`search` response carries (see [Tools](#tools)) —
-both strip the query string and any userinfo (`user:pass@`) before rendering.
-**Other tool responses still print the URL whole**: `refresh`'s "refreshed from
-`<url>`" line; `resolve_library`'s "urls (probed in order)" list; and
-`warm_project`'s `url` column. (`get_docs`'s own "Candidates tried:" list — shown
-exactly when nothing could be fetched and nothing is cached, the moment a token
-has expired or rotated — was fixed in Phase 3, PAR-849/850's security review: it
-now strips the query string the same way the `Source:` line does.) The `--json` form of the CLI commands emits it whole too —
-`vibectx doctor --json` and `vibectx search --json` both serialize the resolved
-URL to stdout, where a terminal or a CI log can hold it as easily as an agent's
-context can. Setting `VIBECTX_DEBUG` prints it whole too, to stderr, on every
-fetch failure — exactly the moment (a stale or rotated token) an operator is
-most likely to turn debugging on, and many MCP clients capture server stderr to
-a persistent log file. It is also unstripped in cache file names, `.meta.json`,
-the search index and project records — owner-only file permissions (above) bound
-WHO can read those files, not whether the token is present in them at all. Treat a
-URL-borne token as visible to your
-agent and to anyone who can read the cache directory — a VPN, a fronting proxy or an IP
-allow-list at the network level is the safer way to reach such an endpoint where
-you can use one. Closing the remaining response paths, a general redaction
-policy, and a real authenticated-fetch mechanism (so a credential never has to
-travel in a URL at all) are open questions, deliberately not decided here —
-tracked for 0.2.1.
+**It is redacted everywhere now (Phase 4, PAR-815/PAR-806/PAR-817).** If a config
+entry's `urls` carries a secret in its query string (an internal docs endpoint
+behind a `?token=…` — vibectx has no way to send credentials in a request header,
+only a user agent and a conditional `If-None-Match`, so the query string is the
+only form one can travel in at all), that token does not reach your agent's
+context, a terminal, a CI log, or the cache directory on disk, with one deliberate
+exception (below). One shared function (`redactUrlForDisplay`, `link-policy.ts`)
+strips the query string, the fragment and any userinfo (`user:pass@`) before a URL
+is shown or stored; the RAW url is still exactly what is used to make the actual
+HTTP request — redaction is a display/storage-only concern, never a fetching one.
+Every response surface is covered: `get_docs`'s "Candidates tried:" list and note
+block, `refresh`'s "refreshed from `<url>`" line, `resolve_library`'s "urls (probed
+in order)" list, and `warm_project`'s `url` column, all in their rendered text AND
+`--json` forms; `vibectx doctor --json` and `vibectx search --json` also redact
+their structured `url`/`finalUrl` fields, the same design call made for the same
+stated reason in each case — the field's purpose (which host/path served the
+document) survives redaction fully, only a secret would be lost. Every disk
+artifact is covered too: cache file names (the human-legible prefix; the
+collision-resistant hash suffix is still derived from the full raw URL, so two
+candidates differing only by query string still produce different cache files —
+see [Design notes](#design-notes)), `.meta.json` (redacted `url` plus a hashed,
+non-reversible identity proof — never the plaintext), the search index, and
+project records.
+
+**The one deliberate exception**: `VIBECTX_DEBUG` prints a URL whole, to stderr, on
+every fetch failure — exactly the moment (a stale or rotated token) an operator is
+most likely to turn debugging on, and many MCP clients capture server stderr to a
+persistent log file. This is intentional, not an oversight: it is an opt-in,
+human-only diagnostic channel (off unless explicitly set), and the raw URL, token
+included, is often exactly what a developer needs to see to confirm which literal
+request was made while debugging their own local setup. Treat a URL-borne token as
+visible to anyone who can read your terminal or your MCP client's stderr log while
+`VIBECTX_DEBUG` is set — a VPN, a fronting proxy or an IP allow-list at the network
+level is the safer way to reach such an endpoint where you can use one. A real
+authenticated-fetch mechanism (so a credential never has to travel in a URL at
+all) remains an open question, deliberately not decided here.
 
 `--json` emits `{ schemaVersion: 1, entries: [{ tool, library?, query?, url?,
-contentHash?, version?, fresh?, outcome, timestamp }] }`, keys in that order;
-`schemaVersion` is bumped only when a key is renamed, removed or changes meaning. This
-is the entire interface — no separate API for a gate or a harness to call: anything
-that wants to check what vibectx actually did reads this the same way it reads
-`warm --json`.
+finalUrl?, urlHadQuery?, contentHash?, version?, fresh?, outcome, timestamp }] }`,
+keys in that order; `schemaVersion` is bumped only when a key is renamed, removed
+or changes meaning — `finalUrl` and `urlHadQuery` are new, appended keys (Phase 4),
+which is why this did not need a bump. This is the entire interface — no separate
+API for a gate or a harness to call: anything that wants to check what vibectx
+actually did reads this the same way it reads `warm --json`.
 
 ## Design notes
 

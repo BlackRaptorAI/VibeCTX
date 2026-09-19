@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { ACTIVITY_LOG_MAX_ENTRIES } from "./limits.js";
+import { MAX_REMOTE_URL_LENGTH, redactUrlForDisplay } from "./link-policy.js";
 import { cleanText, clipText } from "./text.js";
 
 /**
@@ -114,9 +115,29 @@ export interface ActivityEntry {
   query?: string;
   /** The document URL actually consulted, when there is exactly one (absent for a
    *  multi-library `search` and a full `refresh`, for the same reason as `library`).
-   *  Validated by SHAPE only, not the fetch-time host allow-list, and with its query string
-   *  stripped — see `sanitizeLoggedUrl`'s own comment (PAR-792). */
+   *  Validated by SHAPE only, not the fetch-time host allow-list, and redacted (query,
+   *  fragment and userinfo stripped) via the shared `redactUrlForDisplay` — see
+   *  `sanitizeLoggedUrl`'s own comment (PAR-792, consolidated into PAR-817 at Phase 4). */
   url?: string;
+  /** PAR-813 (Phase 4) — the URL this document was ACTUALLY served from, when a redirect moved
+   *  it away from `url` (mirrors `GetDocsOutcome.source.finalUrl` / `StampFacts.redirectedFrom`,
+   *  PAR-776/D-74). Before this field existed, that fact had no reader outside the rendered
+   *  stamp prose — a budget-dependent signal that degrades first under a tight `maxTokens`
+   *  (`requiredHeader`'s own comment, retrieval.ts), which makes it unreliable as an AUDIT
+   *  signal even though it is correct on its own terms. Redacted and bounded exactly like `url`.
+   *  Absent whenever no redirect occurred, or the write hook has nothing to report. */
+  finalUrl?: string;
+  /** PAR-807 (Phase 4) — true when the RAW url this entry was built from carried a query string
+   *  or a fragment that `redactUrlForDisplay` removed. Two documents differing only by query
+   *  string (`…llms.txt?version=v2` vs `…llms.txt?version=v3`) are legitimately DIFFERENT
+   *  cached documents (D-71's own cache-key design), but once every `url` in this log is
+   *  query-stripped they render as the identical string — distinguishable only by
+   *  `contentHash`, which is optional and not consistently populated by every write hook
+   *  (`search.ts`'s entries carry neither `url` nor `contentHash` today). This field keeps the
+   *  log honest about the elision rather than silently rendering two distinct sources as one:
+   *  a reader sees "this string is not the whole story" instead of assuming it is. Absent
+   *  (never `false`) when `url` is absent, or when nothing was actually stripped. */
+  urlHadQuery?: boolean;
   /** `documentHash` (`search-index.ts`) of the document's content — proves WHICH document
    *  without storing what it said (D-33's own boundary, reused here). */
   contentHash?: string;
@@ -171,10 +192,11 @@ function cleanField(value: unknown, max: number): string | undefined {
 }
 
 /** Longest raw URL string this module will attempt to parse — a guard before `new URL()`
- *  runs, independent of `MAX_URL_CHARS`'s post-sanitization storage clip. Mirrors
- *  `link-policy.ts`'s own bound for `sanitizeRemoteUrl` (private there, so restated here
- *  rather than exported solely for this one reuse). */
-const MAX_RAW_URL_CHARS = 2048;
+ *  runs, independent of `MAX_URL_CHARS`'s post-sanitization storage clip. PAR-809 (Phase 4):
+ *  this used to be an independent, undocumented duplicate of `link-policy.ts`'s own
+ *  `MAX_REMOTE_URL_LENGTH` (private there before this item) — now imported from the one place
+ *  that owns the value, so the two constants cannot drift apart silently. */
+const MAX_RAW_URL_CHARS = MAX_REMOTE_URL_LENGTH;
 
 /**
  * D-51/PAR-792 (security-architect): the persisted `url` is only ever DISPLAYED — `vibectx
@@ -191,14 +213,18 @@ const MAX_RAW_URL_CHARS = 2048;
  *
  * Also strips the QUERY STRING, not only the fragment `sanitizeRemoteUrl` already strips: a
  * config-authored `urls` entry carrying `?token=…`/`?api_key=…` (a realistic internal-docs
- * pattern) must not be written into a log file in plaintext. DISCLOSED COST, not costless:
- * the cache key is the FULL url including its query (`urlSlug`, `cache-meta.ts`), so two
- * requests differing only in query (`?v=2` vs `?v=3`) are genuinely different documents that
- * this field can no longer tell apart by `url` alone — `contentHash` still distinguishes
- * them, but a reader scanning by `url` sees one string for two sources, with nothing marking
- * that a query was ever present and removed.
+ * pattern) must not be written into a log file in plaintext — PAR-817 (Phase 4): the
+ * redaction itself is now the ONE shared `redactUrlForDisplay` (`link-policy.ts`), not a
+ * private copy of the same few lines this function used to carry on its own. DISCLOSED COST,
+ * not costless: the cache key is the FULL url including its query (`urlSlug`, `cache-meta.ts`),
+ * so two requests differing only in query (`?v=2` vs `?v=3`) are genuinely different documents
+ * that `url` alone can no longer tell apart — PAR-807 (Phase 4) is what keeps this log honest
+ * about that: the returned `hadQuery` reports whether the RAW value carried a query string or
+ * a fragment before redaction, so `toActivityEntry` can record it (`ActivityEntry.urlHadQuery`)
+ * rather than silently rendering two distinct sources as one identical `url`. `contentHash`
+ * still distinguishes them when populated.
  */
-function sanitizeLoggedUrl(value: unknown): string | undefined {
+function sanitizeLoggedUrl(value: unknown): { url: string; hadQuery: boolean } | undefined {
   if (typeof value !== "string") return undefined;
   const raw = value.trim();
   if (raw.length === 0 || raw.length > MAX_RAW_URL_CHARS) return undefined;
@@ -210,40 +236,58 @@ function sanitizeLoggedUrl(value: unknown): string | undefined {
   }
   if (url.protocol !== "https:") return undefined;
   if (url.username !== "" || url.password !== "") return undefined;
-  url.hash = "";
-  url.search = "";
-  return url.href;
+  const hadQuery = url.search.length > 0 || url.hash.length > 0;
+  return { url: redactUrlForDisplay(raw), hadQuery };
 }
 
 /**
  * Validate one persisted row (K1, mirroring `project-store.ts`'s own `toWarmRow`): `tool`
  * and `outcome` must be in their closed vocabularies and `timestamp` a strict ISO instant —
- * any of those failing drops the ROW; `library`, `query`, `url`, `version` are bounded and
- * cleaned — failing drops only that FIELD; `contentHash` must match `documentHash`'s exact
- * shape or is dropped; `fresh` must be a boolean or is dropped. Every surviving string passes
- * through `cleanText` via `clipText`, so no control, bidi or zero-width character reaches a
- * render of this file (S3).
+ * any of those failing drops the ROW; `library`, `query`, `url`, `finalUrl`, `version` are
+ * bounded and cleaned — failing drops only that FIELD; `contentHash` must match
+ * `documentHash`'s exact shape or is dropped; `fresh`/`urlHadQuery` must be booleans or are
+ * dropped. Every surviving string passes through `cleanText` via `clipText`, so no control,
+ * bidi or zero-width character reaches a render of this file (S3).
  */
 export function toActivityEntry(raw: unknown): ActivityEntry | undefined {
   if (!isRecord(raw)) return undefined;
-  const { tool, library, query, url, contentHash, version, fresh, outcome, timestamp } = raw;
+  const { tool, library, query, url, finalUrl, urlHadQuery, contentHash, version, fresh, outcome, timestamp } = raw;
   if (typeof tool !== "string" || !(ACTIVITY_TOOLS as readonly string[]).includes(tool)) return undefined;
   if (typeof outcome !== "string" || !(ACTIVITY_OUTCOMES as readonly string[]).includes(outcome)) return undefined;
   if (!validIsoInstant(timestamp)) return undefined;
   const cleanedLibrary = cleanField(library, MAX_LIBRARY_CHARS);
   const cleanedQuery = cleanField(query, MAX_QUERY_CHARS);
   const sanitizedUrl = sanitizeLoggedUrl(url);
+  // PAR-813 (Phase 4) — `finalUrl` is sanitized/redacted exactly like `url` (same function,
+  // same bound); its own `hadQuery` is not surfaced separately — `urlHadQuery` below reports
+  // for `url`, the field every existing reader already keys off, and adding a second such flag
+  // for `finalUrl` would be a second, narrower fact nothing yet consumes (PAR-807's own scope).
+  const sanitizedFinalUrl = sanitizeLoggedUrl(finalUrl);
   const cleanedVersion = cleanField(version, MAX_VERSION_CHARS);
-  // Built in this exact field order (K1): tool, library, query, url, contentHash, version,
-  // fresh, outcome, timestamp. This is the ONE place an `ActivityEntry` is ever constructed
-  // — both a freshly recorded one (`recordActivity`, via this same function) and one read
-  // back off disk — so there is no second "record" shape to keep in lockstep with this one:
-  // `writeAtomic`'s write and `vibectx log --json`'s read both serialize these objects
-  // directly, and this order is what each promises to keep stable within a schemaVersion.
+  // Built in this exact field order (K1, amended PAR-813/PAR-807 — new keys APPENDED, per this
+  // schema's own "new keys may be appended without a bump" rule, README): tool, library, query,
+  // url, finalUrl, urlHadQuery, contentHash, version, fresh, outcome, timestamp. This is the ONE
+  // place an `ActivityEntry` is ever constructed — both a freshly recorded one (`recordActivity`,
+  // via this same function) and one read back off disk — so there is no second "record" shape to
+  // keep in lockstep with this one: `writeAtomic`'s write and `vibectx log --json`'s read both
+  // serialize these objects directly, and this order is what each promises to keep stable within
+  // a schemaVersion.
   const entry: ActivityEntry = { tool: tool as ActivityTool } as ActivityEntry;
   if (cleanedLibrary !== undefined) entry.library = cleanedLibrary;
   if (cleanedQuery !== undefined) entry.query = cleanedQuery;
-  if (sanitizedUrl !== undefined) entry.url = clipText(sanitizedUrl, MAX_URL_CHARS);
+  if (sanitizedUrl !== undefined) entry.url = clipText(sanitizedUrl.url, MAX_URL_CHARS);
+  if (sanitizedFinalUrl !== undefined) entry.finalUrl = clipText(sanitizedFinalUrl.url, MAX_URL_CHARS);
+  // PAR-807 — `toActivityEntry` is called BOTH on a fresh write (where `url` is still the RAW,
+  // pre-redaction candidate — `sanitizeLoggedUrl` can genuinely detect a query/fragment on it)
+  // AND on a read-back of an already-persisted entry (where `url` in the parsed JSON is already
+  // redacted, so re-deriving `hadQuery` from IT would always read false and silently lose the
+  // fact on every round trip). The already-written boolean is therefore trusted when it is one
+  // (`explicitHadQuery`), and `sanitizedUrl.hadQuery` is only the FALLBACK for the fresh-write
+  // path (where no such stored flag exists yet) and for an old-format entry written before this
+  // field existed (correctly reads as false — no signal was ever recorded for it). Never set
+  // (not even `false`) when `url` itself is absent: nothing to disclose.
+  const explicitHadQuery = typeof urlHadQuery === "boolean" ? urlHadQuery : undefined;
+  if (sanitizedUrl !== undefined && (explicitHadQuery ?? sanitizedUrl.hadQuery)) entry.urlHadQuery = true;
   if (typeof contentHash === "string" && HASH_PATTERN.test(contentHash)) entry.contentHash = contentHash;
   if (cleanedVersion !== undefined) entry.version = cleanedVersion;
   if (typeof fresh === "boolean") entry.fresh = fresh;

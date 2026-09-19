@@ -8,6 +8,7 @@ import {
   indexCachedDocument,
   indexDocument,
   invalidateIndex,
+  openIndexSession,
   readIndex,
   resetSearchIndexMemo,
   searchIndexPath,
@@ -110,6 +111,17 @@ describe("search-index · indexDocument (PAR-659, D-33)", () => {
   it("D-36: refuses a document over MAX_INDEXED_DOC_BYTES (the caller tokenizes it instead)", () => {
     expect(indexDocument(URL_, "x".repeat(MAX_INDEXED_DOC_BYTES + 1), AT)).toBeUndefined();
     expect(indexDocument(URL_, "# ok\n\nbody text", AT)).toBeDefined();
+  });
+
+  /** PAR-806 (Phase 4) — the index's own `url` field is redacted at write time, closing it as
+   *  a disk site for a token-bearing config URL. */
+  it("PAR-806: url is redacted (query/fragment/userinfo stripped), not stored raw", () => {
+    const tokenUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-index#section";
+    const doc = indexDocument(tokenUrl, DOC, AT)!;
+    expect(doc.url).toBe("https://docs.internal.example.com/llms.txt");
+    expect(doc.url).not.toContain("super-secret-index");
+    const serialised = JSON.stringify({ ...doc, postings: [...doc.postings] });
+    expect(serialised).not.toContain("super-secret-index");
   });
 });
 
@@ -405,5 +417,27 @@ describe("search-index · invalidate and the incremental hook (PAR-659, D-34)", 
     expect(readIndex().libraries.size).toBe(0);
     expect(() => indexCachedDocument("", URL_, DOC, AT, (m) => notes.push(m))).not.toThrow();
     expect(readIndex().libraries.size).toBe(0);
+  });
+
+  /**
+   * security-architect S1 (Phase 4 round 2) — `openIndexSession`'s `add()` fast-path
+   * ("the on-disk entry already matches, cancel a pending removal / do nothing") compares its
+   * offered `url` against the STORED (now-redacted) `existing.url`. Before this fix, a
+   * query-bearing URL's fast path could never fire — the raw offered url never equalled the
+   * redacted stored one — silently forcing a full index rebuild AND rewrite on every `add()`
+   * for that library, forever, once the in-process `memo` was empty (a fresh process). This
+   * proves the fast path fires: `flush()` returns `false` (nothing written) on a session whose
+   * only `add()` exactly matches what is already on disk.
+   */
+  it("PAR-806/S1: the no-op fast path still fires for a query-bearing URL once the in-process memo is empty (a fresh-process read from disk)", () => {
+    const queryUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-index-fastpath";
+    indexCachedDocument("acme", queryUrl, DOC, AT); // real write; also primes the in-process memo
+    resetSearchIndexMemo(); // simulate a fresh process: memo forgotten, disk entry remains
+    const beforeMtime = statSync(searchIndexPath()).mtimeMs;
+    const session = openIndexSession();
+    session.add("acme", queryUrl, DOC, AT); // identical url/content to what is already on disk
+    const written = session.flush();
+    expect(written).toBe(false); // no rewrite was needed
+    expect(statSync(searchIndexPath()).mtimeMs).toBe(beforeMtime); // and none happened
   });
 });
