@@ -25,7 +25,7 @@ export {
 } from "./limits.js";
 import { fetchUrl, getLibraryDoc, isDocUnchanged } from "./fetcher.js";
 import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
-import { npmNameError, normalisePyPiName, pypiNameError, versionShapeError, MAX_VERSION_LENGTH } from "./package-names.js";
+import { npmNameError, normalisePyPiName, pypiNameError, versionShapeError, MAX_VERSION_LENGTH, MAX_NAME_LENGTH } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { classifySourceKind, type SourceKind } from "./source-kind.js";
@@ -399,15 +399,21 @@ export function couldNotResolveMessage(
   // overclaim. Falls back to the general "npm or PyPI" phrasing if this is ever called with
   // `existence: "not-found"` and no ecosystem list (defensive; every real call site supplies one).
   const registries = opts.notFoundEcosystems?.length ? opts.notFoundEcosystems.map((e) => LABEL[e]).join(" or ") : "npm or PyPI";
+  // PAR-822 (security-audit #1-ranked finding) — `name` is untrusted the same way `version` is
+  // (see the A11/PAR-724 comment above): an MCP tool argument echoed straight into response
+  // text on every failure path. `clipText(name, MAX_NAME_LENGTH)` at each of this function's
+  // four interpolation points — the same `clipText` primitive `resolvePackage` already applies
+  // to `version` at its own earlier clip site (`safeRequestedVersion`, above) — never a raw
+  // copy of `name`, whatever this function does with it.
   const existence =
     opts.existence === "not-found"
-      ? `"${name}" does not exist in ${registries}. `
+      ? `"${clipText(name, MAX_NAME_LENGTH)}" does not exist in ${registries}. `
       : opts.existence === "exists"
-        ? `"${name}" exists but publishes no documentation VibeCTX can reach — this is not a sign the package doesn't exist. `
+        ? `"${clipText(name, MAX_NAME_LENGTH)}" exists but publishes no documentation VibeCTX can reach — this is not a sign the package doesn't exist. `
         : "";
   return (
-    `Could not resolve "${name}": ${existence}${attempts.join("; ")}. ` +
-    `Add it to vibectx.config.json like: { "name": "${name}", "urls": ["https://..."] }`
+    `Could not resolve "${clipText(name, MAX_NAME_LENGTH)}": ${existence}${attempts.join("; ")}. ` +
+    `Add it to vibectx.config.json like: { "name": "${clipText(name, MAX_NAME_LENGTH)}", "urls": ["https://..."] }`
   );
 }
 
@@ -575,7 +581,11 @@ export async function resolvePackage(
 
   const nameErrors: Record<Ecosystem, string | undefined> = { npm: npmNameError(folded), pypi: pypiNameError(name) };
   if (nameErrors.npm !== undefined && nameErrors.pypi !== undefined) {
-    attempts.push(`"${name}" is not a valid npm or PyPI package name; nothing was fetched`);
+    // PAR-822 — this string flows a SECOND time into `couldNotResolveMessage`'s own
+    // `attempts.join("; ")` below (via `fail()`), so clipping only `couldNotResolveMessage`'s
+    // own direct interpolations of `name` is not sufficient — this site needs its own
+    // `clipText`, same bound, same primitive.
+    attempts.push(`"${clipText(name, MAX_NAME_LENGTH)}" is not a valid npm or PyPI package name; nothing was fetched`);
     return fail();
   }
   if (!takeResolutionSlot(now().getTime())) {
@@ -825,8 +835,22 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
   if (curated && !curated.resolved) {
     const existingCurated = curated;
     recordActivity({ tool: "resolve_library", library: existingCurated.name, outcome: "matched" });
+    // PAR-822 (code-reviewer + security-architect, round 1) — `name` still reaches here raw:
+    // `fold` (`trim().toLowerCase()`) strips only the ENDS, but `trim()` strips the full
+    // ECMAScript WhiteSpace ∪ LineTerminator set (LF, CR, TAB, VT, FF, NBSP, U+2028, U+2029,
+    // U+FEFF, U+3000, more) — not just plain spaces — so `"\n\nreact"` folds to `react`, hits
+    // this branch, and rendered raw would put a bare `"` on the response's first line. Separately,
+    // `resolveLibrary`'s third leg (`normalisePyPiName`, which collapses runs of `-`/`_`/`.` to a
+    // single `-`) means a long run of that punctuation between two real name fragments
+    // (`"react" + "-".repeat(50) + "_".repeat(50) + ".".repeat(50) + "query"`) also fold-matches
+    // a curated `react-query` — reachable, unbounded, via the CLI (`vibectx resolve`, which never
+    // touches the MCP Zod schema). No attacker-CHOSEN text can ride either path (both are
+    // confirmed, by execution, to only ever smuggle whitespace/line-terminators or punctuation
+    // runs, never an arbitrary letter) — but real line-structure corruption and an unbounded
+    // response are exactly what `clipText` exists to close, same primitive, same bound, as
+    // every other site in this fix.
     return [
-      `"${name}" is already in the registry as "${existingCurated.name}" — nothing to resolve.`,
+      `"${clipText(name, MAX_NAME_LENGTH)}" is already in the registry as "${existingCurated.name}" — nothing to resolve.`,
       "  urls (probed in order):",
       ...existingCurated.urls.map((u, i) => `    ${i + 1}. ${u}`),
       `  Use get_docs("${existingCurated.name}"); override the entry in vibectx.config.json to change its sources.`,

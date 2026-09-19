@@ -12,7 +12,7 @@ import {
 import { clipText } from "./text.js";
 import { normaliseAllowedHost } from "./link-policy.js";
 import { readResolvedEntries } from "./resolved-store.js";
-import { normalisePyPiName } from "./package-names.js";
+import { normalisePyPiName, MAX_NAME_LENGTH } from "./package-names.js";
 
 /** Provenance of an entry synthesized by resolve_library (PAR-655). Set only by the
  *  resolver and the persisted store; stripped from config entries. */
@@ -890,9 +890,15 @@ export function installResolvedEntry(registry: Registry, entry: LibraryEntry): b
 }
 
 /** The text every tool returns for a name that resolves to nothing. Lists canonical names
- *  only (aliases are shown by list_libraries). */
+ *  only (aliases are shown by list_libraries).
+ *
+ *  PAR-822 (security-audit #1-ranked finding) — `library` is an MCP tool argument (get_docs,
+ *  doctor, refresh) or a CLI argument, echoed here on a purely local, no-network path whenever
+ *  the name does not resolve. `clipText(library, MAX_NAME_LENGTH)` — the same primitive and
+ *  the same bound `resolve.ts`'s `couldNotResolveMessage` applies to `name` — so a hostile
+ *  value can neither forge a line of its own nor grow this response without limit. */
 export function unknownLibraryMessage(registry: Registry, library: string): string {
-  return `Unknown library "${library}". Known: ${[...registry.entries.keys()].join(", ")}`;
+  return `Unknown library "${clipText(library, MAX_NAME_LENGTH)}". Known: ${[...registry.entries.keys()].join(", ")}`;
 }
 
 /**
