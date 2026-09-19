@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { newerSchemaVersion, isRegularFile } from "../src/atomic-store.js";
+import { newerSchemaVersion, isRegularFile, writeAtomic, tempPathFor } from "../src/atomic-store.js";
 
 /**
  * PAR-805 — `newerSchemaVersion` is shared by every store in the cache directory that carries a
@@ -95,5 +95,48 @@ describe("newerSchemaVersion", () => {
 
     expect(() => newerSchemaVersion(linked, 1)).not.toThrow();
     expect(newerSchemaVersion(linked, 1)).toBeUndefined();
+  });
+});
+
+describe("PAR-862 — writeAtomic defaults opts.mode to 0o600", () => {
+  it("an explicit mode is honoured; omitting it now defaults to owner-only rather than the platform default", () => {
+    const withMode = join(dir, "with-mode.json");
+    writeAtomic(withMode, "{}", { mode: 0o640 });
+    expect(statSync(withMode).mode & 0o777).toBe(0o640);
+    const withoutMode = join(dir, "without-mode.json");
+    writeAtomic(withoutMode, "{}");
+    expect(statSync(withoutMode).mode & 0o777).toBe(0o600);
+  });
+});
+
+describe('PAR-860 — writeAtomic refuses to write through a symlink planted at the exact predictable temp path (flag: "wx")', () => {
+  /**
+   * `tempPathFor`'s own name is `${path}.${pid}.${Date.now()}.tmp` — predictable to within a
+   * process id (fixed for this test process) and a millisecond, which `Date.now` is pinned to
+   * here so the exact temp path can be precomputed and a symlink planted there BEFORE
+   * `writeAtomic` ever runs. Mirrors `test/cache-root.test.ts`'s own pattern of controlling one
+   * primitive precisely to make an otherwise-timing-dependent attack deterministic in a test.
+   */
+  it("throws rather than opening the pre-planted symlink, and touches neither the real target path nor the symlink's own target", () => {
+    const path = join(dir, "store.json");
+    const elsewhere = join(dir, "elsewhere.json");
+    writeFileSync(elsewhere, "ORIGINAL ELSEWHERE CONTENT", "utf8");
+    const fixedNow = 1_700_000_000_000;
+    const realDateNow = Date.now;
+    Date.now = () => fixedNow;
+    try {
+      const tmp = tempPathFor(path);
+      symlinkSync(elsewhere, tmp);
+
+      expect(() => writeAtomic(path, "NEW CONTENT")).toThrow(/EEXIST/);
+
+      expect(existsSync(path)).toBe(false); // nothing was ever renamed into place
+      // The catch block's `rmSync(tmp, { force: true })` removes the symlink itself, never
+      // the target it pointed at (POSIX unlink on a symlink never follows it).
+      expect(existsSync(tmp)).toBe(false);
+      expect(readFileSync(elsewhere, "utf8")).toBe("ORIGINAL ELSEWHERE CONTENT");
+    } finally {
+      Date.now = realDateNow;
+    }
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, mkdirSync, existsSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -116,6 +116,103 @@ describe("project record store (<cacheRoot>/projects/<hash>.json, PAR-656)", () 
       `Project deps (${project}): 2 cached, 1 unresolved, 1 denied — warmed 2026-09-06T06:00:00.000Z`,
     );
     expect(existsSync(join(dir, "projects"))).toBe(false); // summarising never writes
+  });
+});
+
+describe("PAR-859 — a project record is symlink-safe on read", () => {
+  /**
+   * Unlike `resolved-store.ts`/`doctor-store.ts`, `writeProjectRecord` does NOT read the
+   * existing file to merge before writing — it serialises the `record` argument it was handed
+   * directly (CONFIRMED by reading it). So this closes a served-and-discarded read only; a plain
+   * refusal test is sufficient here, no read-merge-persist poisoning test is needed.
+   */
+  it("readProjectRecord refuses a symlink planted at its own record path — reads back undefined, not through the link (mutation target: readProjectRecord's isRegularFile guard)", () => {
+    expect(writeProjectRecord(record())).toBe(true);
+    expect(readProjectRecord(project)).toEqual(record()); // the real file round-trips first
+    const sibling = join(dir, "sibling.json");
+    writeFileSync(sibling, JSON.stringify(record({ dir: project })), "utf8");
+    rmSync(projectRecordPath(project), { force: true });
+    symlinkSync(sibling, projectRecordPath(project));
+
+    let out: ReturnType<typeof readProjectRecord>;
+    expect(() => {
+      out = readProjectRecord(project);
+    }).not.toThrow();
+    expect(out!).toBeUndefined();
+    expect(lstatSync(projectRecordPath(project)).isSymbolicLink()).toBe(true); // the link itself is untouched by the read
+  });
+
+  /**
+   * code-reviewer (Phase 1b review round, BLOCKING) PROVED with an executed probe that the test
+   * above is not the whole story: `isRegularFile`/`lstat` only inspects the LEAF (the record file
+   * itself). With `VIBECTX_CACHE_DIR` pointed at a symlink whose TARGET holds a genuinely real,
+   * valid record, the leaf check never sees a symlink — `lstat` on the full joined path resolves
+   * the ROOT (an intermediate component) for ordinary traversal and finds a real regular file at
+   * the far end. A different scenario from the test above; needs its own proof.
+   */
+  it("readProjectRecord refuses even when only the cache ROOT is a symlink, whose target genuinely holds a valid record", () => {
+    const target = mkdtempSync(join(tmpdir(), "vibectx-projstore-root-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-projstore-root-symlink-parent-"));
+    const linked = join(parent, "root");
+    process.env.VIBECTX_CACHE_DIR = target;
+    const realPath = projectRecordPath(project); // <target>/projects/<hash>.json, computed against the REAL root
+    mkdirSync(join(target, "projects"), { recursive: true });
+    writeFileSync(realPath, JSON.stringify(record()), "utf8");
+    symlinkSync(target, linked);
+    process.env.VIBECTX_CACHE_DIR = linked;
+    try {
+      let out: ReturnType<typeof readProjectRecord>;
+      expect(() => {
+        out = readProjectRecord(project);
+      }).not.toThrow();
+      expect(out!).toBeUndefined(); // must NOT return the record sitting at the far end of the root symlink
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("PAR-859 — writeProjectRecord refuses a symlink at EITHER of its two ensureCacheRoot calls independently", () => {
+  it("refuses when the cache ROOT itself is a symlink", () => {
+    const target = mkdtempSync(join(tmpdir(), "vibectx-projstore-write-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-projstore-write-symlink-parent-"));
+    const linked = join(parent, "root");
+    symlinkSync(target, linked);
+    process.env.VIBECTX_CACHE_DIR = linked;
+    try {
+      expect(() => writeProjectRecord(record())).not.toThrow();
+      expect(writeProjectRecord(record())).toBe(false);
+      expect(readdirSync(target)).toEqual([]); // nothing was created through the link
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * PAR-859 (mutation target: writeProjectRecord's SECOND ensureCacheRoot call, on
+   * `join(root, "projects")`) — a real root does not, by itself, prove `projects/` is real: a
+   * symlink could be planted specifically at that one subdirectory, exactly the shape
+   * `writeCache`'s own two-call root/library-directory check already treats as independent
+   * (see that function's own comment). This is caught ONLY by checking the SECOND call's own
+   * return value — the mutation this test targets is real: removing just this bail (leaving the
+   * root's own bail intact) makes no OTHER test in this suite fail, since every other write-side
+   * fixture symlinks the root itself, never `projects/` alone.
+   */
+  it("refuses when the root is real but projects/ itself is a symlink", () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "vibectx-projstore-write-symlink-elsewhere-"));
+    symlinkSync(elsewhere, join(dir, "projects"));
+    try {
+      expect(() => writeProjectRecord(record())).not.toThrow();
+      expect(writeProjectRecord(record())).toBe(false);
+      expect(readdirSync(elsewhere)).toEqual([]); // nothing was created through the link
+      expect(lstatSync(join(dir, "projects")).isSymbolicLink()).toBe(true); // the link itself is untouched
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
   });
 });
 

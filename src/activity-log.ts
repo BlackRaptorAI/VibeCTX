@@ -308,7 +308,12 @@ export function recordActivity(
     // (`cache.ts`) this call now also uses, so whichever one actually runs first still produces
     // 0o700 — see that function's own comment for the full rationale, including why a
     // PRE-EXISTING looser root is warned about, not tightened.
-    ensureCacheRoot(dir, warn);
+    // PAR-859: a symlinked `dir` is now refused by `ensureCacheRoot` itself (warns once, returns
+    // `false`) rather than written through silently — a plain `return;`, not falling through to
+    // `writeAtomic`, which would otherwise throw against a directory that was never created and
+    // land in this function's own outer `catch`, printing a second, redundant "activity not
+    // logged" line on top of `ensureCacheRoot`'s own warning for the same refusal.
+    if (!ensureCacheRoot(dir, warn)) return;
     const path = activityLogPath();
     const newer = newerSchemaVersion(path, ACTIVITY_LOG_SCHEMA_VERSION);
     if (newer !== undefined) {

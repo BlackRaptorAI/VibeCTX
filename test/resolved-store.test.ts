@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, symlinkSync, lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -205,6 +205,94 @@ describe("resolved store (<cacheRoot>/resolved.json)", () => {
   it("refuses to save an entry that is not a resolved entry", () => {
     expect(() => saveResolvedEntry({ name: "hono", urls: ["https://hono.dev/llms.txt"] })).toThrow(/resolved/);
     expect(existsSync(join(dir, "resolved.json"))).toBe(false);
+  });
+});
+
+describe("PAR-859 — resolved.json is symlink-safe on both read and the write-side merge", () => {
+  it("readResolvedEntries refuses a symlink planted at resolved.json's own path — reads back empty, not through the link (mutation target: readResolvedEntries's isRegularFile guard)", () => {
+    saveResolvedEntry(hono);
+    expect(readResolvedEntries()).toHaveLength(1); // the real file round-trips first
+    const sibling = join(dir, "sibling.json");
+    writeFileSync(sibling, JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: [{ name: "evil", urls: hono.urls, resolved: hono.resolved }] }), "utf8");
+    rmSync(resolvedStorePath(), { force: true });
+    symlinkSync(sibling, resolvedStorePath());
+
+    let entries: ReturnType<typeof readResolvedEntries>;
+    expect(() => {
+      entries = readResolvedEntries();
+    }).not.toThrow();
+    expect(entries!).toEqual([]);
+    expect(lstatSync(resolvedStorePath()).isSymbolicLink()).toBe(true); // the link itself is untouched by the read
+  });
+
+  /**
+   * PAR-859 — the exposure `readResolvedEntries`'s own guard actually closes is worse than
+   * "served and discarded": `saveResolvedEntry` calls `readResolvedEntries()` internally to merge
+   * a new entry into the existing list before writing back. Before this guard, a symlink planted
+   * at `resolved.json` pointing at a file holding one attacker-authored entry had that entry
+   * READ, MERGED, and PERSISTED into the real file on the very next save — proved here by saving
+   * a DIFFERENT, legitimate library and then reading the REAL bytes that landed on disk (through
+   * the symlink's own target, which `saveResolvedEntry`'s rename replaces with a real file) and
+   * asserting the planted entry is specifically ABSENT, not merely that the save "worked".
+   */
+  it("a planted entry behind a resolved.json symlink is never adopted into the real file on the next save", () => {
+    const plantedTarget = join(dir, "planted.json");
+    const poisoned: LibraryEntry = { ...hono, name: "evil-planted-library" };
+    writeFileSync(
+      plantedTarget,
+      JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: [{ name: poisoned.name, urls: poisoned.urls, resolved: poisoned.resolved }] }),
+      "utf8",
+    );
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(plantedTarget, resolvedStorePath());
+
+    expect(saveResolvedEntry(httpx)).toBe(true);
+
+    // The symlink is gone — `writeAtomic`'s rename replaced it with a real file — so read the
+    // REAL bytes that landed on disk directly, not merely through `readResolvedEntries` (which
+    // would itself refuse a symlink, but by now there is no symlink left to refuse).
+    expect(lstatSync(resolvedStorePath()).isSymbolicLink()).toBe(false);
+    const onDisk = JSON.parse(readFileSync(resolvedStorePath(), "utf8"));
+    const names: string[] = onDisk.entries.map((e: { name: string }) => e.name);
+    expect(names).toEqual(["httpx"]); // only the legitimate save landed
+    expect(names).not.toContain(poisoned.name); // the planted entry was never adopted
+    // The symlink's own target is untouched — the poisoned data still sits exactly where it was,
+    // proving nothing was written THROUGH the link either.
+    expect(JSON.parse(readFileSync(plantedTarget, "utf8")).entries[0].name).toBe(poisoned.name);
+  });
+
+  /**
+   * code-reviewer (Phase 1b review round, BLOCKING) PROVED with an executed probe that the two
+   * tests above are not the whole story: `isRegularFile`/`lstat` only inspects the LEAF
+   * (`resolved.json` itself). With `VIBECTX_CACHE_DIR` pointed at a symlink whose TARGET holds a
+   * genuinely real, valid `resolved.json`, the leaf check never sees a symlink at all — `lstat` on
+   * the full joined path resolves the ROOT (an intermediate component) for ordinary directory
+   * traversal and finds a real regular file at the far end. This is a DIFFERENT scenario from
+   * either test above (neither of which symlinks the root) and needs its own proof:
+   * `readResolvedEntries` must refuse even when only the root is symlinked.
+   */
+  it("readResolvedEntries refuses even when only the cache ROOT is a symlink, whose target genuinely holds a valid resolved.json", () => {
+    const target = mkdtempSync(join(tmpdir(), "vibectx-resolved-root-symlink-target-"));
+    const parent = mkdtempSync(join(tmpdir(), "vibectx-resolved-root-symlink-parent-"));
+    const linked = join(parent, "root");
+    writeFileSync(
+      join(target, "resolved.json"),
+      JSON.stringify({ schemaVersion: RESOLVED_SCHEMA_VERSION, entries: [{ name: hono.name, urls: hono.urls, resolved: hono.resolved }] }),
+      "utf8",
+    );
+    symlinkSync(target, linked);
+    process.env.VIBECTX_CACHE_DIR = linked;
+    try {
+      let entries: ReturnType<typeof readResolvedEntries>;
+      expect(() => {
+        entries = readResolvedEntries();
+      }).not.toThrow();
+      expect(entries!).toEqual([]); // must NOT return the entry sitting at the far end of the root symlink
+    } finally {
+      process.env.VIBECTX_CACHE_DIR = dir;
+      rmSync(parent, { recursive: true, force: true });
+      rmSync(target, { recursive: true, force: true });
+    }
   });
 });
 
