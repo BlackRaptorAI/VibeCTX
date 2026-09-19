@@ -31,7 +31,7 @@ npm run lint    # tsc --noEmit
    Push the branch and open a PR. The PR description holds: what changed, each Done-when line
    marked met / not met, the review findings (paste them), and that `git diff --stat` output.
    Link the PR on the Linear issue.
-6. **Never merge and never push to `main`.** Tom merges (squash).
+6. **Squash-merge your own PR once CI is green and every required review seat has passed** (self-merge per the remediation runbook, R2). **Never push commits directly to `main`** — that stays denied; you land changes only through a merged PR.
    To bring a PR branch up to date: `git fetch origin && git merge origin/main`, fix conflicts,
    re-run lint + tests, push. Merge, don't rebase — force-push is blocked.
 7. If a Done-when is wrong or can't be met, say so in the PR and move on. Tom decides.
