@@ -56,8 +56,12 @@ export function writeAtomic(path: string, data: string, opts: { mode?: number } 
 
 /** True only for a REGULAR file — `lstat`, so a symbolic link answers false rather than being
  *  followed to whatever it points at. Any error (the entry vanished, the directory is
- *  unreadable) answers false: the sweep skips what it cannot positively identify. */
-function isRegularFile(path: string): boolean {
+ *  unreadable) answers false: the sweep skips what it cannot positively identify.
+ *
+ *  Exported (PAR-805): originally private to this file's own temp-file sweep, now reused as the
+ *  read-side symlink guard for `newerSchemaVersion` below and for `activity-log.ts`'s
+ *  `readActivityEntries` — the same check, not a second implementation of it. */
+export function isRegularFile(path: string): boolean {
   try {
     return lstatSync(path).isFile();
   } catch {
@@ -140,10 +144,39 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /**
  * The on-disk file's `schemaVersion` when it parses and is NEWER than `ours` (K2); undefined
- * when the file is absent, corrupt, ours, or older. A newer file was written by a newer
- * vibectx and is not ours to rewrite; an older one is ours to replace.
+ * when the file is absent, corrupt, ours, older, or (PAR-805) a symlink rather than a regular
+ * file. This function is SHARED across every store in the cache directory that carries a
+ * `schemaVersion` (`resolved-store.ts`, `search-index.ts`, `project-store.ts`,
+ * `doctor-store.ts`, `activity-log.ts` — `cache.ts`'s own `touchCache` does not call this, since
+ * a TTL revalidation never changes a record's schema), so the symlink guard here closes the
+ * SCHEMA-PROBE read for all five callers in one place, the same way `writeAtomic` above closes
+ * the write side for all of them in one place.
+ * `isRegularFile` (this file, `lstat`, never `stat`) — a symlink planted at any of these paths
+ * is refused the same way a missing or corrupt file already was: as "nothing newer here",
+ * never followed. Deliberately NOT bounded by size: this is also `index.json`'s schema check,
+ * and a legitimately large index (many libraries' tokenized text) must not be refused merely
+ * for being big — symlink-safety and size-bounding are separate concerns, and this function
+ * only owns the former.
+ *
+ * NOT CLOSED BY THIS ITEM (code-reviewer, PAR-805 review round) — and this is the more
+ * important scope note, not a footnote: this function only guards the SCHEMA-VERSION PROBE,
+ * never each store's own DATA read. `readResolvedEntries` (`resolved-store.ts`),
+ * `readDoctorVerdicts` (`doctor-store.ts`), `readProjectRecord` (`project-store.ts`), and
+ * `search-index.ts`'s `readIndex` (already known from PAR-786/D-83) all still call a bare
+ * `readFileSync` with no `isRegularFile`/`lstat` guard of their own, and still follow a symlink
+ * planted at their own target path. `readActivityEntries` (`activity-log.ts`) is the ONLY store
+ * DATA read this item actually closed (it calls `isRegularFile` directly, not through this
+ * function). For `resolved-store.ts` specifically the exposure is worse than "served and
+ * discarded": `saveResolvedEntry` calls `readResolvedEntries()` (follows the symlink, returns a
+ * planted, attacker-authored entry), merges it into the in-memory array, then `writeAtomic`s
+ * that array back — so a planted symlink at `resolved.json` gets its content READ, MERGED, AND
+ * PERSISTED into the real file (the rename replaces the symlink with a real file holding the
+ * poisoned data), not merely read once and thrown away. All of this is PAR-859's scope, not
+ * this item's — do not add guards for these four reads here; that is real scope growth into a
+ * different, not-yet-started issue.
  */
 export function newerSchemaVersion(path: string, ours: number): string | undefined {
+  if (!isRegularFile(path)) return undefined;
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
     if (isRecord(parsed) && typeof parsed.schemaVersion === "number" && parsed.schemaVersion > ours) return String(parsed.schemaVersion);

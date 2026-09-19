@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot } from "./cache.js";
+import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
 import type { DependencyEcosystem } from "./project-deps.js";
 import { cleanText } from "./text.js";
@@ -316,7 +316,22 @@ export function readProjectRecord(dir: string): ProjectRecord | undefined {
 export function writeProjectRecord(record: ProjectRecord, warn: (message: string) => void = (m) => process.stderr.write(m)): boolean {
   const dir = normaliseProjectDir(record.dir);
   const path = projectRecordPath(dir);
-  mkdirSync(join(cacheRoot(), "projects"), { recursive: true });
+  // PAR-805: the ROOT first, THEN `projects/` — two `ensureCacheRoot` calls, not one, for the
+  // identical reason `cache.ts`'s `writeCache` calls it twice (see that function's own
+  // comment): calling it only on `join(cacheRoot(), "projects")` never triggers the
+  // pre-existing-loose-ROOT warning at all, because `ensureCacheRoot`'s own check is
+  // `dir === cacheRoot()`, which `<root>/projects` can never equal — VERIFIED (this file's own
+  // investigation): a root pre-existing at 0777 produced zero warnings through the single-call
+  // version of this fix. Calling it on the root first closes that gap; calling it again on
+  // `projects/` still creates (or confirms) that subdirectory at 0700 exactly as before.
+  const root = cacheRoot();
+  // Wrapped: this module's own `warn` default has no trailing newline, unlike
+  // `ensureCacheRoot`'s own (`toStderr`) — see `resolved-store.ts`'s identical wrap for the
+  // full reasoning. Only the ROOT call ever actually emits a message (the subdirectory can
+  // never equal `cacheRoot()`), but both are wrapped identically for consistency.
+  const emit = (m: string): void => warn(`${m}\n`);
+  ensureCacheRoot(root, emit);
+  ensureCacheRoot(join(root, "projects"), emit);
   const newer = newerSchemaVersion(path, PROJECT_RECORD_SCHEMA_VERSION);
   if (newer !== undefined) {
     warn(
@@ -335,7 +350,8 @@ export function writeProjectRecord(record: ProjectRecord, warn: (message: string
     null,
     2,
   );
-  writeAtomic(path, body);
+  // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write.
+  writeAtomic(path, body, { mode: 0o600 });
   return true;
 }
 

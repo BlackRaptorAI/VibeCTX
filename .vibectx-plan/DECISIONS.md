@@ -1309,6 +1309,15 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   `index.json` from the far side of it. Tracked as **PAR-859**, filed against this same
   symlinked-root policy, not fixed in this branch (five other modules is real scope growth
   beyond one issue).
+  **Widened here (code-reviewer, PAR-805 review round, since this is the other half of the same
+  tracking record as D-84 below):** PAR-859's read-side remainder is not `readIndex` alone.
+  `readResolvedEntries` (`resolved-store.ts`), `readDoctorVerdicts` (`doctor-store.ts`), and
+  `readProjectRecord` (`project-store.ts`) all call a bare `readFileSync` on their own target
+  path with no `isRegularFile`/`lstat` guard either, and still follow a symlink planted there —
+  found during PAR-805's own review, after PAR-805's `newerSchemaVersion` fix closed only the
+  SCHEMA-VERSION PROBE those three stores also call, never their own actual data read. PAR-859's
+  scope is therefore: `readIndex`, `readResolvedEntries`, `readDoctorVerdicts`, and
+  `readProjectRecord` — four unguarded data reads, not one.
   **What changed, concretely:** `isRealDirectory` (previously private to this file, guarding
   only `dropFollowedPageCache`) is now exported and also guards `readCache`'s and `touchCache`'s
   root and per-library directory, mirroring `cache-evict.ts`'s `rootIsSweepable`. A new
@@ -1353,3 +1362,113 @@ gaps**. Those two files are retired; their decision sections are marked MOVED.
   Ref: `src/cache.ts` — `isRealDirectory` (exported), `existsAsNonDirectory`, `isSymlinkAt`,
   `readBoundedRegularFile`, `MAX_CACHED_CONTENT_BYTES`, `readCache`, `writeCache`, `touchCache`;
   `test/cache.test.ts`, `test/cache-content-size.test.ts` (PAR-786, findings F-2a/F-2b/F-10/N-b1/G2).
+
+---
+
+## D-84 — decided 2026-09-18, executing PAR-805 (cache-root permission consistency and symlink-following on read)
+
+- **D-84** 2026-09-18 — **Every site that may create the cache root now routes through one
+  shared `ensureCacheRoot(dir, warn?)` (exported, `src/cache.ts`), which creates the directory
+  owner-only (`mkdirSync(dir, { recursive: true, mode: 0o700 })`) instead of at the platform
+  default. Every write of a store's own JSON file now passes `{ mode: 0o600 }` to `writeAtomic`
+  (or the equivalent option to `writeFileSync`), so the FILE half of the same finding (F-7) is
+  closed alongside the directory half.**
+  **The six sites, all now routed through `ensureCacheRoot`:** `resolved-store.ts`'s
+  `saveResolvedEntry`, `search-index.ts`'s `writeIndex`, `doctor-store.ts`'s
+  `saveDoctorVerdicts` (found by grep during this item's own investigation — a sixth instance of
+  the identical shape, not named in PAR-805's original text, folded in rather than filed
+  separately), `activity-log.ts`'s `recordActivity` (already passed `mode: 0o700` on its own
+  since PAR-791, but was not yet routed through the shared function other stores now share), and
+  TWO sites that each call `ensureCacheRoot` TWICE, not once — `project-store.ts`'s
+  `writeProjectRecord` (root, then its `projects/` subdirectory) and `cache.ts`'s own
+  `writeCache` (root, then the per-library directory). Both needed the second call for the
+  IDENTICAL reason, caught the same way — first in `writeCache` while writing this item's own
+  tests, then, on review, found to still be present in `writeProjectRecord` as a SEPARATE,
+  unfixed instance of the same bug: calling `ensureCacheRoot` only on the SUBDIRECTORY (an
+  earlier version of both fixes) never triggers the pre-existing-loose-ROOT warning at all,
+  because that check is `dir === cacheRoot()`, which a subdirectory can never equal — VERIFIED
+  directly for `writeProjectRecord` specifically (a standalone script against the built
+  package): a root pre-existing at 0777 produced zero warnings through it alone, even with
+  `writeCache`'s own two-call fix already in place, proving the two call sites are independent
+  and fixing one does not fix the other. `touchCache` is deliberately NOT a seventh
+  `ensureCacheRoot` site — it never creates a directory, only rewrites an existing
+  `.meta.json`. Its own, SOLE contribution to this item is its `writeAtomic` call gaining
+  `{ mode: 0o600 }` (it had none before this item) — its root/library-directory
+  `isRealDirectory` guard was already shipped by PAR-786 (see D-83, above; confirmed by reading
+  that branch's own `src/cache.ts` and its own D-83 entry, both of which already have it before
+  this item started). An earlier version of this entry incorrectly credited that pre-existing
+  guard to this item's own review round; corrected here.
+  **The five newly-`{ mode: 0o600 }` `writeAtomic` calls** (a sixth, `activity-log.ts`'s, already
+  had it): `resolved-store.ts` (`resolved.json`), `search-index.ts` (`index.json`),
+  `project-store.ts` (a project record), `doctor-store.ts` (`doctor.json`), and `cache.ts`'s
+  `touchCache` (`.meta.json`, on a revalidation — distinct from `writeCache`'s own write of the
+  same file, which is a separate `writeFileSync` call, below). `writeCache`'s own two
+  `writeFileSync(contentTmp/metaTmp, ...)` calls switched their third argument from the bare
+  `"utf8"` string to `{ encoding: "utf8", mode: 0o600 }`.
+  **PRE-EXISTING UNSAFE ROOT — disclosed, never tightened or refused, and that is the decision,
+  not an oversight** (see `ensureCacheRoot`'s own comment, `src/cache.ts`, for the full
+  rationale): retroactively `chmod`-ing a directory the user or another process already set up
+  could break an intentionally SHARED cache — this project already treats a shared
+  `VIBECTX_CACHE_DIR` as "moving the trust boundary by choice" (see the README's own PAR-859
+  paragraph, which this item's README addition sits beside and stays consistent with) — and
+  refusing to use an existing, looser-mode root would break every cache created by a vibectx
+  version older than this fix, on the very next upgrade, for a mode difference that has never
+  actually leaked anything document-shaped (this cache's contents were never secret before this
+  item). The check runs only when `dir` is the LITERAL cache root (`dir === cacheRoot()`, a
+  second, free call — memoized for the default path, a direct env-var read for an overridden
+  one), never for a per-library or `projects/` subdirectory, and warns once per distinct root per
+  process (`warnedLooseRoots`, a `Set` — realistically always one root per process, so a boolean
+  would behave identically, but a `Set` keeps this file's two dedupe sets uniform in shape rather
+  than correct by coincidence).
+  **Symlink-following on the SCHEMA-PROBE read, `atomic-store.ts`, plus `activity-log.ts`'s own
+  DATA read** — narrower than an earlier draft of this entry claimed (code-reviewer, PAR-805
+  review round: "closes the read side" overclaimed what actually closed). `newerSchemaVersion`
+  (`atomic-store.ts`), shared by every store in the cache directory that carries a schema version
+  (`resolved-store.ts`, `search-index.ts`, `project-store.ts`, `doctor-store.ts`,
+  `activity-log.ts` — `cache.ts`'s own `touchCache` does not call it at all, since a TTL
+  revalidation never changes a record's schema), gained `if (!isRegularFile(path)) return
+  undefined;` before its `readFileSync` — `isRegularFile` was already private to this file (used
+  by `sweepTempFiles` for the identical reason) and is now exported rather than reimplemented.
+  `activity-log.ts`'s `readActivityEntries` gained the same guard on its own
+  `readFileSync(activityLogPath(), ...)` call — this is the only store's own DATA read this item
+  closed. **NOT closed by this item, and this is PAR-859's scope, not this one's**:
+  `newerSchemaVersion` guards only the schema-version PROBE, never each store's own DATA read —
+  `readResolvedEntries` (`resolved-store.ts`), `readDoctorVerdicts` (`doctor-store.ts`),
+  `readProjectRecord` (`project-store.ts`), and `search-index.ts`'s `readIndex` (already named in
+  PAR-786/D-83, widened here to the other three found during this item's own review) all still
+  call a bare `readFileSync` with no guard, and still follow a symlink planted at their target
+  path. For `resolved-store.ts` specifically this is worse than "served and discarded":
+  `saveResolvedEntry` reads through the symlink via `readResolvedEntries()`, merges the planted,
+  attacker-authored entry into the in-memory array, then `writeAtomic`s that array back — so the
+  poisoned content is READ, MERGED, AND PERSISTED into the real file, not merely served once.
+  Neither `newerSchemaVersion` nor `readActivityEntries` gained a SIZE ceiling the way
+  `readCache`'s content read did in PAR-786/D-83 (`readBoundedRegularFile`) — deliberately:
+  `newerSchemaVersion` is also `index.json`'s schema check, and a legitimately large index (many
+  libraries' tokenized text) must not be refused merely for being big; symlink-safety and
+  size-bounding are separate concerns, and this item closes only the former, for these two calls
+  only.
+  **MEASURED before shipping, not assumed** (this item's own investigation): Node's recursive
+  `mkdir` applies the SAME `mode` to every directory it actually creates in one call, not only
+  the leaf, so a single `ensureCacheRoot` call creating both a not-yet-existing root and a
+  subdirectory under it gets both at `0700`; a newly created LEAF under an ALREADY-EXISTING
+  (looser) root still gets the passed `mode` regardless of the root's own mode. **Corrected
+  umask claim** (code-reviewer, PAR-805 review round): an earlier version of this entry claimed
+  an explicit `mode` "is NOT masked by the process umask the way an unspecified mode would be" —
+  false as a general mechanism; umask masks (clears bits from) every mode passed to
+  `mkdir`/`open`, explicit or not, per POSIX. `0o700`/`0o600` survived every umask this item's
+  investigation tried (`0`, `0o022`, `0o077`, `0o002`) for a narrower, structural reason: umask
+  can only CLEAR bits, never set one, and `0o700`/`0o600` contain ONLY owner bits, which none of
+  those four umasks touch — there is nothing for them to clear. A umask that DID include owner
+  bits would mask this value too.
+  **Also corrected from an earlier version of this entry** (code-reviewer/security-architect,
+  PAR-805 review round): `ensureCacheRoot`'s pre-existing-mode check originally compared a
+  symlinked root's `lstat` mode against `0o700` and warned about it, suggesting a `chmod` — but
+  `lstat` on a symlink reports the LINK's own mode (an ordinary default, e.g. `0o755`), never the
+  target's, so the comparison was meaningless and the suggested `chmod` would silently retarget
+  the link's target, never fixing anything, and would repeat forever. `ensureCacheRoot` now skips
+  its mode check entirely when the entry is a symlink (`stat.isSymbolicLink()`) and says nothing
+  — that diagnosis is PAR-859's to make, not this function's.
+  Ref: `src/cache.ts` (`ensureCacheRoot`, `writeCache`, `touchCache`), `src/atomic-store.ts`
+  (`isRegularFile` exported, `newerSchemaVersion`), `src/activity-log.ts`, `src/resolved-store.ts`,
+  `src/search-index.ts`, `src/project-store.ts`, `src/doctor-store.ts`; `test/cache-permissions.test.ts`,
+  `test/atomic-store.test.ts`, `test/activity-log.test.ts`, `test/cache.test.ts` (PAR-805).

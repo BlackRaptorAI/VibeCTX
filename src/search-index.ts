@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot } from "./cache.js";
+import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { sanitizeRemoteUrl } from "./link-policy.js";
 import { splitSections, HEADING_WEIGHT, type SplitSection } from "./retrieval.js";
 import { MAX_TOKEN_CHARS, RETRIEVAL_VERSION, tokenize } from "./tokenize.js";
@@ -410,7 +410,10 @@ export function writeIndex(
 ): boolean {
   const path = searchIndexPath();
   try {
-    mkdirSync(cacheRoot(), { recursive: true });
+    // PAR-805: owner-only (0700), and warns once if the root pre-existed looser. Wrapped: this
+    // module's own `warn` default has no trailing newline, unlike `ensureCacheRoot`'s own
+    // (`toStderr`) — see `resolved-store.ts`'s identical wrap for the full reasoning.
+    ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`));
     const newer = newerSchemaVersion(path, SEARCH_INDEX_SCHEMA_VERSION);
     if (newer !== undefined) {
       warn(
@@ -428,7 +431,8 @@ export function writeIndex(
       );
       onShed?.(shed);
     }
-    writeAtomic(path, text);
+    // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write.
+    writeAtomic(path, text, { mode: 0o600 });
     return true;
   } catch (e) {
     warn(`vibectx: search index not written: ${e instanceof Error ? e.message : String(e)}\n`);

@@ -1,7 +1,7 @@
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
-import { cacheRoot } from "./cache.js";
+import { cacheRoot, ensureCacheRoot } from "./cache.js";
 import { ISO_INSTANT } from "./cache-meta.js";
 import { MAX_DOCTOR_VERDICTS } from "./limits.js";
 import { clipText } from "./text.js";
@@ -167,13 +167,17 @@ export function saveDoctorVerdicts(verdicts: DoctorVerdict[], warn: (message: st
     warn(`vibectx: not saving doctor verdicts — ${path} has a newer schemaVersion ${newer} (this version writes ${DOCTOR_STORE_SCHEMA_VERSION}); upgrade vibectx or delete the file\n`);
     return false;
   }
-  mkdirSync(cacheRoot(), { recursive: true });
+  // PAR-805: owner-only (0700), and warns once if the root pre-existed looser. Wrapped: this
+  // module's own `warn` default has no trailing newline, unlike `ensureCacheRoot`'s own
+  // (`toStderr`) — see `resolved-store.ts`'s identical wrap for the full reasoning.
+  ensureCacheRoot(cacheRoot(), (m) => warn(`${m}\n`));
   const existing = readDoctorVerdicts();
   for (const v of valid) existing.set(v.name, v);
   let merged = [...existing.values()];
   if (merged.length > MAX_DOCTOR_VERDICTS) {
     merged = merged.sort((a, b) => b.checkedAt.localeCompare(a.checkedAt)).slice(0, MAX_DOCTOR_VERDICTS);
   }
-  writeAtomic(path, JSON.stringify({ schemaVersion: DOCTOR_STORE_SCHEMA_VERSION, verdicts: merged.map(toRecord) }, null, 2));
+  // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write.
+  writeAtomic(path, JSON.stringify({ schemaVersion: DOCTOR_STORE_SCHEMA_VERSION, verdicts: merged.map(toRecord) }, null, 2), { mode: 0o600 });
   return true;
 }

@@ -59,11 +59,21 @@ let resolvedDefaultRoot: string | undefined;
  *  twenty identical ones. */
 const refusedWriteRoots = new Set<string>();
 
+/** PAR-805 — cache ROOTS `ensureCacheRoot` has already warned about because they pre-existed
+ *  with a mode looser than `0700`, said once per distinct root per process. A `Set`, not a
+ *  single boolean, for the same reason `refusedWriteRoots` above is one rather than a flag: it
+ *  is realistically always exactly one root per process, so a boolean would behave identically
+ *  in practice, but a `Set` costs nothing extra and keeps this file's dedupe state uniform in
+ *  shape (one pattern to read, not two) rather than correct only by coincidence of how many
+ *  roots a single process happens to ever see. */
+const warnedLooseRoots = new Set<string>();
+
 /** Test seam: forget what this process has already noted and migrated. */
 export function resetCacheRootState(): void {
   deprecationNoted = false;
   resolvedDefaultRoot = undefined;
   refusedWriteRoots.clear();
+  warnedLooseRoots.clear();
 }
 
 /** Empty is not a directory: an exported-but-empty variable reads as unset rather than as
@@ -129,6 +139,129 @@ function isSymlinkAt(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * PAR-805 (permission consistency) — the ONE place `mkdirSync` is called for anything under the
+ * cache root, across all six sites that used to call it separately with no `mode` at all (five
+ * of them; `activity-log.ts` was already passing `0o700` on its own): `resolved-store.ts`,
+ * `search-index.ts`, `project-store.ts` (its `projects/` subdirectory), `doctor-store.ts`,
+ * `activity-log.ts`, and `cache.ts`'s own `writeCache` (its per-library directory, AFTER
+ * `writeCache`'s own PAR-786 symlink checks have already passed — this function hardens
+ * PERMISSIONS only, on a path already proven not to be a symlink by the caller where that
+ * matters).
+ *
+ * WHY A SHARED FUNCTION AT ALL: `mkdirSync` never retroactively `chmod`s a directory that
+ * already exists, so whichever of these six calls happens to run FIRST in a given process
+ * permanently decides the cache root's mode for that process's lifetime — before this, only
+ * `activity-log.ts` passed a `mode`, so in practice the root almost always ended up at the
+ * default `0o755` (umask-adjusted), because `cache.ts`'s own read/write path is the one that
+ * runs first in the overwhelming majority of real invocations (`get_docs`, `warm`, `refresh`).
+ * A single function every site calls removes the "did I remember the mode this time" question
+ * entirely, and MEASURED (this file's own investigation): Node's recursive `mkdir` applies the
+ * SAME `mode` to every directory it actually creates in one call, not only the leaf — so a
+ * single call creating both a not-yet-existing root and a subdirectory under it (the shape
+ * `project-store.ts`'s two `ensureCacheRoot` calls and `cache.ts`'s own `writeCache` both rely
+ * on) gets both at `0o700` when the root does not exist yet, with no separate call needed for
+ * the root specifically — and, separately, a newly created LEAF under an already-existing
+ * (looser) root still gets the `mode` passed here regardless of the root's own mode (MEASURED: a
+ * leaf created under a pre-existing `0o755` root with `mode: 0o700` is itself `0o700`, not
+ * `0o755`). Also MEASURED, and the mechanism matters here, not just the result: an explicit
+ * `mode` is NOT immune to the process umask in general — umask masks (clears bits from) every
+ * mode passed to `mkdir`/`open`, explicit or not, per POSIX. `0o700`/`0o600` survive every umask
+ * this file's own investigation tried (`0`, `0o022`, `0o077`, `0o002`) for a narrower, structural
+ * reason: umask can only CLEAR bits, never set one, and `0o700`/`0o600` contain ONLY owner
+ * bits — none of those four umasks touch the owner position, so there is nothing for any of them
+ * to clear. A umask that DOES include owner bits (an unusual but valid one, e.g. `0o700` itself)
+ * would mask this value too; this file's own guarantee holds only because the two constants it
+ * chose (`0o700` for directories, `0o600` for files) happen to have no bits outside the position
+ * ordinary umasks never restrict, not because an explicit mode escapes umask as a rule.
+ *
+ * PRE-EXISTING UNSAFE ROOT — disclosed, not fixed, and that is the decision, not an oversight:
+ * this function never `chmod`s an existing directory and never refuses to use one. Two reasons,
+ * both stated because a future reader will otherwise reasonably ask "why not just fix it":
+ * retroactively tightening a directory the user (or another process) already set up could break
+ * an intentionally SHARED cache — this project already treats a shared `VIBECTX_CACHE_DIR` as
+ * "moving the trust boundary by choice" (see the README's own PAR-859 paragraph), and silently
+ * narrowing who can read a directory someone deliberately shared is exactly the kind of surprise
+ * that trust-boundary framing exists to rule out; and refusing to use an existing, looser-mode
+ * root would break every cache created by a vibectx version older than this fix, on the very
+ * next upgrade, for a mode difference that has never actually leaked anything document-shaped
+ * (this cache's contents were never secret before this item — see D-84 in DECISIONS.md). So:
+ * disclosure without mutation, the same house style `noteStrandedLegacy` (above, in this file)
+ * already uses for "something about your cache setup is not what a fresh install would produce,
+ * and here is what that is" — say it once, touch nothing.
+ *
+ * The check that decides whether to say it runs ONLY when `dir` is the literal cache root
+ * (`dir === cacheRoot()`, a second call but a free one — `cacheRoot()` is a memoized env-var
+ * read for the default path, or a direct env-var read for an overridden one, never a network or
+ * disk call on this path since the caller already resolved it once to produce `dir`), not for
+ * every per-library or `projects/` subdirectory this function is also called for — warning about
+ * every subdirectory of an old, already-populated cache would be pure noise repeating the same
+ * one fact endlessly.
+ *
+ * Deliberately NOT this function's job: REFUSING or otherwise acting on `dir` being a symlink.
+ * That is PAR-859 (filed separately from this item's own review, not yet started) — mixing it
+ * in here would blur two issues' scope, and `writeCache`'s own call site already has ITS OWN
+ * symlink refusal from PAR-786, run BEFORE this function, so the one call site that already
+ * needed it keeps it; the other five gain a refusal only once PAR-859 lands.
+ *
+ * This function DOES still look at `stat.isSymbolicLink()` below, but only to know when its OWN
+ * mode check does not apply — see that check's own comment for why a symlink's mode is never a
+ * meaningful answer to "is the cache root's own permission loose", the corrected finding from
+ * code-reviewer/security-architect's PAR-805 review round (an earlier version of this function
+ * warned about a symlinked root's mode and suggested a `chmod` that cannot work).
+ *
+ * NEWLINE CONVENTION — not this function's to solve centrally (code-reviewer, PAR-805 review
+ * round): `warn` here is an opaque callback, and this file's own default (`toStderr`) already
+ * appends exactly one trailing newline before writing, but `resolved-store.ts`, `search-index.ts`,
+ * `doctor-store.ts` and `project-store.ts` each default THEIR OWN `warn` to a bare
+ * `process.stderr.write(m)` with none — `ensureCacheRoot` cannot tell which convention the
+ * `warn` it was handed follows, so it cannot safely append a newline itself: doing so
+ * unconditionally would double it for the two callers whose `warn` already does. Those four
+ * call sites each wrap their own `warn` (`(m) => warn(\`${m}\\n\`)`) when calling this function
+ * specifically, so THIS function's message always reaches the real stream newline-terminated,
+ * without touching those modules' other, pre-existing `warn(...)` calls (which already manage
+ * their own newlines correctly). See any of those four call sites for the wrap itself.
+ */
+export function ensureCacheRoot(dir: string, warn: (message: string) => void = toStderr): void {
+  if (dir === cacheRoot()) {
+    let stat;
+    try {
+      stat = lstatSync(dir);
+    } catch {
+      stat = undefined; // does not exist yet: mkdirSync below creates it at 0700, nothing to warn about
+    }
+    // code-reviewer/security-architect, PAR-805 review round — MEASURED, corrected from an
+    // earlier version of this function: `lstat` on a SYMLINK reports the LINK's own mode (e.g.
+    // `0755`, an ordinary default), never the target's — so this check, run against a symlinked
+    // root, was comparing the wrong number to 0700 and warning about a "loose permission" that
+    // was never the real problem, then suggesting a `chmod` that cannot fix it (`chmod` follows
+    // symlinks, so it would silently retarget the LINK'S OWN TARGET, not the link) — a warning
+    // that can never be satisfied and would repeat every single process forever, burying what
+    // is actually an integrity question (a symlinked cache root), not a permissions one. That
+    // question is PAR-859's, not this function's (see this function's own doc comment) — so a
+    // symlinked root gets NO diagnosis here at all, silently, leaving the field clear for
+    // whatever PAR-859 eventually reports in its place.
+    if (stat !== undefined && !stat.isSymbolicLink()) {
+      const mode = stat.mode & 0o777;
+      if (mode !== 0o700 && !warnedLooseRoots.has(dir)) {
+        warnedLooseRoots.add(dir);
+        warn(
+          `vibectx: the cache root ${clipText(dir, MAX_DISPLAY_PATH_CHARS)} already exists with mode ` +
+            `0${mode.toString(8).padStart(3, "0")} (vibectx creates new cache roots owner-only, at 0700) — ` +
+            `it was NOT changed. Existing files and directories in it are not tightened either. If you did ` +
+            // code-reviewer, PAR-805 review round: NOT a copy-pasteable `chmod <path>` literal —
+            // `dir` here is clipped for display (`MAX_DISPLAY_PATH_CHARS`), and a `…`-truncated
+            // path inside an actual shell command would silently target the wrong path if
+            // anyone ran it verbatim. Prose only; the reader supplies their own real path.
+            `not deliberately share this cache directory with another user or process, consider ` +
+            `tightening it to owner-only yourself.`,
+        );
+      }
+    }
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
 }
 
 /** Longest cache CONTENT file this process will read back (PAR-786, finding F-10). Mirrors
@@ -443,7 +576,9 @@ export function touchCache(library: string, url: string, finalUrl?: string): str
       delete meta.finalUrl;
     }
   }
-  writeAtomic(metaPath, JSON.stringify(meta, null, 2));
+  // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write (writeAtomic's
+  // own comment) — this call had no `mode` at all before, unlike `writeCache`'s own writes below.
+  writeAtomic(metaPath, JSON.stringify(meta, null, 2), { mode: 0o600 });
   return meta.fetchedAt;
 }
 
@@ -549,10 +684,21 @@ export function writeCache(
     );
     return fallbackFetchedAt;
   }
-  // Unchanged from before this item: a plain file already at this exact leaf still throws
-  // EEXIST out of mkdirSync here, exactly as `test/cache.test.ts`'s "library dir is a file"
-  // case has always required.
-  mkdirSync(dir, { recursive: true });
+  // PAR-805: the ROOT first, THEN the library directory — two `ensureCacheRoot` calls, not one.
+  // Calling it only on `dir` (as an earlier version of this fix did) never triggers the
+  // pre-existing-loose-ROOT warning at all, because `ensureCacheRoot`'s own check is
+  // `dir === cacheRoot()`, which a per-library directory can never equal — this call site would
+  // then be the one PAR-805 site that silently skips the very check the OTHER five stores all
+  // get, for a root the user may have set up before installing this fix. Calling it on `root`
+  // first closes that gap; calling it again on `dir` still creates (or confirms) the library
+  // directory at 0700 exactly as before — a newly created leaf gets the passed mode regardless
+  // of its already-existing parent's own mode (MEASURED, this file's own investigation).
+  // Unchanged from before this item: a plain file already at the LIBRARY-directory leaf still
+  // throws EEXIST out of the `mkdirSync` inside `ensureCacheRoot`, exactly as
+  // `test/cache.test.ts`'s "library dir is a file" case has always required —
+  // `ensureCacheRoot` does not catch or soften that throw.
+  ensureCacheRoot(root, warn);
+  ensureCacheRoot(dir, warn);
   // Belt-and-suspenders against a TOCTOU between the `isSymlinkAt` check above and the writes
   // below (an external process replacing `dir` with a symlink in that window) — the same
   // residual `dropFollowedPageCache` documents and does not close either; cheap, since this
@@ -591,8 +737,13 @@ export function writeCache(
   const contentTmp = tempPathFor(contentPath);
   const metaTmp = tempPathFor(metaPath);
   try {
-    writeFileSync(contentTmp, content, "utf8");
-    writeFileSync(metaTmp, JSON.stringify(meta, null, 2), "utf8");
+    // PAR-805 (F-7 file-mode half): owner-only at creation (POSIX `open()`'s mode is ignored
+    // once a path exists, but `tempPathFor` names each temp file uniquely, so these are always
+    // newly created) — `renameSync` then carries that mode onto `contentPath`/`metaPath`,
+    // self-healing an older, looser file on its very next write, the same mechanism
+    // `writeAtomic`'s own `opts.mode` already documents.
+    writeFileSync(contentTmp, content, { encoding: "utf8", mode: 0o600 });
+    writeFileSync(metaTmp, JSON.stringify(meta, null, 2), { encoding: "utf8", mode: 0o600 });
     renameSync(contentTmp, contentPath);
     renameSync(metaTmp, metaPath);
   } catch (e) {
