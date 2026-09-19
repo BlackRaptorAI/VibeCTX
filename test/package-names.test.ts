@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { npmNameError, pypiNameError, normalisePyPiName, packageNameError, versionShapeError, VERSION_SHAPE, MAX_VERSION_LENGTH } from "../src/package-names.js";
+import {
+  npmNameError,
+  pypiNameError,
+  normalisePyPiName,
+  packageNameError,
+  versionShapeError,
+  VERSION_SHAPE,
+  MAX_VERSION_LENGTH,
+  MAX_NAME_LENGTH,
+} from "../src/package-names.js";
 
 describe("npmNameError (npm naming rules; undefined = valid)", () => {
   it.each(["hono", "httpx", "stripe", "@tanstack/react-query", "@scope/pkg.js", "a", "lodash-es", "some_pkg", "pkg~1", "@types/node"])(
@@ -33,6 +42,18 @@ describe("npmNameError (npm naming rules; undefined = valid)", () => {
 
   it("accepts exactly 214 characters", () => {
     expect(npmNameError("a".repeat(214))).toBeUndefined();
+  });
+});
+
+// PAR-822 (security-audit #1-ranked finding): `MAX_NAME_LENGTH` is exported so `resolve.ts`
+// and `registry.ts` can bound and clip a caller-supplied `library`/`name` argument with the
+// SAME constant this file already uses to validate a real package name's length — not a
+// second, independently-set number that could drift from it.
+describe("MAX_NAME_LENGTH (PAR-822)", () => {
+  it("is exported, and is exactly npmNameError's own length boundary", () => {
+    expect(MAX_NAME_LENGTH).toBe(214);
+    expect(npmNameError("a".repeat(MAX_NAME_LENGTH))).toBeUndefined();
+    expect(npmNameError("a".repeat(MAX_NAME_LENGTH + 1))).toMatch(/npm/);
   });
 });
 

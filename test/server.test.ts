@@ -10,6 +10,7 @@ import { autowarmStatus, resetAutowarm } from "../src/autowarm.js";
 import { buildServer, startServer } from "../src/server.js";
 import { loadDiscoveredRegistry } from "../src/registry.js";
 import { MAX_TOKENS_BUDGET } from "../src/search.js";
+import { MAX_NAME_LENGTH } from "../src/package-names.js";
 
 /**
  * Q2 (PAR-656): the real McpServer over an in-memory transport — the tool list, a tool
@@ -186,6 +187,60 @@ describe('get_docs mode over the transport (D-26)', () => {
     // out of the schema (into a `.refine()` or a handler-side clamp), this is the assertion
     // that would catch it; the rejection tests above would not, since both still reject.
     expect(props.maxTokens).toMatchObject({ type: "integer", exclusiveMinimum: 0, maximum: MAX_TOKENS_BUDGET });
+    await client.close();
+  });
+});
+
+// PAR-822 (security-audit #1-ranked finding) — Layer 1 of the two-layer fix: `get_docs.library`
+// and `resolve_library.name` are bounded at the Zod parse boundary itself, the same way
+// `get_docs.version` already is (A11/PAR-724) and `search.query` already is (D-41). This is a
+// DIFFERENT assertion than the render-path clipping proven elsewhere (resolve.test.ts,
+// registry.test.ts, get-docs.test.ts, doctor.test.ts, refresh.test.ts): it is "the call is
+// refused outright before any handler code runs", not "the rendered text is bounded". This
+// schema layer only bounds LENGTH — a hostile payload well under MAX_NAME_LENGTH sails through
+// unchanged, so the render-path `clipText` is what actually strips control/bidi characters,
+// for every caller including this one. The render-path clip is ALSO the only protection for
+// the two CLI paths that bypass this schema entirely (`vibectx resolve <name>`, `vibectx doctor
+// --library <x>`) — NOT `warm.ts`, whose dependency names are already validated by
+// `project-deps.ts`'s own `npmNameError`/`pypiNameError` before ever reaching `resolvePackage`.
+describe("get_docs.library / resolve_library.name — bounded at the schema boundary (PAR-822)", () => {
+  function stub404() {
+    const spy = vi.fn(async () => new Response("nope", { status: 404 }));
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  }
+
+  it("get_docs: a library over MAX_NAME_LENGTH is an Input validation error, refused before any fetch", async () => {
+    const spy = stub404();
+    const { client, call } = await connect(registry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("get_docs", { library: "a".repeat(MAX_NAME_LENGTH + 1) });
+    expect(out).toContain("Input validation error");
+    expect(spy).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("get_docs: a library at exactly MAX_NAME_LENGTH is accepted by the schema (it may still fail to resolve, but not as a schema error)", async () => {
+    stub404();
+    const { client, call } = await connect(registry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("get_docs", { library: "a".repeat(MAX_NAME_LENGTH) });
+    expect(out).not.toContain("Input validation error");
+    await client.close();
+  });
+
+  it("resolve_library: a name over MAX_NAME_LENGTH is an Input validation error, refused before any fetch", async () => {
+    const spy = stub404();
+    const { client, call } = await connect(registry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("resolve_library", { name: "a".repeat(MAX_NAME_LENGTH + 1) });
+    expect(out).toContain("Input validation error");
+    expect(spy).not.toHaveBeenCalled();
+    await client.close();
+  });
+
+  it("resolve_library: a name at exactly MAX_NAME_LENGTH is accepted by the schema (it may still fail to resolve, but not as a schema error)", async () => {
+    stub404();
+    const { client, call } = await connect(registry(), { VIBECTX_NO_AUTOWARM: "1" });
+    const out = await call("resolve_library", { name: "a".repeat(MAX_NAME_LENGTH) });
+    expect(out).not.toContain("Input validation error");
     await client.close();
   });
 });

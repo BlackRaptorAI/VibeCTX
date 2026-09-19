@@ -4,7 +4,14 @@
  * not a plausible package name is refused before any network call.
  */
 
-const MAX_NAME_LENGTH = 214;
+// PAR-822 (security-audit #1-ranked finding) — exported so `resolve.ts` and `registry.ts` can
+// bound and clip a caller-supplied `library`/`name` argument (an MCP tool argument, echoed
+// into response text on a resolution failure) with the SAME constant this file already uses
+// to validate a real package name's length, mirroring `MAX_VERSION_LENGTH`'s own precedent
+// (A11/PAR-724) for the identical defect class on the `version` field. `search.ts` and
+// `activity-log.ts` each independently define their own `MAX_LIBRARY_CHARS = 214` for the same
+// purpose — pre-existing duplication, not this item's job to clean up.
+export const MAX_NAME_LENGTH = 214;
 
 /** npm: lowercase; optional `@scope/`; each part starts with `[a-z0-9~-]` and continues
  *  with `[a-z0-9._~-]` (no leading `.` or `_`; nothing that needs URL encoding). */
