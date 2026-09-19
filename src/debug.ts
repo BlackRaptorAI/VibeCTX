@@ -15,6 +15,17 @@
  * Everything goes to STDERR. This process is a stdio MCP server: stdout carries the
  * protocol and a stray byte on it corrupts the session.
  *
+ * PAR-815 (Phase 4) — A DELIBERATE, NAMED EXCEPTION to this phase's redaction rule, not a gap
+ * left uncovered by oversight: every `url=`/`to=` field this module prints (via `fetchUrl`'s
+ * `debugEvent` calls) is the RAW url, query string and all, never `redactUrlForDisplay`'d. This
+ * is an opt-in, human-only diagnostic channel (see `debugEnabled` — off unless explicitly set),
+ * and the raw URL, token included, is often exactly what a developer needs to see to confirm
+ * which literal request was made while debugging their own local setup — redacting it here
+ * would defeat the one purpose this channel exists for. Every OTHER surface in this codebase
+ * now redacts by default; this is the one place that does not, and it says so here rather than
+ * reading as an oversight once every other surface is fixed. See README's own note on
+ * `VIBECTX_DEBUG` for the reader-facing version of this same disclosure.
+ *
  * THE LINE IS FOR A HUMAN, NOT A PARSER (PAR-652c, schema K2). `vibectx [debug] <event> k=v`
  * has a stable enough shape to read and to grep, and no stability guarantee beyond that: the
  * event names, the field set, the field ORDER and the `reason` vocabulary may all change in

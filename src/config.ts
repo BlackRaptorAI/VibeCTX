@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { z } from "zod";
 import { cleanText, clipText } from "./text.js";
-import { validateLibraryUrl } from "./link-policy.js";
+import { redactUrlForDisplay, validateLibraryUrl } from "./link-policy.js";
 import type { LibraryEntry } from "./registry.js";
 
 /**
@@ -368,7 +368,16 @@ const EntrySchema = z
         validateLibraryUrl(raw, { allowInternalHosts: entry.allowInternalHosts });
       } catch (err) {
         const why = whyUrlRefused(err, raw);
-        const shown = clipText(raw, MAX_CONFIG_VALUE_CHARS);
+        // code-reviewer B1 / security-architect S2 (Phase 4 round 2) — a rejected config URL is
+        // echoed into a Zod issue message that reaches `ConfigError`/`LayerFailure.reason`, which
+        // in turn reaches `list_libraries`' "NOT LOADED: ..." header (rendered into the agent's
+        // context) and `doctor --json`'s `configIssues[].reason`. Before this fix, `shown` was the
+        // RAW, unredacted url — the sharpest case being a URL rejected specifically FOR carrying
+        // userinfo (`user:pass@host`, exactly the shape this whole phase strips everywhere else),
+        // which put the password straight into agent-visible output. Redacted here so this
+        // diagnostic still names which entry failed and why (host and path survive in full; only
+        // the query string, fragment and userinfo are gone).
+        const shown = clipText(redactUrlForDisplay(raw), MAX_CONFIG_VALUE_CHARS);
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["urls", i], message: `"${shown}" ${why}` });
       }
     });

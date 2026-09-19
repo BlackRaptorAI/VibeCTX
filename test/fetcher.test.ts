@@ -809,3 +809,37 @@ describe("fetchLinkedPage content negotiation via Accept (PAR-832a)", () => {
     expect((init?.headers as Record<string, string> | undefined)?.["accept"]).toBeUndefined();
   });
 });
+
+/**
+ * Phase 4 (URL privacy, end to end) — test plan #13: non-regression, broad. Redaction is a
+ * display/storage-only concern; the actual HTTP request must still carry the RAW, query-intact
+ * URL exactly as before this phase, for every candidate in the chain — a query string is the
+ * only mechanism this tool has for reaching an authenticated internal endpoint (retrieval.ts's
+ * own `sourceStampLine` comment), and redacting it before the request itself would silently
+ * break that one real use case rather than merely hide it from output.
+ */
+describe("Phase 4 non-regression — redaction never reaches the actual fetch request", () => {
+  it("getLibraryDoc sends the RAW, query-intact candidate URL to fetch, unmodified", async () => {
+    const tokenUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-fetch";
+    const spy = vi.fn(async () => new Response("# Guide", { status: 200, headers: { "content-type": "text/plain" } }));
+    vi.stubGlobal("fetch", spy);
+    const doc = await getLibraryDoc({ name: "acme", urls: [tokenUrl] });
+    expect(doc?.content).toBe("# Guide");
+    expect(spy).toHaveBeenCalledTimes(1);
+    const [requestedUrl] = spy.mock.calls[0];
+    expect(String(requestedUrl)).toBe(tokenUrl); // exactly the raw url, query and all
+  });
+
+  it("a revalidation (If-None-Match) also sends the RAW candidate URL, not a redacted one", async () => {
+    const tokenUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-revalidate";
+    writeCache("acme", tokenUrl, "# Guide (cached)", "etag-1");
+    const spy = vi.fn(async () => new Response(null, { status: 304 }));
+    vi.stubGlobal("fetch", spy);
+    // Force past TTL 0 so getLibraryDoc actually revalidates over the network rather than
+    // serving the fresh cache hit with no request at all.
+    const doc = await getLibraryDoc({ name: "acme", urls: [tokenUrl], ttlHours: 0 });
+    expect(doc?.notModified).toBe(true);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(String(spy.mock.calls[0][0])).toBe(tokenUrl);
+  });
+});

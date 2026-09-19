@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { isRegularFile, newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
-import { sanitizeRemoteUrl } from "./link-policy.js";
+import { redactUrlForDisplay, sanitizeRemoteUrl } from "./link-policy.js";
 import type { DependencyEcosystem } from "./project-deps.js";
 import { cleanText } from "./text.js";
 
@@ -152,7 +152,13 @@ export function makeWarmRow(fields: {
   const source = cleanText(fields.source);
   const library = fields.library === undefined ? undefined : cleanText(fields.library);
   const row: WarmRow = library !== undefined ? { name, ecosystem, source, library, status } : { name, ecosystem, source, status };
-  if (fields.url !== undefined) row.url = cleanText(fields.url);
+  // PAR-806/PAR-815 (Phase 4) — `url` is display-only here (verified: `readProjectRecord`'s
+  // result is used for `warmedAt`/`recentFailures` decisions keyed by name+ecosystem, never by
+  // this field — see `warm.ts`'s `recentFailures`), so it is safe to redact at write time,
+  // closing BOTH the on-disk project-record leak (PAR-806) and the `warm_project` table/`--json`
+  // `url` column (PAR-815) with one fix: `formatWarmTable` and the MCP tool both render this
+  // same `WarmRow.url`, and `warm --json` serializes it directly.
+  if (fields.url !== undefined) row.url = cleanText(redactUrlForDisplay(fields.url));
   if (fields.note !== undefined) row.note = cleanText(fields.note);
   if (fields.failedAt !== undefined) row.failedAt = fields.failedAt;
   return row;

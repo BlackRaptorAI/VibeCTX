@@ -729,6 +729,17 @@ describe("resolveToolText (MCP resolve_library body: registry-aware)", () => {
     expect(text).toContain("https://hono.dev/llms.txt");
   });
 
+  /** PAR-815 (Phase 4) — the "urls (probed in order)" list on the already-curated fast path
+   *  renders the raw, config-authored `entry.urls` (D-47/D-49) — exactly as capable of
+   *  carrying a `?token=…` as any other candidate-list render site this phase closes. */
+  it("PAR-815: the 'urls (probed in order)' list strips a token-bearing query string", async () => {
+    const internalUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-resolve";
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [internalUrl] }]]) };
+    const text = await resolveToolText(reg, "acme");
+    expect(text).toContain("https://docs.internal.example.com/llms.txt");
+    expect(text).not.toContain("super-secret-resolve");
+  });
+
   it("an unknown name is resolved, adopted into the live registry and reported", async () => {
     stubFetch({
       [NPM_HTTPX]: { homepage: "https://github.com/JacksonTian/httpx" },

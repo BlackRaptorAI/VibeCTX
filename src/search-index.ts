@@ -3,7 +3,7 @@ import { lstatSync, readFileSync, type Stats } from "node:fs";
 import { join } from "node:path";
 import { newerSchemaVersion, writeAtomic } from "./atomic-store.js";
 import { cacheRoot, ensureCacheRoot, isRealDirectory } from "./cache.js";
-import { sanitizeRemoteUrl } from "./link-policy.js";
+import { redactUrlForDisplay, sanitizeRemoteUrl } from "./link-policy.js";
 import { splitSections, HEADING_WEIGHT, type SplitSection } from "./retrieval.js";
 import { MAX_TOKEN_CHARS, RETRIEVAL_VERSION, tokenize } from "./tokenize.js";
 
@@ -100,7 +100,23 @@ const MAX_SECTIONS = 200_000;
  *  `[sectionId, weightedTf, sectionId, weightedTf, …]` list in ascending section order. */
 export interface IndexedDocument {
   /** The cached URL this posting list describes. Used to REFUSE the entry when `search` is
-   *  serving another URL for the library; never rendered. */
+   *  serving another URL for the library; never rendered directly (it also feeds the `Source:`
+   *  stamp `search.ts` builds — see `groupHeader` — which redacts independently of this).
+   *
+   *  PAR-806 (Phase 4) — REDACTED (query, fragment, userinfo stripped via the shared
+   *  `redactUrlForDisplay`) at write time (`indexDocument`, below), closing this file as a
+   *  disk site for a token-bearing config URL. This DOES narrow the correctness gate's own
+   *  discriminating power on the query-string dimension specifically: `search.ts`'s own
+   *  read-side check now compares `stored.url === redactUrlForDisplay(currentCandidateUrl)`
+   *  rather than the raw candidate — two candidate URLs for the SAME library differing only by
+   *  query string are no longer told apart by this field alone. Judged acceptable and disclosed
+   *  (DECISIONS.md), unlike the analogous cache-meta/`readCache` identity-check design: this field is never
+   *  the PRIMARY defense against serving the wrong document (the CONTENT HASH is, per this
+   *  file's own "two gates" comment above), a library has exactly one active candidate URL at a
+   *  time rather than two live variants competing for the same posting list, and the worst case
+   *  of a stale/wrong match here is a slower, re-tokenized search — never wrong content shown,
+   *  since every rendered character is still re-read from the CACHED DOCUMENT by content hash
+   *  (D-33), not from this field. */
   url: string;
   /**
    * When this entry was written — provenance only. Never rendered, and it gates nothing: the
@@ -185,7 +201,9 @@ export function indexDocument(url: string, text: string, fetchedAt: string, sect
       if (numbers > MAX_POSTING_NUMBERS_PER_DOC) return undefined;
     }
   }
-  return { url, fetchedAt, hash: documentHash(text), lengths, postings };
+  // PAR-806 (Phase 4) — redacted before it ever reaches disk; see `IndexedDocument.url`'s own
+  // comment for what this does and does not weaken.
+  return { url: redactUrlForDisplay(url), fetchedAt, hash: documentHash(text), lengths, postings };
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -599,7 +617,14 @@ export function openIndexSession(
         if (!supersedesRemoval && memo.get(key) === hash) return;
         snapshot ??= readIndex().libraries; // the ONE read
         const existing = snapshot.get(key);
-        if (existing && existing.hash === hash && existing.url === url) {
+        // security-architect S1 (Phase 4 round 2) — `existing.url` is REDACTED on disk
+        // (`indexDocument`'s own write-time redaction, PAR-806), so comparing it against the
+        // RAW `url` this call was offered directly would never match for a query-bearing or
+        // normalization-affected URL, even when nothing actually changed — silently forcing a
+        // full rebuild (and a full index rewrite) on every `add()` for that library, forever.
+        // Redact `url` the same way before comparing, matching `search.ts`'s own identical fix
+        // for the read-side hash+url gate.
+        if (existing && existing.hash === hash && existing.url === redactUrlForDisplay(url)) {
           // Round 1 (code-reviewer, S5): the on-disk entry already matches — cancel a pending
           // removal rather than rebuilding an identical posting list. A refresh that finds
           // nothing changed across the whole loop ends this call with `pending` AND

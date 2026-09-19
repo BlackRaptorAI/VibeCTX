@@ -24,7 +24,7 @@ export {
   MAX_RESOLUTIONS_PER_HOUR,
 } from "./limits.js";
 import { fetchUrl, getLibraryDoc, isDocUnchanged } from "./fetcher.js";
-import { derivedAllowedHosts, sanitizeRemoteUrl } from "./link-policy.js";
+import { derivedAllowedHosts, MAX_REMOTE_URL_LENGTH, redactUrlForDisplay, sanitizeRemoteUrl } from "./link-policy.js";
 import { npmNameError, normalisePyPiName, pypiNameError, versionShapeError, MAX_VERSION_LENGTH, MAX_NAME_LENGTH } from "./package-names.js";
 import { cleanDescription, resolvedStorePath, saveResolvedEntry } from "./resolved-store.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
@@ -205,7 +205,12 @@ export function parseGitHubRepo(value: unknown): GitHubRepo | undefined {
   const raw = isRecord(value) ? value.url : value;
   if (typeof raw !== "string") return undefined;
   const s = raw.trim();
-  if (s.length === 0 || s.length > 2048) return undefined;
+  // code-reviewer S4 (Phase 4 round 2) — was an independent, undocumented duplicate of the same
+  // 2048 bound `link-policy.ts`'s `MAX_REMOTE_URL_LENGTH` uses (the PAR-809 class); imported so
+  // the two cannot silently drift, even though this value bounds a repository-form string, not
+  // strictly a URL headed for `sanitizeRemoteUrl` — the underlying reasoning (generous headroom
+  // over any real value, a ceiling against unbounded input) is the same.
+  if (s.length === 0 || s.length > MAX_REMOTE_URL_LENGTH) return undefined;
   let m = /^(?:github:)?([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(s);
   if (m) return repoFrom(m[1], m[2]);
   m = /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)\/?$/.exec(s);
@@ -463,11 +468,20 @@ function takeResolutionSlot(nowMs: number): boolean {
   return true;
 }
 
+/** PAR-815 (Phase 4), decision recorded in DECISIONS.md — redacted for the same reason the
+ *  "urls (probed in order)" list below is: the whole point of this phase is no exceptions
+ *  without a stated reason, and the URL's host/path structure (which candidate this was, and
+ *  whether it was tried) is still fully visible; only the query string, fragment and userinfo
+ *  are gone. These candidates are usually registry-derived (llms.txt/README URLs synthesized
+ *  from package metadata), not hand-authored `urls:` entries, but package metadata is still
+ *  attacker-influenced (PAR-725's own "anyone can publish a package" premise) and could in
+ *  principle carry a query string — redacting here, uniformly, avoids deciding case by case
+ *  based on provenance the reader of this text cannot see either way. */
 function formatResolved(out: ResolveOutcome): string {
   const chosenAt = out.candidates.indexOf(out.chosen ?? "");
   const rows = out.candidates.map((u, i) => {
     const verdict = i < chosenAt ? "no document" : i === chosenAt ? "chosen" : "not tried";
-    return `    ${i + 1}. ${u} — ${verdict}`;
+    return `    ${i + 1}. ${redactUrlForDisplay(u)} — ${verdict}`;
   });
   const repo = out.repository ? `https://github.com/${out.repository.owner}/${out.repository.repo}` : "—";
   const hosts = out.entry?.allowedHosts?.length ? out.entry.allowedHosts.join(", ") : "none";
@@ -496,7 +510,9 @@ function formatResolved(out: ResolveOutcome): string {
     `  repository: ${repo}`,
     "  candidates (probed in order; first usable document wins):",
     ...rows,
-    `  chosen: ${out.chosen} (${out.kind}, ${(out.chars ?? 0).toLocaleString()} chars)`,
+    // PAR-815 (Phase 4): the same field `refresh.ts`'s "refreshed from <url>" line renders —
+    // redacted here too, for the same reason and so the two do not diverge without cause.
+    `  chosen: ${redactUrlForDisplay(out.chosen!)} (${out.kind}, ${(out.chars ?? 0).toLocaleString()} chars)`,
     `  followed-link hosts: ${hosts} (plus the source document's own host; https only)`,
     saved,
   ].join("\n");
@@ -849,10 +865,17 @@ export async function resolveToolText(registry: Registry, name: string, ecosyste
     // runs, never an arbitrary letter) — but real line-structure corruption and an unbounded
     // response are exactly what `clipText` exists to close, same primitive, same bound, as
     // every other site in this fix.
+    // PAR-815 (Phase 4), decision recorded in DECISIONS.md — this list exists specifically so a
+    // caller can see every candidate that was tried, and redacting could be argued to reduce its
+    // diagnostic value; decided anyway: the whole point of this phase is no exceptions without a
+    // stated reason, and the URL's host/path/structure — which candidate this is — is still
+    // fully visible, only the query string, fragment and userinfo are gone. `existingCurated.urls`
+    // is the raw, config-authored candidate list (D-47/D-49), exactly as capable of carrying a
+    // `?token=…` as any other `entry.urls` render site this phase closes.
     return [
       `"${clipText(name, MAX_NAME_LENGTH)}" is already in the registry as "${existingCurated.name}" — nothing to resolve.`,
       "  urls (probed in order):",
-      ...existingCurated.urls.map((u, i) => `    ${i + 1}. ${u}`),
+      ...existingCurated.urls.map((u, i) => `    ${i + 1}. ${redactUrlForDisplay(u)}`),
       `  Use get_docs("${existingCurated.name}"); override the entry in vibectx.config.json to change its sources.`,
     ].join("\n");
   }

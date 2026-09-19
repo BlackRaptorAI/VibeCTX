@@ -5,6 +5,7 @@ import {
   normaliseAllowedHost,
   registrableDomain,
   derivedAllowedHosts,
+  redactUrlForDisplay,
   sanitizeRemoteUrl,
   validateLibraryUrl,
 } from "../src/link-policy.js";
@@ -271,5 +272,52 @@ describe("sanitizeRemoteUrl (metadata values are attacker-influenced)", () => {
     ["an over-long value", `https://hono.dev/${"a".repeat(2100)}`],
   ])("rejects %s", (_label, value) => {
     expect(sanitizeRemoteUrl(value)).toBeUndefined();
+  });
+});
+
+/** PAR-817/PAR-816/PAR-818 (Phase 4) — the one shared redaction helper every display/storage
+ *  surface in this phase calls. Findings #1, #11, #12 in the phase's own test plan. */
+describe("redactUrlForDisplay (PAR-817 consolidation)", () => {
+  it("strips the query string and fragment", () => {
+    expect(redactUrlForDisplay("https://docs.internal.example.com/llms.txt?token=super-secret#section-2")).toBe(
+      "https://docs.internal.example.com/llms.txt",
+    );
+  });
+
+  it("(PAR-816) strips userinfo, not only the query string", () => {
+    const redacted = redactUrlForDisplay("https://svc:s3cr3t-password@docs.internal.example.com/llms.txt?token=also-secret");
+    expect(redacted).toBe("https://docs.internal.example.com/llms.txt");
+    expect(redacted).not.toContain("s3cr3t-password");
+    expect(redacted).not.toContain("svc");
+    expect(redacted).not.toContain("@");
+  });
+
+  it("(PAR-816) on a parse failure, cuts at the first ? or # rather than returning the raw string whole", () => {
+    expect(redactUrlForDisplay("not a valid url?token=super-secret")).toBe("not a valid url");
+    expect(redactUrlForDisplay("not a valid url#token=super-secret")).toBe("not a valid url");
+    // No `?` or `#` at all: nothing to cut, the original (still unparseable) string is returned.
+    expect(redactUrlForDisplay("not a valid url at all")).toBe("not a valid url at all");
+  });
+
+  it("(PAR-818) documents the new-URL().href normalization side effect: lower-cased host, punycode, default port dropped", () => {
+    expect(redactUrlForDisplay("https://Docs.Example.COM:443/x")).toBe("https://docs.example.com/x");
+  });
+
+  it("(PAR-818) punycodes a non-ASCII host as a side effect of the round trip", () => {
+    expect(redactUrlForDisplay("https://例え.jp/x")).toBe("https://xn--r8jz45g.jp/x");
+  });
+
+  it("never returns nothing: a redacted value is always a non-empty string when the input was", () => {
+    expect(redactUrlForDisplay("https://example.com?a=1")).toBeTypeOf("string");
+    expect(redactUrlForDisplay("garbage?a=1")).toBeTypeOf("string");
+  });
+
+  /** code-reviewer S3 (Phase 4 round 2) — several call sites rely on a non-null assertion
+   *  (`out.chosen!`) that is safe today only because of an unstated cross-module invariant; this
+   *  function must not throw or render "undefined" if that invariant is ever wrong at runtime. */
+  it("(code-reviewer S3) is defensive against a non-string input at runtime, despite its declared type", () => {
+    expect(redactUrlForDisplay(undefined as unknown as string)).toBe("");
+    expect(redactUrlForDisplay(null as unknown as string)).toBe("");
+    expect(redactUrlForDisplay(42 as unknown as string)).toBe("");
   });
 });

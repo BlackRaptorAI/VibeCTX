@@ -2,6 +2,7 @@ import { resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry
 import type { ConfigScope } from "./config.js";
 import { getDocsDetailed } from "./get-docs.js";
 import { readCache, cacheRoot } from "./cache.js";
+import { redactUrlForDisplay } from "./link-policy.js";
 import { lastEvictionSummary, formatBytes, type EvictionSummary } from "./cache-evict.js";
 import { kindFromStructure, type SourceKind } from "./source-kind.js";
 import { mapLimit } from "./concurrency.js";
@@ -46,8 +47,16 @@ export interface ProbeResult {
 export interface LibraryReport {
   library: string;
   kind: SourceKind;
-  /** Resolved primary URL; null when unreachable. */
+  /** Resolved primary (CANDIDATE) URL; null when unreachable. REDACTED (PAR-815, Phase 4):
+   *  this is a structured, machine-consumed `--json` field — a different design call than
+   *  rendered prose, decided the same way as `search --json`'s `SearchGroup.url` and for the
+   *  same stated reason: the field's purpose (telling a reader WHICH host/path served the
+   *  document) survives redaction fully, and only a secret would be lost by leaving it whole. */
   url: string | null;
+  /** PAR-812/PAR-813 (Phase 4) — the URL this document was ACTUALLY served from, when a
+   *  redirect moved it away from `url` (mirrors `GetDocsOutcome.source.finalUrl`). Redacted the
+   *  same way `url` is. Null on the same terms `url` is null on. */
+  finalUrl: string | null;
   /** Age of the cached primary document in hours (one decimal); null when not cached. */
   cacheAgeHours: number | null;
   /** True when the cache entry is past its TTL. */
@@ -152,6 +161,7 @@ async function checkLibrary(entry: LibraryEntry, offline: boolean): Promise<Libr
       library: entry.name,
       kind: "unreachable",
       url: null,
+      finalUrl: null,
       cacheAgeHours: null,
       stale: false,
       ttlHours: entry.ttlHours ?? DEFAULT_TTL_HOURS,
@@ -167,7 +177,7 @@ async function checkLibrary(entry: LibraryEntry, offline: boolean): Promise<Libr
 async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Promise<LibraryReport> {
   const ttlHours = entry.ttlHours ?? DEFAULT_TTL_HOURS;
   const probes: ProbeResult[] = [];
-  let source: { url: string; stale: boolean } | undefined;
+  let source: { url: string; stale: boolean; finalUrl?: string } | undefined;
   let isIndex = false;
 
   for (const { query, derived } of probeQueriesFor(entry)) {
@@ -191,7 +201,13 @@ async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Pro
     });
   }
 
-  const kind: SourceKind = source ? kindFromStructure(source.url, isIndex) : "unreachable";
+  // PAR-812 (Phase 4) — classifies the document's actual shape/origin using `finalUrl` (the URL
+  // it was ACTUALLY served from) rather than the pre-redirect CANDIDATE: a cross-host redirect
+  // that also changes path shape was classified against a URL the document was never really
+  // served from. `readCache` right below stays on the CANDIDATE (`source.url`) — that call is
+  // a cache-lookup by the key the cache is keyed by, unrelated to what `kindFromStructure` is
+  // trying to infer, and must not change (see this file's own explicit warning at this line).
+  const kind: SourceKind = source ? kindFromStructure(source.finalUrl ?? source.url, isIndex) : "unreachable";
   // Read the cache AFTER probing so a refresh that just succeeded shows as fresh.
   const hit = source ? readCache(entry.name, source.url, ttlHours) : undefined;
   const cacheAgeHours = hit
@@ -214,7 +230,13 @@ async function checkLibraryUnguarded(entry: LibraryEntry, offline: boolean): Pro
   return {
     library: entry.name,
     kind,
-    url: source?.url ?? null,
+    // PAR-815 (Phase 4) — redacted: a structured `--json` field, decided the same way and for
+    // the same reason as `search --json`'s `SearchGroup.url` (see `LibraryReport.url`'s own
+    // doc comment). `source.url`/`source.finalUrl` themselves stay RAW throughout this
+    // function's own body (the `readCache` call just above needs the raw candidate) — this is
+    // the one place, at the very end, where the OUTPUT is built.
+    url: source ? redactUrlForDisplay(source.url) : null,
+    finalUrl: source?.finalUrl !== undefined ? redactUrlForDisplay(source.finalUrl) : null,
     cacheAgeHours,
     stale,
     ttlHours,

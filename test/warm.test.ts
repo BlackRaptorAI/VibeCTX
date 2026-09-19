@@ -104,6 +104,27 @@ describe("runWarm (PAR-656)", () => {
     expect(record?.warmedAt).toBe(report.generatedAt);
   });
 
+  /** PAR-815/PAR-806 (Phase 4) — one fix (`project-store.ts`'s `makeWarmRow`) closes both: the
+   *  `url` column `formatWarmTable`/`warm_project`/`warm --json` all render, AND the on-disk
+   *  project record (`<cacheRoot>/projects/<hash>.json`) `writeProjectRecord` persists. */
+  it("PAR-815/PAR-806: a token-bearing cached url is redacted in the report AND in the on-disk project record", async () => {
+    const internalUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-warm";
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [internalUrl] }]]) };
+    writeCache("acme", internalUrl, "# Acme");
+    writePackageJson({ acme: "1" });
+    const report = await runWarm(reg, { dir: project });
+    const row = byName(report).acme;
+    expect(row.url).toBe("https://docs.internal.example.com/llms.txt");
+    expect(row.url).not.toContain("super-secret-warm");
+    expect(formatWarmTable(report)).not.toContain("super-secret-warm");
+    // The disk artifact itself (PAR-806) — read raw, not through `readProjectRecord`'s own
+    // redacting `toWarmRow`, so this proves the SECRET IS NOT ON DISK, not merely that a reader
+    // happens to clean it on the way back out.
+    const onDisk = readFileSync(projectRecordPath(project), "utf8");
+    expect(onDisk).not.toContain("super-secret-warm");
+    expect(onDisk).toContain("https://docs.internal.example.com/llms.txt");
+  });
+
   it("exit 0 when every attempted name is cached / fresh / resolved+cached, denied names notwithstanding", async () => {
     writeCache("react", REACT_URL, "# React fresh");
     writePackageJson({ react: "19" }, { eslint: "9", prettier: "3" });

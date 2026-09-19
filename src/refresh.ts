@@ -1,5 +1,6 @@
 import { installResolvedEntry, resolveLibrary, unknownLibraryMessage, type LibraryEntry, type Registry } from "./registry.js";
 import { getLibraryDoc, isDocUnchanged } from "./fetcher.js";
+import { redactUrlForDisplay } from "./link-policy.js";
 import { resolvePackage } from "./resolve.js";
 import { invalidateIndex, openIndexSession, documentHash } from "./search-index.js";
 import { dropFollowedPageCache } from "./cache.js";
@@ -102,9 +103,14 @@ export async function refreshToolText(registry: Registry, library?: string, opts
           // freshly fetched one, and the activity log records what is now known-current, not
           // whether bytes moved on the wire.
           succeeded += 1;
+          // `single.url` stays the RAW candidate — `recordActivity`'s own `toActivityEntry`
+          // redacts it, the same shared function every other write hook relies on internally
+          // (D-51/PAR-792, consolidated into PAR-817). PAR-815 (Phase 4) — the RENDERED line
+          // below is a separate surface with no such redaction of its own, so it is redacted
+          // here, at the point of render, not by mutating what is logged.
           single = { url: out.chosen, contentHash: out.contentHash, stale: out.stale };
           results.push(
-            `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${out.chosen} (${(out.chars ?? 0).toLocaleString()} chars)`,
+            `${entry.name}: re-resolved via ${entry.resolved.source} — refreshed from ${redactUrlForDisplay(out.chosen!)} (${(out.chars ?? 0).toLocaleString()} chars)`,
           );
         } else {
           results.push(`${entry.name}: FAILED — ${out.text}`);
@@ -143,7 +149,9 @@ export async function refreshToolText(registry: Registry, library?: string, opts
             // whole point of this item is that "unchanged" and "refreshed" are now DIFFERENT,
             // internally distinguishable outcomes, and reporting them identically would hide
             // that from the one place a human actually reads the result.
-            `${entry.name}: ${doc.notModified ? "unchanged (304 revalidated)" : "refreshed"} from ${doc.url} (${doc.content.length.toLocaleString()} chars)`
+            // PAR-815 (Phase 4): `doc.url` is the raw candidate — redacted here, at render, the
+            // same as the resolved-entry branch above; `single.url` below stays raw for the log.
+            `${entry.name}: ${doc.notModified ? "unchanged (304 revalidated)" : "refreshed"} from ${redactUrlForDisplay(doc.url)} (${doc.content.length.toLocaleString()} chars)`
           : `${entry.name}: FAILED — all candidate URLs unreachable`,
       );
     }

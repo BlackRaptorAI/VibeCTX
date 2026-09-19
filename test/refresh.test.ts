@@ -55,6 +55,21 @@ describe("refreshToolText (MCP refresh tool body, PAR-654)", () => {
     expect(readCache("react", REACT_URL, 168)?.content).toBe("# React new");
   });
 
+  /** PAR-815 (Phase 4) — the "refreshed from <url>" line is redacted the same way the
+   *  `Source:` stamp is; the activity log's own `url` field (redacted internally by
+   *  `activity-log.ts`) is unaffected by this — both must be clean, independently. */
+  it("PAR-815: the 'refreshed from <url>' line strips a token-bearing query string", async () => {
+    const internalUrl = "https://docs.internal.example.com/llms.txt?token=super-secret-refresh";
+    const reg: Registry = { entries: new Map([["acme", { name: "acme", urls: [internalUrl] }]]) };
+    writeCache("acme", internalUrl, "# Acme old");
+    stubFetch({ [internalUrl]: "# Acme new" });
+    const out = await refreshToolText(reg, "acme");
+    expect(out).toBe("acme: refreshed from https://docs.internal.example.com/llms.txt (10 chars)");
+    expect(out).not.toContain("super-secret-refresh");
+    const [entry] = readActivityEntries();
+    expect(entry.url).toBe("https://docs.internal.example.com/llms.txt"); // the log is clean too, independently
+  });
+
   it("refreshes every library when no name is given, one line each, and reports failures", async () => {
     stubFetch({ [REACT_URL]: "# React new" }); // hono 404s
     const out = await refreshToolText(registry);

@@ -1,5 +1,6 @@
 import { clipText } from "./text.js";
 import { tokenize } from "./tokenize.js";
+import { redactUrlForDisplay } from "./link-policy.js";
 import type { SourceKind } from "./source-kind.js";
 
 /** A heading and the text under it, with where it sits in the heading tree (D-25). */
@@ -461,17 +462,20 @@ export const MAX_STAMP_VERSION_CHARS = 100;
  * headers, say) so a credential never has to travel in a URL at all — both stay open,
  * deliberately deferred to 0.2.1, not folded into this fix.
  */
+/** PAR-817 (Phase 4) — now a thin wrapper around `link-policy.ts`'s shared
+ *  `redactUrlForDisplay`: the query/fragment/userinfo-stripping logic itself, and its
+ *  parse-failure fallback, live in exactly one place now, not three (this function,
+ *  `activity-log.ts`'s former `sanitizeLoggedUrl`, and `link-policy.ts`'s own
+ *  `sanitizeRemoteUrl` before this — see `redactUrlForDisplay`'s own comment for the full
+ *  consolidation). Kept as a named export here, rather than deleted in favour of every call
+ *  site importing `redactUrlForDisplay` directly, because every call site in this file and in
+ *  `get-docs.ts` already reads naturally as "strip the stamp's query" and renaming them would
+ *  be diff for no behaviour change. PAR-816's parse-failure fallback is now cut-at-`?`/`#`
+ *  (never the raw string whole) — a stricter guarantee than this function's own pre-Phase-4
+ *  comment claimed for that branch; the comment above (`sourceStampLine`) is superseded on
+ *  that one point by `redactUrlForDisplay`'s own doc comment. */
 export function stripStampQuery(url: string): string {
-  try {
-    const u = new URL(url);
-    u.username = "";
-    u.password = "";
-    u.search = "";
-    u.hash = "";
-    return u.href;
-  } catch {
-    return url;
-  }
+  return redactUrlForDisplay(url);
 }
 
 export function sourceStampLine(f: StampFacts): string {

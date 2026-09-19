@@ -551,8 +551,12 @@ describe("A1 (PAR-714): a library `urls` entry must clear the host policy, not j
     expect(bad({ libraries: [{ name: "a", urls: ["http://169.254.169.254/x"], allowInternalHosts: true }] })).toThrow(
       /libraries\[0\]\.urls \("a"\): "http:\/\/169\.254\.169\.254\/x" must use https:/,
     );
+    // code-reviewer B1 / security-architect S2 (Phase 4 round 2) — the rejected value shown here
+    // is now REDACTED (userinfo stripped): before this fix, the very credential this rule exists
+    // to reject reached the error message verbatim, which in turn reaches `list_libraries`'
+    // "NOT LOADED: ..." header and `doctor --json`'s `configIssues[].reason`, both agent-visible.
     expect(bad({ libraries: [{ name: "a", urls: ["https://user:pw@169.254.169.254/x"], allowInternalHosts: true }] })).toThrow(
-      /libraries\[0\]\.urls \("a"\): "https:\/\/user:pw@169\.254\.169\.254\/x" must not include userinfo/,
+      /libraries\[0\]\.urls \("a"\): "https:\/\/169\.254\.169\.254\/x" must not include userinfo/,
     );
   });
 
@@ -606,6 +610,48 @@ describe("A1 (PAR-714): a library `urls` entry must clear the host policy, not j
     expect(describeConfig(registry.config!, { cwd: repo, home })).toEqual([
       'config: ./vibectx.config.json (project) — NOT LOADED: libraries[0].urls ("internal-docs"): "https://169.254.169.254/latest/meta-data/iam/security-credentials/" is a private, loopback or non-routable host',
     ]);
+  });
+
+  /**
+   * code-reviewer B1 / security-architect S2 (Phase 4 round 2) — a rejected config URL's own
+   * query string or userinfo must not reach the agent-visible `list_libraries` header (or
+   * `ConfigError`, or `doctor --json`'s `configIssues[].reason`, all sourced from the same
+   * `LayerFailure.reason` this header renders) — the exact leak this fix closes, proven via the
+   * real discovery path, not just `readConfigFile` in isolation.
+   */
+  it("a rejected URL's query-string token or userinfo password never reaches the list_libraries header", () => {
+    writeFileSync(
+      join(repo, CONFIG_FILENAME),
+      JSON.stringify({
+        libraries: [
+          { name: "leaky-query", urls: ["https://docs.internal.example.com/llms.txt?token=SUPER-SECRET-TOKEN"], allowInternalHosts: true },
+        ],
+      }),
+      "utf8",
+    );
+    // A query-bearing https URL under allowInternalHosts is otherwise VALID, so this alone
+    // wouldn't fail validation — the point is the OTHER failing entry, below, must not leak the
+    // token from THIS entry either, and this entry's own successful load proves nothing here was
+    // accidentally broken by the fix (query strings on an otherwise-valid urls entry still load).
+    const registry = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {}, includeResolved: false });
+    expect(registry.entries.get("leaky-query")?.urls).toEqual(["https://docs.internal.example.com/llms.txt?token=SUPER-SECRET-TOKEN"]);
+
+    writeFileSync(
+      join(repo, CONFIG_FILENAME),
+      JSON.stringify({
+        libraries: [{ name: "leaky-userinfo", urls: ["https://user:CORRECT-HORSE-BATTERY-STAPLE@docs.internal.example.com/llms.txt?token=ALSO-SECRET"] }],
+      }),
+      "utf8",
+    );
+    const rejected = loadDiscoveredRegistry({ cwd: repo, env: {}, home, warn: () => {}, includeResolved: false });
+    expect(rejected.entries.has("leaky-userinfo")).toBe(false);
+    const header = describeConfig(rejected.config!, { cwd: repo, home }).join("\n");
+    expect(header).toContain("must not include userinfo");
+    expect(header).toContain("https://docs.internal.example.com/llms.txt"); // host+path still named
+    expect(header).not.toContain("CORRECT-HORSE-BATTERY-STAPLE");
+    expect(header).not.toContain("ALSO-SECRET");
+    expect(header).not.toContain("user:");
+    expect(header).not.toContain("token=");
   });
 });
 

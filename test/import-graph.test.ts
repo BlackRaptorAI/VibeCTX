@@ -323,7 +323,16 @@ function reaches(graph: Pick<Graph, "edges">, from: string, to: string): boolean
 // existing edges into `source-kind.js`/`cache-evict.js`/`doctor-store.js` are unrelated
 // modules). cli.ts's `runDoctorCli` change (passing `io.stderr` as `warn`) adds an argument to
 // an existing call, not a new import — no edge.
-const MEASURED_EDGE_COUNT = 136;
+// Phase 4 (PAR-815/PAR-806/PAR-817, URL privacy) — +6, verified against `graph.edgeList`, not
+// merely to make the test pass: six files gained a brand-new edge to `link-policy.js` for the
+// consolidated `redactUrlForDisplay` (PAR-817) — `retrieval.ts`, `activity-log.ts`,
+// `get-docs.ts`, `refresh.ts`, `search.ts` and `doctor.ts` did not import anything from
+// `link-policy.js` before this phase. Five OTHER files (`resolve.ts`, `project-store.ts`,
+// `search-index.ts`, `cache.ts`, `cache-meta.ts`) already had a live edge to `link-policy.js`
+// (`sanitizeRemoteUrl` or `derivedAllowedHosts`) and gained the new import as an additional
+// named symbol on the SAME existing statement — no new edge, by this graph's own per-file-pair
+// counting rule.
+const MEASURED_EDGE_COUNT = 142;
 const EDGE_COUNT_FLOOR = 100;
 
 describe("import graph: non-vacuity (a resolver that silently drops edges must be caught)", () => {

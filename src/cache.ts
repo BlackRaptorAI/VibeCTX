@@ -2,7 +2,7 @@ import { chmodSync, lstatSync, mkdirSync, readdirSync, readFileSync, existsSync,
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempPathFor, writeAtomic } from "./atomic-store.js";
-import { sanitizeRemoteUrl } from "./link-policy.js";
+import { redactUrlForDisplay, sanitizeRemoteUrl } from "./link-policy.js";
 import { MAX_CONFIG_VALUE_CHARS, MAX_DISPLAY_PATH_CHARS } from "./config.js";
 import { clipText } from "./text.js";
 import { noteCacheWrite } from "./cache-evict.js";
@@ -11,8 +11,10 @@ import {
   toCacheMeta,
   readMetaFile,
   urlSlug,
+  urlHashFor,
   libDirName,
   metaMatchesSlug,
+  metaMatchesUrl,
   validEtag,
   MAX_META_FILE_BYTES,
 } from "./cache-meta.js";
@@ -659,9 +661,13 @@ export function readCache(
   // silently, with a meta that passed every A4 check. `urlSlug` is now collision-RESISTANT
   // (D-71 — see its own comment for what that does and doesn't guarantee), which already makes
   // an accidental fold collision astronomically unlikely; THIS check is what actually makes
-  // serving the wrong document impossible regardless: a meta whose own `url` does not match
+  // serving the wrong document impossible regardless: a meta whose own identity does not match
   // the URL actually requested is not this entry, whatever its file name says.
-  if (meta.url !== url) return undefined;
+  // PAR-806 (Phase 4) — `metaMatchesUrl` (`cache-meta.ts`), not a direct `meta.url !== url`
+  // comparison: `meta.url` is now the REDACTED display form, so comparing it against the raw
+  // requested `url` directly would treat every query-string-bearing entry as a permanent
+  // mismatch. `metaMatchesUrl` restores full fidelity via `meta.urlHash` (see its own comment).
+  if (!metaMatchesUrl(meta, url)) return undefined;
   // PAR-786 (F-2a, F-10) — the same bounded, symlink-refusing read `.meta.json` already gets
   // via `readMetaFile` (`cache-meta.ts`), now applied to the content half: `readBoundedRegularFile`
   // refuses a symlink (a secret file swapped in for this entry's `.md` — Attack 1 in the
@@ -724,10 +730,12 @@ export function touchCache(library: string, url: string, finalUrl?: string): str
   // Best effort (D-13): a meta this process cannot trust has nothing to refresh. The next
   // `readCache` reports the entry uncached and the next fetch writes a fresh, valid meta.
   if (!meta) return undefined;
-  // D-71 (PAR-749, Root 1) — same verification as `readCache`: a meta whose own `url` does
+  // D-71 (PAR-749, Root 1) — same verification as `readCache`: a meta whose own identity does
   // not match the URL this call was asked to refresh is not this entry, whatever the file
   // name says. Refreshing it anyway would extend the TTL of a mismatched record.
-  if (meta.url !== url) return undefined;
+  // PAR-806 (Phase 4): `metaMatchesUrl`, not a direct `meta.url !== url` comparison — see
+  // `readCache`'s identical comment above for why.
+  if (!metaMatchesUrl(meta, url)) return undefined;
   meta.fetchedAt = new Date().toISOString();
   // Stored only when it actually differs from `url` (matching `writeCache`'s own rule below) —
   // an entry that has never redirected stays byte-for-byte the same file shape it always was,
@@ -736,14 +744,17 @@ export function touchCache(library: string, url: string, finalUrl?: string): str
   // for the same reason `writeCache` validates it (security-architect, PAR-776 round 1, B-1) —
   // an oversized or malformed value is dropped, not written, rather than risking this entry's
   // `.meta.json` growing past `MAX_META_FILE_BYTES` on a revalidation.
+  // code-reviewer B1 / security-architect S2 (Phase 4 round 2) — redacted, exactly like
+  // `writeCache`'s identical block, and for the identical reason: `.meta.json` must not carry a
+  // plaintext secret in `finalUrl` any more than it does in `url`. The "differs" comparison is
+  // REDACTED-to-REDACTED, not raw-to-raw, so a raw finalUrl differing from the candidate only by
+  // query/fragment/userinfo is correctly treated as "nothing left to report" rather than stored
+  // as a confusing `finalUrl` that would render identically to `url` once both are redacted.
   if (finalUrl !== undefined) {
-    if (finalUrl !== url) {
-      const clean = sanitizeRemoteUrl(finalUrl);
-      if (clean !== undefined) meta.finalUrl = clean;
-      else delete meta.finalUrl;
-    } else {
-      delete meta.finalUrl;
-    }
+    const clean = sanitizeRemoteUrl(finalUrl);
+    const redactedFinal = clean === undefined ? undefined : redactUrlForDisplay(clean);
+    if (redactedFinal !== undefined && redactedFinal !== redactUrlForDisplay(url)) meta.finalUrl = redactedFinal;
+    else delete meta.finalUrl;
   }
   // PAR-805 (F-7 file-mode half): owner-only, self-healing across every write (writeAtomic's
   // own comment) — this call had no `mode` at all before, unlike `writeCache`'s own writes below.
@@ -897,11 +908,28 @@ export function writeCache(
   // never carry a newline — but a nonconforming server's high-byte obs-text or an oversized
   // value would otherwise land on disk unfiltered, cost space against the size cap, and be
   // silently dropped again on the very next read anyway.
-  const meta: CacheMeta = { url, fetchedAt: fallbackFetchedAt };
+  // PAR-806 (Phase 4) — `url` is stored REDACTED (query/fragment/userinfo stripped) and
+  // `urlHash` carries the full-fidelity identity proof (`urlHashFor`'s FULL 64-character SHA-256
+  // digest of the RAW url — security-architect, Phase 4 round 2, B1: deliberately NOT the
+  // 12-character value `urlSlug`'s own filename suffix uses; see `urlHashFor`'s own comment for
+  // why conflating the two was a real, fixed regression) that `metaMatchesUrl`/`metaMatchesSlug`
+  // (`cache-meta.ts`) use instead of a plaintext comparison — see `CacheMeta.url`'s own doc
+  // comment for the full design and the backward-compatibility story for a `.meta.json` written
+  // before this item.
+  const meta: CacheMeta = { url: redactUrlForDisplay(url), urlHash: urlHashFor(url), fetchedAt: fallbackFetchedAt };
   if (validEtag(etag)) meta.etag = etag;
-  if (finalUrl !== undefined && finalUrl !== url) {
+  // code-reviewer B1 / security-architect S2 (Phase 4 round 2) — `finalUrl` is redacted the same
+  // way `url` is: before this fix, `.meta.json` stored the CLEANED-but-unredacted redirect
+  // target, a second plaintext-secret site right next to the one this phase's own PAR-806 item
+  // just closed for `url`. The "was there a redirect" gate now compares REDACTED-to-REDACTED
+  // (not raw-to-raw): a raw finalUrl that differs from the candidate only by query/fragment/
+  // userinfo redacts to the SAME string as the candidate, and in that case nothing meaningful
+  // survives redaction to report — `meta.finalUrl` is correctly left unset rather than storing a
+  // value that would render as "(redirected from X)" for the identical, already-shown X.
+  if (finalUrl !== undefined) {
     const clean = sanitizeRemoteUrl(finalUrl);
-    if (clean !== undefined) meta.finalUrl = clean;
+    const redactedFinal = clean === undefined ? undefined : redactUrlForDisplay(clean);
+    if (redactedFinal !== undefined && redactedFinal !== redactUrlForDisplay(url)) meta.finalUrl = redactedFinal;
   }
   const contentTmp = tempPathFor(contentPath);
   const metaTmp = tempPathFor(metaPath);

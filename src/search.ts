@@ -1,5 +1,6 @@
 import { clipText, cleanText } from "./text.js";
 import { readCache, type CacheHit } from "./cache.js";
+import { redactUrlForDisplay } from "./link-policy.js";
 import { resolveLibrary, type LibraryEntry, type Registry } from "./registry.js";
 import { recordActivity } from "./activity-log.js";
 import {
@@ -163,8 +164,20 @@ export interface SearchSection extends SplitSection {
 
 export interface SearchGroup {
   library: string;
-  /** The cached URL that was searched. */
+  /** The cached URL that was searched — REDACTED (query, fragment, userinfo stripped) by the
+   *  time this reaches a caller (PAR-815, Phase 4): this is a structured, machine-consumed
+   *  field (`--json`), the same design call `doctor --json`'s `LibraryReport.url` makes and for
+   *  the same reason — the field's purpose (which host/path was searched) survives redaction
+   *  fully; only a secret would be lost. Internally, `runSearchCore` uses the RAW candidate
+   *  (from `primaryCached`) for the actual cache read; this field is redacted only once, at the
+   *  very end, after every internal use of the raw value is done. */
   url: string;
+  /** PAR-812/PAR-815 (Phase 4) — the URL this document was ACTUALLY served from, when a
+   *  redirect moved it away from `url` (mirrors `GetDocsOutcome.source.finalUrl` /
+   *  `StampFacts.redirectedFrom`, PAR-776/D-74), read from the cache meta `readCache` already
+   *  returns on every cache hit — no live fetch needed (`search` never fetches, D-35). Absent
+   *  when there was no redirect. Redacted the same way `url` is. */
+  finalUrl?: string;
   /** The cached copy is past this library's TTL. */
   stale: boolean;
   /** Cache meta's `fetchedAt` for that document. */
@@ -281,10 +294,15 @@ function weightedFromPostings(doc: IndexedDocument, terms: string[]): Weighted[]
   return docs;
 }
 
-/** One library's contribution to the corpus, before scoring. */
+/** One library's contribution to the corpus, before scoring. `url`/`finalUrl` stay RAW here —
+ *  this is the internal, pre-render shape; redaction happens once, at the end of
+ *  `runSearchCore`, when `SearchGroup`s are built for the caller (PAR-815). */
 interface Candidate {
   entry: LibraryEntry;
   url: string;
+  /** PAR-812 — from `hit.meta.finalUrl` (`readCache`'s own return, PAR-776/D-74); present only
+   *  when it differs from `url`. */
+  finalUrl?: string;
   fetchedAt: string;
   stale: boolean;
   weighted: Weighted[];
@@ -369,7 +387,20 @@ function selectAcrossLibraries(groups: SearchGroup[], budget: number): SearchGro
 function groupHeader(group: SearchGroup): string {
   const lines = [
     `# ${clipText(group.library, MAX_LIBRARY_CHARS)}`,
-    sourceStampLine({ url: group.url, fetchedAt: group.fetchedAt, stale: group.stale, curated: group.curated }),
+    // PAR-812 (Phase 4) — `finalUrl`/`redirectedFrom` threaded through the same way
+    // `get-docs.ts` already does, closing the wording-drift PAR-726/A17's shared
+    // `sourceStampLine` was built to prevent: before this, `search` always reported the
+    // CANDIDATE url with no `(redirected from …)` annotation for the SAME cached document
+    // `get_docs` would report as redirected. `search` never fetches (D-35), but the redirect
+    // fact is already persisted in the cache meta `readCache` returns on every hit, so it does
+    // not need a live fetch to state it.
+    sourceStampLine({
+      url: group.finalUrl ?? group.url,
+      redirectedFrom: group.finalUrl !== undefined ? group.url : undefined,
+      fetchedAt: group.fetchedAt,
+      stale: group.stale,
+      curated: group.curated,
+    }),
   ];
   if (group.stale) {
     lines.push(
@@ -474,12 +505,19 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
       continue;
     }
     const { url, hit } = cached;
+    // PAR-812 — from the cache meta `readCache` already returned (PAR-776/D-74); present only
+    // when it differs from `url`, matching `get-docs.ts`'s own `source.finalUrl` convention.
+    const finalUrl = hit.meta.finalUrl !== undefined && hit.meta.finalUrl !== url ? hit.meta.finalUrl : undefined;
     const stored = loaded.libraries.get(entry.name);
     const hash = documentHash(hit.content);
     // D-33: the posting list is used ONLY when it describes exactly this text at exactly this
     // URL. Anything else — refreshed behind the index's back, hand-edited, planted — is ignored.
-    if (stored !== undefined && stored.url === url && stored.hash === hash) {
-      candidates.push({ entry, url, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(stored, terms) });
+    // PAR-806 (Phase 4): `stored.url` is REDACTED on disk (`indexDocument`'s own comment) — the
+    // comparison redacts the live candidate the same way rather than comparing raw-to-redacted,
+    // so both sides are still comparing the identical derived value (see `IndexedDocument.url`'s
+    // own comment for exactly what this narrows and why that is judged acceptable here).
+    if (stored !== undefined && stored.url === redactUrlForDisplay(url) && stored.hash === hash) {
+      candidates.push({ entry, url, finalUrl, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(stored, terms) });
       base.fromIndex += 1;
       continue;
     }
@@ -498,7 +536,7 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
     const built = shedAlready ? undefined : indexDocument(url, hit.content, hit.meta.fetchedAt, sections);
     if (built) {
       rebuilt.set(entry.name, built);
-      candidates.push({ entry, url, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(built, terms) });
+      candidates.push({ entry, url, finalUrl, fetchedAt: hit.meta.fetchedAt, stale: hit.stale, weighted: weightedFromPostings(built, terms) });
     } else {
       // D-36: too large (or too varied) to index, or D-42: shed to keep the file readable.
       // Searched anyway, by direct tokenization, and the response says so for that library so
@@ -507,6 +545,7 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
       candidates.push({
         entry,
         url,
+        finalUrl,
         fetchedAt: hit.meta.fetchedAt,
         stale: hit.stale,
         weighted: weighSections(sections, termIndex),
@@ -557,6 +596,7 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
     const group: SearchGroup = {
       library: c.entry.name,
       url: c.url,
+      finalUrl: c.finalUrl,
       stale: c.stale,
       fetchedAt: c.fetchedAt,
       curated: c.entry.resolved === undefined,
@@ -627,7 +667,19 @@ function runSearchCore(registry: Registry, opts: SearchOptions): SearchOutcome {
     if (sections.length > 0) withBodies.push({ ...group, matched: sections.length, sections });
   }
   base.matchedLibraries -= groups.length - withBodies.length;
-  base.groups = selectAcrossLibraries(withBodies, budget);
+  // PAR-815 (Phase 4) — redacted here, at the very end, after every internal use of the RAW
+  // `url` (the cache reads just above, keyed by `group.url`) is already done. `groupHeader`'s
+  // own `sourceStampLine` call redacts independently for the rendered TEXT path regardless (so
+  // this is a no-op for `formatSearchResults`, redaction being idempotent) — this is what
+  // closes the STRUCTURED `SearchOutcome.groups[].url`/`finalUrl` fields `search --json`
+  // serializes directly (the surface PAR-811 left open, per its own scope note in
+  // `retrieval.ts`).
+  const redactedGroups = withBodies.map((g) => ({
+    ...g,
+    url: redactUrlForDisplay(g.url),
+    finalUrl: g.finalUrl !== undefined ? redactUrlForDisplay(g.finalUrl) : undefined,
+  }));
+  base.groups = selectAcrossLibraries(redactedGroups, budget);
   return base;
 }
 

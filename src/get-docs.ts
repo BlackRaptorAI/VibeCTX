@@ -31,6 +31,7 @@ import {
 } from "./retrieval.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { clipText } from "./text.js";
+import { redactUrlForDisplay } from "./link-policy.js";
 import { recordActivity, type ActivityOutcome } from "./activity-log.js";
 import { readDoctorVerdicts } from "./doctor-store.js";
 
@@ -281,6 +282,14 @@ export async function getDocsToolText(
     library: entry.name,
     query: rest.topic,
     url: detailed.source?.url,
+    // PAR-813 (Phase 4) — `finalUrl` (PAR-776) is added alongside `url` so the activity log
+    // carries the same redirect provenance the rendered stamp does, rather than that fact
+    // being reachable only through prose that degrades under budget pressure (see
+    // `StampFacts.redirectedFrom`'s own comment: the newest, most-optional stamp field drops
+    // first, which makes it a poor AUDIT signal on its own). Both are redacted and bounded the
+    // same way by `activity-log.ts`'s own `toActivityEntry` — this call site just supplies the
+    // raw values.
+    finalUrl: detailed.source?.finalUrl,
     contentHash: detailed.contentHash,
     fresh: detailed.source ? !detailed.source.stale : undefined,
     outcome: getDocsOutcome(rest.topic, detailed),
@@ -654,20 +663,31 @@ export async function getDocsDetailed(
   }
   const dropped = { outsideOrigin: skippedOutsideOrigin, tooLarge: tooLarge.length, unavailable: failed.length };
 
+  // PAR-819 (Phase 4) — the note block is a SECOND get_docs surface a token-bearing URL can
+  // reach, distinct from the stamp: `followed`/`tooLarge`/`failed` are the raw links extracted
+  // from (or resolved against) the document's own content, never run through `stripStampQuery`
+  // the way the stamp's `url`/`redirectedFrom` are, because the whole note BLOCK is deliberately
+  // not passed through `clipText` (which would collapse its newlines — see the note-budget
+  // comment below, unchanged by this item). Each URL is redacted individually, right here,
+  // before it is joined into a note line — a targeted per-URL fix, not a whole-block transform,
+  // so the existing newline-preservation behaviour is untouched.
+  const followedRedacted = followed.map(redactUrlForDisplay);
+  const tooLargeRedacted = tooLarge.map(redactUrlForDisplay);
+  const failedRedacted = failed.map(redactUrlForDisplay);
   const notes: string[] = [];
-  if (followed.length) notes.push(`Followed index links: ${followed.join(", ")}`);
+  if (followedRedacted.length) notes.push(`Followed index links: ${followedRedacted.join(", ")}`);
   if (skippedOutsideOrigin > 0) {
     // PAR-776 (D-74): the document's OWN host, for this note, is the one it was actually
     // served from — matching the `isAllowedLink` check just above that produced this count.
     const hosts = [new URL(doc.finalUrl).hostname, ...(entry.allowedHosts ?? [])];
     notes.push(`Skipped ${skippedOutsideOrigin} index links outside allowed hosts (${hosts.join(", ")})`);
   }
-  if (tooLarge.length) {
+  if (tooLargeRedacted.length) {
     notes.push(
-      `Skipped ${tooLarge.length} index links larger than ${LINKED_PAGE_MAX_BYTES / (1024 * 1024)} MiB: ${tooLarge.join(", ")}`,
+      `Skipped ${tooLargeRedacted.length} index links larger than ${LINKED_PAGE_MAX_BYTES / (1024 * 1024)} MiB: ${tooLargeRedacted.join(", ")}`,
     );
   }
-  if (failed.length) notes.push(`Could not fetch ${failed.length} index links: ${failed.join(", ")}`);
+  if (failedRedacted.length) notes.push(`Could not fetch ${failedRedacted.length} index links: ${failedRedacted.join(", ")}`);
   // A6 (PAR-719), done-when #2 (D-43 — the answer outranks the accounting): the note block is
   // capped at the SMALLER of a fixed ceiling and half the call's own budget, never just the
   // fixed ceiling alone. Without the budget-relative half, a maximal note block (a followed
