@@ -78,9 +78,14 @@ export type ActivityTool = (typeof ACTIVITY_TOOLS)[number];
 /** Closed vocabulary (K3): `matched` — content was found and served; `no-match` — the
  *  library/document was consulted but the topic or query found nothing in it; `not-cached`
  *  — nothing was available to serve (no cached or fetchable document); `unresolved` — the
- *  library name itself could not be established. Each write hook's own doc comment says
- *  which of the four applies to each of its branches. */
-export const ACTIVITY_OUTCOMES = ["matched", "no-match", "not-cached", "unresolved"] as const;
+ *  library name itself could not be established; `refused` (PAR-848, Phase 3) — `get_docs`
+ *  had a document to serve but `maxTokens` could not hold the mandatory source stamp (and,
+ *  when one was requested, the version verdict), so the call was refused rather than rendered
+ *  with either fact silently dropped — distinct from `no-match` (a document WAS searched, the
+ *  topic just isn't in it) and from `not-cached` (no document at all); logging a refusal as
+ *  either would misstate what actually happened. Each write hook's own doc comment says which
+ *  of the five applies to each of its branches. */
+export const ACTIVITY_OUTCOMES = ["matched", "no-match", "not-cached", "unresolved", "refused"] as const;
 export type ActivityOutcome = (typeof ACTIVITY_OUTCOMES)[number];
 
 /** Longest `library`: npm's published package-name limit, the same bound `project-store.ts`

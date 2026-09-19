@@ -18,12 +18,16 @@ import {
   rankLinks,
   extractLinks,
   followLimit,
-  fitStampLine,
   noMatchNote,
   thinMatchNote,
   versionFallbackNote,
+  requiredHeader,
+  fitRetrievedText,
+  stripStampQuery,
+  MAX_STAMP_VERSION_CHARS,
   MAX_FOLLOWED_BYTES,
   type SplitSection,
+  type StampFacts,
 } from "./retrieval.js";
 import { indexCachedDocument, documentHash } from "./search-index.js";
 import { clipText } from "./text.js";
@@ -86,6 +90,13 @@ export interface GetDocsOutcome {
    *  links the allowed-host policy refused (before or after redirects); the key keeps its
    *  0.1.3 name because doctor's JSON sums it. */
   dropped: { outsideOrigin: number; tooLarge: number; unavailable: number };
+  /** PAR-848/849 (Phase 3) — set when `text` is a budget refusal (`maxTokens` could not hold
+   *  the mandatory source stamp and, when one was requested, the version verdict) rather than
+   *  any of the ordinary render paths. A distinct, structured fact rather than something a
+   *  consumer (the activity log, `doctor`) would otherwise have to infer by parsing `text` for
+   *  the refusal sentence — the same reasoning A20/PAR-729 already applies to every other
+   *  outcome this interface states as data. */
+  refused?: boolean;
 }
 
 const DEFAULT_BUDGET_TOKENS = 4000;
@@ -127,6 +138,22 @@ function clipToBudget(text: string, budgetChars: number): string {
   return text.length > budgetChars ? text.slice(0, budgetChars) : text;
 }
 
+/** PAR-848/849 (Phase 3) — the plain, honest text for the one outcome `requiredHeader`
+ *  (retrieval.ts) can produce: `maxTokens` cannot hold the mandatory source stamp — and, when
+ *  one was requested, the version verdict — even at their shortest complete form. Names
+ *  roughly how large a budget would need to be when that's cheap to compute
+ *  (`requiredHeader`'s own `minTokensNeeded`, a lower bound: the real minimum also depends on
+ *  the resolution/stale prefixes already spent before `requiredHeader` was called, and, on a
+ *  path that goes on to render document text, the PAR-850 fence overhead — neither of which
+ *  this function has to hand), and tells the caller what to do about it rather than leaving it
+ *  to guess. */
+function budgetRefusalText(minTokensNeeded: number | undefined, versionRequested: boolean): string {
+  const what = versionRequested ? "the document's source and the requested version's outcome" : "the document's source";
+  const guidance = versionRequested ? "Raise maxTokens, or omit version." : "Raise maxTokens.";
+  const need = minTokensNeeded !== undefined ? ` (roughly ${minTokensNeeded} or more)` : "";
+  return `maxTokens is too small to state ${what}${need}. ${guidance}`;
+}
+
 /**
  * The get_docs tool body, kept out of index.ts so it can be exercised without a
  * transport. Returns the text the tool responds with.
@@ -135,11 +162,16 @@ export async function getDocs(entry: LibraryEntry, args: GetDocsArgs, resolution
   return (await getDocsDetailed(entry, args, resolutionNote)).text;
 }
 
-/** A20/PAR-729, D-51: `not-cached` when nothing was fetched or cached; `no-match` when a
+/** A20/PAR-729, D-51: `refused` (PAR-848, Phase 3) when `maxTokens` could not hold the
+ *  mandatory source stamp — and, when one was requested, the version verdict — even though a
+ *  document was reached; `not-cached` when nothing was fetched or cached; `no-match` when a
  *  topic was given and nothing in the document matched it; `matched` otherwise (including
  *  the no-topic table-of-contents path — a document WAS successfully served, even though
- *  nothing was topic-matched to produce it). */
+ *  nothing was topic-matched to produce it). Checked in this order: a refusal takes priority
+ *  over the other three, since `outcome.source` and `outcome.matched` can both be set on a
+ *  refusal (see `GetDocsOutcome.refused`'s own comment) and would otherwise misclassify it. */
 function getDocsOutcome(topic: string | undefined, outcome: GetDocsOutcome): ActivityOutcome {
+  if (outcome.refused) return "refused";
   if (!outcome.source) return "not-cached";
   if (topic !== undefined && outcome.matched === 0) return "no-match";
   return "matched";
@@ -193,7 +225,7 @@ export async function getDocsToolText(
       versionContext = {
         requested: version,
         matched: false,
-        note: `Version ${clipText(version, MAX_STAMP_FIELD_CHARS)} was requested, but this call is offline — version-matching needs the network. Showing the cached document instead.`,
+        note: `Version ${clipText(version, MAX_STAMP_VERSION_CHARS)} was requested, but this call is offline — version-matching needs the network. Showing the cached document instead.`,
       };
     } else {
       // A11/PAR-724 — an already-resolved (non-curated) entry gets re-resolved for the pinned
@@ -215,7 +247,7 @@ export async function getDocsToolText(
         versionContext = {
           requested: version,
           matched: false,
-          note: `Could not check version ${clipText(version, MAX_STAMP_FIELD_CHARS)} — ${reason}; showing the previously cached document instead.`,
+          note: `Could not check version ${clipText(version, MAX_STAMP_VERSION_CHARS)} — ${reason}; showing the previously cached document instead.`,
         };
       }
     }
@@ -227,7 +259,7 @@ export async function getDocsToolText(
     versionContext = {
       requested: version,
       matched: false,
-      note: `Version ${clipText(version, MAX_STAMP_FIELD_CHARS)} was requested, but "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" is a curated entry — version-matching applies only to packages resolved automatically.`,
+      note: `Version ${clipText(version, MAX_STAMP_VERSION_CHARS)} was requested, but "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" is a curated entry — version-matching applies only to packages resolved automatically.`,
     };
   }
   // A17 (PAR-726): resolutionNote used to be prepended here, entirely outside getDocsDetailed's
@@ -307,20 +339,46 @@ export async function getDocsDetailed(
   const curated = isCurated(entry);
   const doc = await getLibraryDoc(entry, { offline: args.offline });
   if (!doc) {
-    // A17 (PAR-726) addendum (CR-20260906-par-657-config-discovery, source-header-gap): the
-    // one response in this file that used to carry no marker at all — no `Source:` line
-    // (nothing was fetched, so there is no url/fetchedAt/stale to state), but curated/resolved
-    // is still a fact about `entry` regardless of whether a document was ever reached. Same
-    // "fact · fact" grammar the stamp itself uses (code-reviewer round 1, N2), not a second,
-    // independently-worded vocabulary for the same field.
-    const noDocStamp = `No document available · ${curated ? "curated" : "resolved"}`;
+    // PAR-849 (Phase 3), superseding the A17 (PAR-726) addendum below — this was the one
+    // response in this file with no `Source:`-shaped line at all: nothing was fetched, so
+    // there is genuinely no url/fetchedAt/stale to state, but "make the claim true" means this
+    // path states that absence in the SAME grammar every other path uses, not a second,
+    // differently-worded vocabulary for "here is what I know about where this came from". A
+    // structurally distinct value (`none`) rather than an empty or omitted field, so a reader
+    // (or a `Source:`-scanning script) cannot mistake this for a real URL that happened to
+    // render short — curated/resolved is still a fact about `entry` regardless of whether a
+    // document was ever reached, carried over unchanged from the A17 addendum this replaces.
+    // Nit (code-reviewer, Phase 3 round 2): field order matches `sourceStampLine`'s own
+    // convention (`url · fetched · fresh · curated`, curated/resolved LAST), not curated
+    // second.
+    const noDocStamp = `Source: none · nothing cached · ${curated ? "curated" : "resolved"}`;
+    // PAR-849 — folded in from independent verification: the second line always claimed "all
+    // candidate URLs unreachable", which is false on a fully offline call (`args.offline`) —
+    // zero fetches were ever attempted, so nothing was "unreachable"; that word describes a
+    // fetch that was tried and failed, not a fetch that was never sent. Threaded through
+    // `args.offline` (already received by this function) to say which of the two actually
+    // happened, rather than one fixed sentence covering both.
+    //
+    // code-reviewer S8 (Phase 3, round 2) — wording aligned with `fetcher.ts`'s own
+    // `staleNote` (D-48's "one grammar, one place" lesson: this distinction — offline/never-
+    // attempted vs. attempted/unreachable — already has an established phrasing there,
+    // "offline mode, network not attempted" / "all candidate URLs unreachable"; reused
+    // verbatim rather than inventing a third vocabulary for the same fact).
+    const attemptLine = args.offline
+      ? `Offline mode, network not attempted, for "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" — nothing is cached. Candidates:`
+      : `All candidate URLs unreachable for "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}", and nothing is cached. Candidates tried:`;
     // security-architect, A17 round 2, SF-1: `entry.name`/`entry.urls` come straight from a
     // config file's raw strings — `validateLibraryUrl` (link-policy.ts) checks scheme/host but
     // never re-serializes, so a URL is validated, not normalised, the same gap S-1 closed for
     // the stamp's own `url`. Cleaned and clipped here too, so this response can't carry the
     // same forged-second-line risk right next to the marker that names it "no document".
+    // security-architect S-1 (Phase 3, round 2) — `stripStampQuery` (retrieval.ts) applied here
+    // too: a config-authored candidate URL can carry a `?token=…` exactly as `doc.url`/
+    // `doc.finalUrl` can, and PAR-811 exists precisely so that never reaches a model's context —
+    // this is the branch most likely to fire for a token-bearing URL (the fetch failed, or the
+    // call is offline), and it was echoing the query string in full.
     return {
-      text: `${resolutionPrefix}${noDocStamp}\nCould not fetch docs for "${clipText(entry.name, MAX_STAMP_FIELD_CHARS)}" — all candidate URLs unreachable and nothing cached. Candidates tried:\n${entry.urls.map((u) => clipText(u, MAX_STAMP_FIELD_CHARS)).join("\n")}`,
+      text: `${resolutionPrefix}${noDocStamp}\n${attemptLine}\n${entry.urls.map((u) => clipText(stripStampQuery(u), MAX_STAMP_FIELD_CHARS)).join("\n")}`,
       isIndex: false,
       matched: 0,
       returnedFromFollowed: 0,
@@ -370,14 +428,16 @@ export async function getDocsDetailed(
   // explanation first (never truncating it) loses elaboration, not the fact.
   const staleBanner = doc.staleNote ? `> ${doc.staleNote}\n\n` : "";
   const prefix = staleBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length) ? staleBanner : "";
-  // A11 (PAR-724) — the version verdict, all-or-nothing like `staleBanner` above: either the
-  // fallback statement (a version was requested, none was matched — D-50, never silent) or the
-  // curated-entry-skip explanation, never truncated into a misleading partial sentence.
-  // `versionContext.matched === true` needs no banner here — that fact lives in `docStamp`'s own
-  // `version` field instead (`stampFacts` below), so the two never say the same thing twice.
-  const versionText = versionContext && !versionContext.matched ? (versionContext.note ?? versionFallbackNote(versionContext.requested)) : undefined;
-  const rawVersionBanner = versionText ? `${versionText}\n\n` : "";
-  const versionBanner = rawVersionBanner.length <= Math.max(0, budgetChars - resolutionPrefix.length - prefix.length) ? rawVersionBanner : "";
+  // A11 (PAR-724) — the version verdict text: either the fallback statement (a version was
+  // requested, none was matched — D-50, never silent) or the curated-entry-skip explanation.
+  // `versionContext.matched === true` needs no verdict here — that fact lives in `docStamp`'s
+  // own `version` field instead (`stampFacts` below), so the two never say the same thing
+  // twice. PAR-848 (Phase 3) — no longer independently droppable when it doesn't fit: priced
+  // together with the stamp by `requiredHeader` below, never truncated into a misleading
+  // partial sentence (unchanged from before this item), but "drop the verdict, keep the stamp"
+  // is no longer a legal outcome either — see `requiredHeader`'s own comment (retrieval.ts) for
+  // why both survive together or the call refuses.
+  const versionVerdict = versionContext && !versionContext.matched ? (versionContext.note ?? versionFallbackNote(versionContext.requested)) : undefined;
   // A18 (PAR-727): built once, reused by both the standing `docStamp` below and `thinMatch`'s
   // own re-fitted stamp further down — the same facts, just re-degraded around less room.
   // PAR-776 (D-74): `url` here is the URL the content actually came from (`doc.finalUrl`), not
@@ -392,7 +452,7 @@ export async function getDocsDetailed(
   // unhealthy verdict with no date would read as present-tense forever, even long after a fix.
   const doctorVerdict = readDoctorVerdicts().get(entry.name);
   const doctorUnhealthy = doctorVerdict && !doctorVerdict.healthy;
-  const stampFacts = {
+  const stampFacts: StampFacts = {
     url: doc.finalUrl,
     redirectedFrom: doc.finalUrl !== doc.url ? doc.url : undefined,
     fetchedAt: doc.fetchedAt,
@@ -402,13 +462,44 @@ export async function getDocsDetailed(
     doctorKind: doctorUnhealthy ? doctorVerdict.kind : undefined,
     doctorCheckedAt: doctorUnhealthy ? doctorVerdict.checkedAt : undefined,
   };
-  // A17 (PAR-726), code-reviewer round 1, B2 — `fitStampLine`, not `sourceStampLine` directly:
-  // the room actually available for the stamp is `budgetChars` minus whatever the one-time
-  // resolution note, the stale prefix and the version banner already spent, so a small budget
-  // degrades the stamp to a shorter COMPLETE line rather than leaving it to the final
-  // `clipToBudget` backstop to cut a field in half (measured pre-fix: `maxTokens: 14` rendered
-  // `fetched 2026-09-1` — a real, well-formed, WRONG date).
-  const docStamp = fitStampLine(stampFacts, Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - versionBanner.length));
+  // PAR-848/849 (Phase 3), amending D-50 — the mandatory reservation shared by the no-topic,
+  // no-match and success headers below (all three price the SAME room: whatever
+  // `resolutionPrefix`/`prefix` left of `budgetChars`). `thinMatch` reserves its own, smaller
+  // room around its note and calls `requiredHeader` again on its own terms — see its own
+  // closure below for why that path's priority order is different. Either the version verdict
+  // (when one is needed) and the stamp both fit, or this whole call refuses outright: see
+  // `requiredHeader`'s own comment (retrieval.ts) for why "drop one, keep the other" is no
+  // longer a legal outcome for either half.
+  const mandatory = requiredHeader(stampFacts, versionVerdict, Math.max(0, budgetChars - resolutionPrefix.length - prefix.length));
+  if (mandatory.refuse) {
+    // code-reviewer B1 (Phase 3, round 2) — the refusal is a short, fixed-shape diagnostic, the
+    // same class `noMatch` already is (see its own comment below): bounded by construction
+    // (a fixed template plus one small number), not content, and it fires ONLY at small
+    // `maxTokens` — exactly where `clipToBudget` bites hardest. Wrapping it in `clipToBudget`
+    // reintroduced PAR-848's own defect one line later: MEASURED, the refusal lost "Raise
+    // maxTokens, or omit version." (the only actionable content) below `maxTokens: 37` on a
+    // 28-char-URL fixture, and the "(roughly N or more)" figure below 27 — a partially-
+    // truncated refusal is exactly the "misstate the outcome" failure `requiredHeader`'s own
+    // comment already warns against for the version verdict. Exempt, like `noMatch`, not
+    // clipped.
+    return {
+      text: `${resolutionPrefix}${prefix}${budgetRefusalText(mandatory.minTokensNeeded, versionVerdict !== undefined)}`,
+      source,
+      contentHash,
+      isIndex,
+      matched: 0,
+      returnedFromFollowed: 0,
+      followed: [],
+      dropped: noDropped,
+      refused: true,
+    };
+  }
+  // A17 (PAR-726) — the version verdict (if any) and the fitted stamp, ready to prepend: the
+  // room actually available was whatever the one-time resolution note and the stale prefix
+  // already left, so a small budget degrades the stamp to a shorter COMPLETE line rather than
+  // leaving it to the final `clipToBudget` backstop to cut a field in half (measured pre-fix:
+  // `maxTokens: 14` rendered `fetched 2026-09-1` — a real, well-formed, WRONG date).
+  const docStamp = mandatory.text;
 
   if (!topic) {
     const headings = doc.content.split("\n").filter((l) => /^#{1,3}\s/.test(l)).slice(0, 60);
@@ -457,18 +548,44 @@ export async function getDocsDetailed(
       }
       toc = next;
     }
-    const header = `${resolutionPrefix}${prefix}${versionBanner}${docStamp}\n\n${toc ? `Table of contents:\n${toc}\n\n---\n\n` : ""}`;
+    // security-architect B-1 (Phase 3, round 2) — the TOC's heading lines come straight from
+    // `doc.content` (the loop above), exactly as untrusted as the document head below them, but
+    // used to be folded into `header` UNFENCED — up to `tocBudget` (half of `budgetChars`, so up
+    // to 8000 chars at the default `maxTokens: 4000`) of retrieved text rendered between the
+    // real `Source:` line and the fenced/labelled region, contradicting this file's own "every
+    // response wherever it appears" claim (`src/server.ts`, `README.md`) for the one path that
+    // still violated it. Fixed by treating the TOC and the document head as ONE retrieved-text
+    // region: `header` now carries only the mandatory stamp (never document-derived), and the
+    // "Table of contents:" label plus the TOC plus the document head are built as a single
+    // string and wrapped ONCE by `fitRetrievedText` below — the same atomic guarantee PAR-850
+    // established for the sections-mode body. "Table of contents:" is VibeCTX's own literal
+    // text, not document-derived, but rides inside the SAME fence as the headings it introduces
+    // rather than getting a fence of its own — D-30 is not affected either way (only retrieved
+    // text is ever cleaned/uncleaned; a literal label is neither).
+    const header = `${resolutionPrefix}${prefix}${docStamp}\n\n`;
     // A6 (PAR-719) — the OVERSIGHT FINDING this item exists to close: `head` used to be
     // computed as `doc.content.slice(0, budget * 4)` — the ENTIRE allowance — and the stale
     // prefix, `Source:` line and table of contents were then prepended ON TOP of that, so the
     // rendered response could run to kilobytes over budget on an ordinary call. The header is
-    // priced FIRST now; `head` gets only what is left. `Math.max(0, ...)`, not a floor that lets
-    // the header itself grow unbounded — D-29's rule applies here too: the cap always wins, so
-    // the final clip below is the backstop for the case where even the header alone is over
-    // budget (a very long table of contents), which `head` alone being empty cannot fix.
-    const head = doc.content.slice(0, Math.max(0, budgetChars - header.length));
+    // priced FIRST now; the retrieved-text region gets only what is left. `Math.max(0, ...)`,
+    // not a floor that lets the header itself grow unbounded — D-29's rule applies here too: the
+    // cap always wins, so the final clip below is the backstop for the case where even the
+    // header alone is over budget, which the retrieved-text region alone being empty cannot fix.
+    //
+    // PAR-850 (Phase 3) — `doc.content` (and, per the security-architect finding above, the TOC
+    // built from it) is retrieved, untrusted document text (D-30: never cleaned or filtered).
+    // `fitRetrievedText` (retrieval.ts) wraps the whole region in the same fence technique
+    // `mode: "snippets"` already uses for code blocks, preceded by a VibeCTX-authored label, so
+    // a forged `Source:` line or an injected instruction anywhere in it — the TOC's own heading
+    // text included — is structurally, visibly INSIDE the delimited region rather than sitting
+    // in the same undelimited stream as the response's own `Source:` line above it — and
+    // guarantees the label+fence never appear without room for at least one real character of
+    // body, so the boundary itself cannot be the thing a tight budget silently drops (that would
+    // be PAR-848's defect in a new place).
+    const retrievedText = toc ? `Table of contents:\n${toc}\n\n---\n\n${doc.content}` : doc.content;
+    const body = fitRetrievedText(retrievedText, Math.max(0, budgetChars - header.length));
     return {
-      text: clipToBudget(`${header}${head}`, budgetChars),
+      text: clipToBudget(`${header}${body}`, budgetChars),
       source,
       contentHash,
       isIndex,
@@ -613,7 +730,7 @@ export async function getDocsDetailed(
     // everywhere else, lowercase inline fragment only here). A18 (PAR-727): the sentence
     // itself is now `retrieval.ts`'s `noMatchNote` — the one grammar shared by both modes,
     // cleaning/clipping `topic`/`entry.name` centrally instead of this file doing it inline.
-    text: `${resolutionPrefix}${prefix}${versionBanner}${docStamp}\n${noMatchNote(what, topic ?? "", entry.name)}${
+    text: `${resolutionPrefix}${prefix}${docStamp}\n${noMatchNote(what, topic ?? "", entry.name)}${
       noteBlock ? `${noteBlock}\n` : " "
     }${advice}`,
     contentHash,
@@ -638,11 +755,13 @@ export async function getDocsDetailed(
   const corpusSections = [...primarySections, ...followedSections];
 
   // A6 (PAR-719) — the header both topic-given render paths share, priced exactly: the stale
-  // prefix, the `Source:` line and the (now capped) note block. `assemble`/`assembleSnippets`
-  // price their own join separators AND this reserved amount, so the combined text — header
-  // plus body — fits `budget*4` by construction; `clipToBudget` below is the same D-29 backstop
-  // the no-topic path uses, for the case a maximal header alone is over budget.
-  const header = `${resolutionPrefix}${prefix}${versionBanner}${docStamp}${noteBlock}\n\n`;
+  // prefix, the `Source:` line (and, when one was needed, the version verdict — both now the
+  // one `docStamp` value `requiredHeader` produced above) and the (now capped) note block.
+  // `assemble`/`assembleSnippets` price their own join separators AND this reserved amount, so
+  // the combined text — header plus body — fits `budget*4` by construction; `clipToBudget`
+  // below is the same D-29 backstop the no-topic path uses, for the case a maximal header alone
+  // is over budget.
+  const header = `${resolutionPrefix}${prefix}${docStamp}${noteBlock}\n\n`;
 
   // A18 (PAR-727) — the thin-match case: real matches exist (`matchedCount > 0`) but the
   // budget left `assemble`/`assembleSnippets` NOTHING to render once the (full-size) header
@@ -651,41 +770,47 @@ export async function getDocsDetailed(
   // backstop would swallow any body text at that same point regardless of what it contained.
   // A `thinMatchNote` appended to the SAME oversized header would therefore never be visible:
   // dead code, not a fix. So this path builds its OWN, smaller header instead — the note's own
-  // length is reserved FIRST, `docStamp` re-degrades (via `fitStampLine`) around what is left,
-  // and `noteBlock` (index-follow accounting) is dropped entirely: D-43's "the answer outranks
-  // the accounting" applies here too — when there is no room for the real answer, the
-  // EXPLANATION of why outranks the follow/skip bookkeeping that no longer matters as much.
+  // length is reserved FIRST, and the mandatory version-verdict-plus-stamp pair re-fits (via
+  // `requiredHeader`, the SAME function the shared header above calls, just with less room)
+  // around what is left: D-43's "the answer outranks the accounting" applies here too — when
+  // there is no room for the real answer, the EXPLANATION of why outranks the follow/skip
+  // bookkeeping (`noteBlock`, dropped entirely on this path) that no longer matters as much.
   //
-  // code-reviewer round 1, S1 — the first version of this stopped there, and MEASURED, it left
-  // the note itself invisible in the large majority of budgets that actually reach `thinMatch`
-  // (94.6% of a swept range, for a document with a longish URL): `fitStampLine` has a floor it
-  // cannot degrade below (`Source: <url>` — up to ~308 chars once the url itself is clipped),
-  // so whenever that floor alone reaches the room reserved for it, the note that was supposed
-  // to get PRIORITY got silently sliced off by the plain head-truncating `clipToBudget`
-  // instead. Fixed by making the priority real, not aspirational: the stamp is included ONLY
-  // when even its shortest complete form fits beside the note; otherwise it is dropped
-  // entirely, never rendered as a partial (mid-URL) fragment — the same lesson A17's B2 finding
-  // established for the fetched-at date, applied here to the stamp as a whole. D-43's ordering
-  // is now genuinely: note first, stamp only if there's room left for the WHOLE thing.
-  // A11/PAR-724 (code-reviewer round 1, should-fix #2): `versionBanner` is deliberately NOT
-  // included here, the same D-43 "answer outranks the accounting" call this closure already
-  // makes for `noteBlock` — the thin-match note is the one thing worth keeping at this budget;
-  // a version-fallback sentence competes with it for the same scarce room `thinMatchNote`
-  // itself needs. Accepted, narrow gap, stated plainly rather than left to look mitigated: a
-  // versioned request that fell back to latest and lands on THIS path reports the fallback
-  // nowhere — `versionBanner` is the only place that states it, and `stamp` below carries no
-  // version field either in that exact case (`stampFacts.version` is unset whenever
-  // `versionContext.matched` is false, which is the only time `versionBanner` would have been
-  // non-empty). The response is still honest (no false claim is made), just silent on this one
-  // fact at this one budget size — a smaller, accepted instance of the general "the cap always
-  // wins" rule this file lives by everywhere else.
+  // PAR-848 (Phase 3) — this closure used to leave TWO gaps here, both closed now:
+  //   1. the stamp itself was silently DROPPED (not degraded) once even its shortest form
+  //      didn't fit beside the note (code-reviewer, A18 round 1, S1's own fix, applied when
+  //      `thinMatch` was first built) — that silent drop is no longer legal for the mandatory
+  //      pair; `requiredHeader` returning `refuse: true` here means this SPECIFIC response
+  //      refuses instead, per the same rule the shared header above already enforces.
+  //   2. `versionBanner` was deliberately EXCLUDED from this closure altogether (an in-code
+  //      comment here used to name this an accepted gap: a versioned request that fell back to
+  //      latest and landed on this path reported the fallback nowhere). PAR-848's own
+  //      Done-when — "the thin-match path carries the same guarantee as the match path" —
+  //      requires exactly this to stop being accepted; the version verdict is now part of the
+  //      SAME mandatory pair the note competes with for room, not silently omitted from the
+  //      competition.
   const thinMatch = (what: string, matchedCount: number): GetDocsOutcome => {
     const note = thinMatchNote(what, matchedCount);
-    const stampRoom = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);
-    const stamp = fitStampLine(stampFacts, stampRoom);
-    const head = stamp.length <= stampRoom ? `${stamp}\n` : "";
+    const room = Math.max(0, budgetChars - resolutionPrefix.length - prefix.length - note.length - 1);
+    const thinMandatory = requiredHeader(stampFacts, versionVerdict, room);
+    if (thinMandatory.refuse) {
+      // code-reviewer B1 (Phase 3, round 2) — same exemption as the early refusal above, same
+      // reason: a bounded, fixed-shape diagnostic should not be handed to `clipToBudget`, which
+      // exists to cap CONTENT, not to truncate the one honest sentence a small budget gets.
+      return {
+        text: `${resolutionPrefix}${prefix}${budgetRefusalText(thinMandatory.minTokensNeeded, versionVerdict !== undefined)}`,
+        source,
+        contentHash,
+        isIndex,
+        matched: matchedCount,
+        returnedFromFollowed: 0,
+        followed,
+        dropped,
+        refused: true,
+      };
+    }
     return {
-      text: clipToBudget(`${resolutionPrefix}${prefix}${head}${note}`, budgetChars),
+      text: clipToBudget(`${resolutionPrefix}${prefix}${thinMandatory.text}\n${note}`, budgetChars),
       source,
       contentHash,
       isIndex,
@@ -723,8 +848,21 @@ export async function getDocsDetailed(
   }
   const assembled = assemble(ranked, budget, header.length);
   if (assembled.length === 0) return thinMatch("sections", ranked.length);
+  // PAR-850 (Phase 3) — `assembled` is retrieved, untrusted document text (D-30: never cleaned
+  // or filtered) — matched sections rendered verbatim, the exact surface F-5's reproduction
+  // (a section body containing `IGNORE ALL PRIOR INSTRUCTIONS` and a forged `Source:` line)
+  // targeted. Wrapped once, as a whole, in `fitRetrievedText`'s label+fence — not per section —
+  // since every matched section is one retrieved-text region as far as a reader needs to know.
+  // `fitRetrievedText` guarantees the wrap never appears without room for real body content; if
+  // there genuinely is none left once the fence/label are priced in (a real, if narrow, case:
+  // this file's own header floor plus the fence/label floor can exceed a small `maxTokens` even
+  // though `assemble` alone found room for a sliver), that is EXACTLY the thin-match condition —
+  // real matches exist, nothing fits — so it falls through to the same `thinMatch` path rather
+  // than silently rendering an empty label+fence pair or, worse, unfenced content.
+  const wrapped = fitRetrievedText(assembled, Math.max(0, budgetChars - header.length));
+  if (wrapped.length === 0) return thinMatch("sections", ranked.length);
   return {
-    text: clipToBudget(`${header}${assembled}`, budgetChars),
+    text: clipToBudget(`${header}${wrapped}`, budgetChars),
     source,
     contentHash,
     isIndex,
